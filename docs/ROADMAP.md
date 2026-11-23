@@ -4,7 +4,7 @@
 1. **Backend foundation** — MOSTLY DONE (FastAPI, typed config, auth, Postgres + Alembic, CI file with Postgres service — CI never executed; Docker dev stack pending in M9): FastAPI, typed config, Postgres, Alembic, Docker development stack, health checks, pytest, lint/typecheck, CI.
 2. **Domain and sync** — DONE for iCal + persistence (PostgreSQL schema, Alembic, idempotent safe ICS sync, audit, sync history); availability rules and study-task API pending (M6/M7): tasks, soft/hard target dates, ICS fixed events, availability, idempotent imports, timezone correctness.
 3. **Scheduler** — DONE (core CP-SAT planner + validator, see docs/SCHEDULER.md; stability term and travel pending in M4/M7). OR-Tools hard/soft constraints, 90-min preferences, subject alternation, remaining work, versioning and simulations.
-4. **Transport**: Belgian feed ingestion, MOTIS integration, walking and transfer buffers, GPS tracker, future origins, route validation and fallback.
+4. **Transport** — CODE DONE, REAL-SERVICE VALIDATION PENDING (see docs/TRANSPORT.md; MOTIS only tested with hand-written contract fixtures). Belgian feed ingestion, MOTIS integration, walking and transfer buffers, GPS tracker, future origins, route validation and fallback.
 5. **Sports**: narrowly scoped authorized email ingestion, flexible training, fixed races.
 6. **Home Assistant custom integration**: config flow, calendar, todo, sensors, services, conversation, notifications, approvals; HACS distribution validation.
 7. **Continuous operations**: workers, live disruption alerts, approval workflow, monitoring, backups and failure recovery.

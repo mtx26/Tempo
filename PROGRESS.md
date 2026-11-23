@@ -14,12 +14,16 @@
   safe idempotent ICS sync repository with audit (D017, D018). Reviewed by agent `security`; findings fixed with
   tests (false deletions, suspect feeds, concurrency, audit detail, overlong UIDs). Validated against a REAL local
   PostgreSQL 16 (pgserver, D016); production PostgreSQL on Swarm not tested.
+- Milestone 4 (transport): CODE DONE — places/aliases, phone position freshness, origin inference, MOTIS
+  `/api/v6/plan` client (httpx2), mandatory travel blocks, travel-aware study windows, end-to-end with the
+  planner. Reviewed by agent `transport` (9 findings fixed). **MOTIS NOT validated against a real server.**
 - Repository split (D010): `../tempo-homeassistant` created locally (commit `c485e2c`, scaffold only, OWNER
   placeholders, not published). `homeassistant/` removed from this repo.
-- Deployment: none. Local commits only: `43a9091` (phase 0 + M1 + ICS), `3e51017` (M3), M2b commit (see git log).
+- Deployment: none. Local commits only: `43a9091` (phase 0 + M1 + ICS), `3e51017` (M3), `220cda8` (M2b), M4 commit (see git log).
 
 ## Quality gates (last local run, backend/)
-- Last full run (M2b): `TEMPO_TEST_DATABASE_URL=… uv run pytest -q --cov=tempo`: 106 passed (15 integration on
+- Last full run (M4): 170 passed (15 integration on real PostgreSQL 16), coverage 98 %; ruff, mypy strict, pip-audit clean.
+- Previous run (M2b): `TEMPO_TEST_DATABASE_URL=… uv run pytest -q --cov=tempo`: 106 passed (15 integration on
   real PostgreSQL 16), coverage 98 %; ruff + `mypy --strict src tests` pass; pip-audit: no known vulnerabilities.
 - Without `TEMPO_TEST_DATABASE_URL`, the 15 integration tests are reported SKIPPED (explicit reason).
 - `uv run ruff check .` / `ruff format --check .`: pass.
@@ -27,9 +31,9 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. M4 travel: domain (places, location aliases, phone position freshness, origin inference from event chain),
-   RoutingProvider protocol + MOTIS `/api/v6/plan` client built from the OpenAPI contract (mocked HTTP only —
-   NOT validated against a real MOTIS), travel blocks as busy intervals for the scheduler, honest UNKNOWN status.
+1. Local MOTIS smoke test with Docker Desktop (available since 2026-11-23): MOTIS v2.11.x linux binary,
+   STIB + SNCB GTFS (anonymous BMC downloads, CC BY 4.0), small OSM extract; check the client against real
+   responses; record findings in docs/TRANSPORT.md. Disk: 31 GB free — keep data under ~2 GB.
 2. M6 HA integration in `../tempo-homeassistant`; M5 training sync; M7 worker/approvals; M9 deployment docs.
 
 ## Session log

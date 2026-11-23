@@ -1,0 +1,70 @@
+{
+  "_comment": "HAND-WRITTEN from motis openapi.yaml (/api/v6/plan) on 2026-11-23. NOT captured from a real MOTIS server.",
+  "requestParameters": {},
+  "debugOutput": {},
+  "from": {"name": "START", "lat": 50.668, "lon": 4.612},
+  "to": {"name": "END", "lat": 50.85, "lon": 4.35},
+  "direct": [
+    {
+      "id": "direct-walk",
+      "duration": 5400,
+      "startTime": "2026-12-01T06:00:00Z",
+      "endTime": "2026-12-01T07:30:00Z",
+      "transfers": 0,
+      "legs": [
+        {"mode": "WALK", "from": {"name": "START", "lat": 50.668, "lon": 4.612},
+         "to": {"name": "END", "lat": 50.85, "lon": 4.35}, "duration": 5400,
+         "startTime": "2026-12-01T06:00:00Z", "endTime": "2026-12-01T07:30:00Z",
+         "scheduledStartTime": "2026-12-01T06:00:00Z", "scheduledEndTime": "2026-12-01T07:30:00Z",
+         "realTime": false, "scheduled": false, "distance": 6200.0,
+         "legGeometry": {"points": "", "precision": 6, "length": 0}}
+      ]
+    }
+  ],
+  "itineraries": [
+    {
+      "id": "it-1",
+      "duration": 2700,
+      "startTime": "2026-12-01T06:40:00Z",
+      "endTime": "2026-12-01T07:25:00Z",
+      "transfers": 1,
+      "legs": [
+        {"mode": "WALK", "from": {"name": "START", "lat": 50.668, "lon": 4.612},
+         "to": {"name": "Louvain-la-Neuve Gare", "lat": 50.669, "lon": 4.615, "stopId": "nmbs_1"},
+         "duration": 300, "startTime": "2026-12-01T06:40:00Z", "endTime": "2026-12-01T06:45:00Z",
+         "scheduledStartTime": "2026-12-01T06:40:00Z", "scheduledEndTime": "2026-12-01T06:45:00Z",
+         "realTime": false, "scheduled": false, "distance": 350.0,
+         "legGeometry": {"points": "", "precision": 6, "length": 0}},
+        {"mode": "REGIONAL_RAIL", "from": {"name": "Louvain-la-Neuve Gare", "lat": 50.669, "lon": 4.615},
+         "to": {"name": "Bruxelles-Central", "lat": 50.845, "lon": 4.357},
+         "duration": 1920, "startTime": "2026-12-01T06:47:00Z", "endTime": "2026-12-01T07:19:00Z",
+         "scheduledStartTime": "2026-12-01T06:45:00Z", "scheduledEndTime": "2026-12-01T07:17:00Z",
+         "realTime": true, "scheduled": true, "agencyName": "SNCB", "routeShortName": "S8",
+         "headsign": "Bruxelles-Midi", "legGeometry": {"points": "", "precision": 6, "length": 0}},
+        {"mode": "WALK", "from": {"name": "Bruxelles-Central", "lat": 50.845, "lon": 4.357},
+         "to": {"name": "END", "lat": 50.85, "lon": 4.35}, "duration": 360,
+         "startTime": "2026-12-01T07:19:00Z", "endTime": "2026-12-01T07:25:00Z",
+         "scheduledStartTime": "2026-12-01T07:17:00Z", "scheduledEndTime": "2026-12-01T07:23:00Z",
+         "realTime": false, "scheduled": false, "distance": 420.0,
+         "legGeometry": {"points": "", "precision": 6, "length": 0}}
+      ]
+    },
+    {
+      "id": "it-cancelled",
+      "duration": 2400,
+      "startTime": "2026-12-01T06:50:00Z",
+      "endTime": "2026-12-01T07:30:00Z",
+      "transfers": 0,
+      "legs": [
+        {"mode": "BUS", "from": {"name": "START", "lat": 50.668, "lon": 4.612},
+         "to": {"name": "END", "lat": 50.85, "lon": 4.35}, "duration": 2400,
+         "startTime": "2026-12-01T06:50:00Z", "endTime": "2026-12-01T07:30:00Z",
+         "scheduledStartTime": "2026-12-01T06:50:00Z", "scheduledEndTime": "2026-12-01T07:30:00Z",
+         "realTime": true, "scheduled": true, "cancelled": true, "agencyName": "TEC",
+         "routeShortName": "E", "legGeometry": {"points": "", "precision": 6, "length": 0}}
+      ]
+    }
+  ],
+  "previousPageCursor": "",
+  "nextPageCursor": ""
+}
