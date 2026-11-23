@@ -71,7 +71,11 @@ def server(database_url: str, engine: Engine) -> Iterator[str]:
         conn.execute(text(f"TRUNCATE {tables} CASCADE"))
 
 
-def test_every_client_call_matches_the_backend(server: str) -> None:
+ENGINE: list[Engine] = []
+
+
+def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> None:
+    ENGINE[:] = [engine]
     api_module = load_client_module()
     import aiohttp
 
@@ -141,6 +145,36 @@ def test_every_client_call_matches_the_backend(server: str) -> None:
             assert isinstance(await client.notifications(), list)
             answer = await client.interpret("replanifie")
             assert answer["applied"] and answer["action"] == "replan"
+            question = await client.interpret("combien d'heures d'étude il me reste ?")
+            assert question["action"] == "answer" and "1 h 30" in question["summary"]
+            # A coach-plan session without duration is confirmed through the client.
+            from zoneinfo import ZoneInfo
+
+            from sqlalchemy.orm import Session as OrmSession
+
+            from tempo.sync.coach_import import apply_weekly_plan
+            from tempo.sync.coach_plan import parse_plan_docx
+            from tests.docx_fixtures import plan_docx
+
+            monday = (datetime.now(UTC) + timedelta(days=7 - datetime.now(UTC).weekday())).date()
+            title = f"Semaine du {monday.day:02d}/{monday.month:02d} au "
+            sunday = monday + timedelta(days=6)
+            title += f"{sunday.day:02d}/{sunday.month:02d}/{sunday.year}"
+            with OrmSession(ENGINE[0]) as orm:
+                apply_weekly_plan(
+                    orm,
+                    parse_plan_docx(plan_docx(title=title), monday - timedelta(days=1)),
+                    tz=ZoneInfo("Europe/Brussels"),
+                    today=monday - timedelta(days=1),
+                    origin="contract",
+                )
+                orm.commit()
+            pending = [a for a in await client.activities() if a["status"] == "to_confirm"]
+            assert len(pending) == 1
+            confirmed = await client.confirm_activity(pending[0]["id"], {"duration_minutes": 50})
+            assert confirmed["status"] == "active" and confirmed["duration_minutes"] == 50
+            with pytest.raises(api_module.TempoConflictError):
+                await client.confirm_activity(pending[0]["id"], {"duration_minutes": 50})
             with pytest.raises(api_module.TempoNotFoundError):
                 await client.decide_proposal("00000000-0000-0000-0000-000000000000", True)
             with pytest.raises(api_module.TempoConflictError):
