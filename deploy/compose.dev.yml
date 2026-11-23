@@ -49,6 +49,19 @@ services:
       interval: 15s
     networks: [backend, front]
 
+  worker:
+    image: tempo-backend:dev
+    command: ["python", "-m", "tempo.worker"]
+    environment:
+      TEMPO_MOTIS_URL: http://routing:8080
+    # University timetable: add the secret tempo_ics_url (file ./secrets/tempo_ics_url).
+    secrets: [tempo_database_url]
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    networks: [backend, egress]
+
   rt-relay:
     image: tempo-backend:dev
     command: ["python", "-m", "tempo.transport.rt_relay"]
