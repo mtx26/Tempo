@@ -1,4 +1,4 @@
-"""Planning service on a REAL PostgreSQL: load inputs, persist versions, proposals, notifications."""
+"""Planning service on a REAL PostgreSQL: inputs, versions, proposals, notifications."""
 
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
