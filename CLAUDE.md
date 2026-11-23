@@ -27,3 +27,19 @@ Build Tempo from scratch: an autonomous, self-hosted personal planner whose ONLY
 
 ## Project tooling
 Use specialized `.claude/agents/` and `.claude/skills/` when useful. If Superpowers is installed, use its brainstorming, planning, test-driven development and systematic debugging workflows; do not assume plugin availability. Read installed documentation rather than inventing commands.
+
+## Autonomous development policy
+
+- Always communicate with the user in French.
+- Continue through approved roadmap milestones without waiting for further instructions.
+- Run tests, Ruff, mypy strict, and relevant security checks before completing a milestone.
+- Update PROGRESS.md and the roadmap after each milestone.
+- Automatically create a local Git commit for each validated milestone.
+- Automatically start the next unfinished milestone.
+- Do not stop merely to provide a progress summary.
+- Local git init, branching, staging, and commits are authorized.
+- Never push, publish, deploy, or modify production without explicit approval.
+- Never commit secrets or sensitive personal data.
+- When an external dependency is unavailable, document the limitation and continue independent work.
+- Stop only for genuine blockers, required user decisions, safety concerns, or execution limits.
+- Before any interruption, persist progress and the exact next steps.

@@ -14,3 +14,7 @@ secrets/
 *.pem
 *.key
 .DS_Store
+.coverage
+htmlcov/
+dist/
+*.secret
