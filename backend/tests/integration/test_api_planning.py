@@ -308,3 +308,29 @@ def test_locking_the_same_block_twice_creates_one_lock(api: TestClient, engine: 
         assert (
             len(list(s.scalars(select(StudyBlockRow).where(StudyBlockRow.locked.is_(True))))) == 1
         )
+
+
+def test_conversational_questions_are_answered_from_stored_data(
+    api: TestClient, engine: Engine
+) -> None:
+    configure(api)
+    seed_events(engine)
+    api.post(
+        "/v1/tasks",
+        json={"subject": "maths", "effort_minutes": 150, "target_date": "2026-12-11"},
+        headers=AUTH,
+    )
+    run_replan(engine)
+
+    def ask(text: str) -> dict[str, object]:
+        response = api.post("/v1/interpret", json={"text": text}, headers=AUTH)
+        assert response.status_code == 200
+        result: dict[str, object] = response.json()
+        assert result["action"] == "answer" and result["applied"] is False
+        return result
+
+    agenda = str(ask("Qu'est-ce que j'ai le 07/12/2026 ?")["summary"])
+    assert agenda.startswith("Le 07/12 :") and "cours : Analyse" in agenda and "trajet" in agenda
+    assert "Rien de prévu" in str(ask("programme du 25/12/2026")["summary"])
+    assert "2 h 30" in str(ask("combien d'heures d'étude il me reste ?")["summary"])
+    assert str(ask("prochain départ ?")["summary"])

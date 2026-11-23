@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from tempo.ai.apply import apply_result, from_extraction, known_places, result_from_json
 from tempo.ai.llm import Interpreter
+from tempo.ai.questions import answer, parse_question
 from tempo.ai.text_parser import parse_text
 from tempo.api.ha import SessionDep
 from tempo.api.planning import PROPOSAL_HANDLERS
@@ -25,7 +26,8 @@ router = APIRouter(prefix="/v1")
 EXAMPLES = (
     "Exemples : « ajoute 5h de maths pour vendredi », « ajoute 90 min d'analyse avant le "
     "18/12 strict », « mercredi 16/12 18h30 : fractionné 60 min @club - 6 x 800 m », "
-    "« course samedi 19/12 10:00 : 10 km 60 min @namur », « replanifie »."
+    "« course samedi 19/12 10:00 : 10 km 60 min @namur », « replanifie », « qu'est-ce que "
+    "j'ai demain ? », « prochain départ ? », « combien d'heures d'étude il me reste ? »."
 )
 
 
@@ -38,7 +40,17 @@ class InterpretIn(BaseModel):
 def interpret(body: InterpretIn, request: Request, session: SessionDep) -> dict[str, Any]:
     tz: ZoneInfo = request.app.state.timezone
     interpreter: Interpreter | None = getattr(request.app.state, "interpreter", None)
-    today = datetime.now(UTC).astimezone(tz).date()
+    now = datetime.now(UTC)
+    today = now.astimezone(tz).date()
+    question = parse_question(body.text, today)
+    if question is not None:
+        return {
+            "understood": True,
+            "action": "answer",
+            "summary": answer(session, question, now, tz),
+            "applied": False,
+            "used_llm": False,
+        }
     result = parse_text(body.text, today)
     rejected: list[str] = []
     used_llm = False
