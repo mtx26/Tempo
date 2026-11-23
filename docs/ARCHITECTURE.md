@@ -14,7 +14,7 @@ Phone/Desktop â†’ existing Home Assistant (single UI, existing remote access) â†
 ## Sources
 - HA configured phone tracker for actual position, freshness and accuracy checks; future origin derives from preceding event or explicit future location when GPS alone is unsuitable.
 - University ICS/iCal for FIXED timetable; stable IDs, cancellations, time zones, sync history.
-- Only explicitly authorized sender/thread for sport emails; content preserved.
+- Only explicitly authorized sender/thread for sport emails; content preserved. The coach's plan is a weekly `.docx` table attached to a short e-mail (subject `plan`); parsing of the attachment, recovery/sequence constraints and week-level de-duplication are specified in `docs/TRAINING_EMAILS.md` (M5b, not implemented). The authorised sender address is still to be configured.
 - Belgian Mobility Open Data: 4 GTFS static + 3 TripUpdates + 3 Alerts feeds, verified 2026-11-23 (docs/TRANSPORT.md "Belgian feeds"). STIB has no realtime (static only; optional waiting-times adapter later).
 - OSM for pedestrian routing; MOTIS as candidate, OpenTripPlanner fallback after benchmark.
 

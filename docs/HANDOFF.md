@@ -109,7 +109,7 @@ from `routing/README.md`, otherwise `test_motis_live.py` fails (correct signal, 
 - Real-time re-checks (planning time, evening before, near departure), disruption alerts and multiple
   departure reminders → M7.
 
-### M5 training sync (NOT STARTED)
+### M5 training sync — M5a done, M5b specified (docs/TRAINING_EMAILS.md, real coach format = .docx attachment; NOT implemented; sender address pending)
 - Narrow, explicitly authorized email ingestion (specific sender/thread only, never whole mailbox) —
   needs the user's authorization and credentials strategy first.
 - Training = flexible (day/time movable, prescribed content/duration kept); races = fixed.

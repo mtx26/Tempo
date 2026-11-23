@@ -93,6 +93,8 @@ unclean stop, postgres may still come up on the printed port — check `.pgdata/
   and 401 rate limiting when the server entrypoint is written, token rotation with two valid tokens.
 
 ## Blockers / decisions requiring user
+- Training e-mails (M5b, docs/TRAINING_EMAILS.md): exact authorised sender address of the coach
+  (Jean-Charles Engster) to configure; IMAP access; recovery rules; an anonymised `.docx` sample.
 - D010: HACS repository layout (dedicated public integration repo vs. public monorepo).
 - Create a free Belgian Mobility developer account (Standard tier); key → Docker secret
   `tempo_relay_bmc_partner_key`. Then run `TEMPO_TEST_BMC_KEY=... TEMPO_TEST_PORTAL_LIVE=1 pytest

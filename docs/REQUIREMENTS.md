@@ -3,7 +3,7 @@
 ## Fixed versus movable
 1. University classes imported from iCal are FIXED source events. Source changes are synchronized; do not silently move other protected commitments.
 2. User-defined personal STUDY work is FLEXIBLE: user enters subject, number of hours and desired completion date, potentially far in the future. **Default target date is soft** ("if possible"); allow explicit hard deadline. Study blocks can be created, moved and optimized automatically, including previously generated study blocks, unless explicitly locked or already underway.
-3. Training sessions from specifically authorized emails are FLEXIBLE (day/time can move; prescribed content and duration remain). Races and competitions are FIXED.
+3. Training sessions from specifically authorized emails are FLEXIBLE (day/time can move; prescribed content and duration remain). Races and competitions are FIXED. The coach's weekly plan arrives as a `.docx` attachment (weekly table, Monday-Sunday columns); suggested weekdays are not mandatory, recovery and session order must be respected, missing durations are never invented, updated plans must not create duplicates. Full specification: `docs/TRAINING_EMAILS.md`.
 4. User-configured HA availability windows constrain all planning; honor fixed appointments and existing commitments.
 5. Mandatory travel blocks connect locations for events, including walk, wait, transfers, buffers, and return when relevant. No impossible teleportation or overlaps.
 
