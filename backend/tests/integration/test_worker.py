@@ -381,3 +381,86 @@ def test_dst_ambiguous_time_is_stored_as_the_first_instant(sessions: sessionmake
         warnings = [n.message for n in s.scalars(select(NotificationRow))]
     assert event.start_at.astimezone(UTC) == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
     assert any("ambiguous" in m for m in warnings)
+
+
+class StibRouting:
+    """Routing that boards STIB line 59 at stop 3168 (real snapshot fixture)."""
+
+    def plan(self, origin, destination, time, *, arrive_by):  # type: ignore[no-untyped-def]
+        from tempo.transport.routing import Journey, Leg
+
+        start = (time - timedelta(minutes=30)) if arrive_by else time
+        leg = Leg(
+            "BUS",
+            "Arrêt",
+            "Campus",
+            start,
+            start + timedelta(minutes=30),
+            start,
+            start + timedelta(minutes=30),
+            realtime=False,
+            line="59",
+            agency="STIB",
+            origin_stop_id="stib_3168",
+        )
+        return [Journey((leg,), start, start + timedelta(minutes=30), 0, "test")]
+
+
+class FixtureStib:
+    def __init__(self) -> None:
+        import json
+        from pathlib import Path
+
+        from tempo.transport.stib import (
+            StibSnapshot,
+            parse_travellers_information,
+            parse_waiting_times,
+        )
+
+        base = Path(__file__).parents[1] / "fixtures" / "stib"
+        self._snapshot = StibSnapshot(
+            parse_waiting_times(json.loads((base / "waiting_times.json").read_text("utf-8"))),
+            parse_travellers_information(
+                json.loads((base / "travellers_information.json").read_text("utf-8"))
+            ),
+        )
+        self.calls = 0
+
+    def snapshot(self):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        return self._snapshot
+
+
+def test_departure_check_adds_official_stib_realtime_notes(sessions: sessionmaker[Session]) -> None:
+    configure(sessions)
+    ics_sync(sessions, FEED, NOW, TZ)
+    replan_job(sessions, FakeRouting(), NOW, TZ)
+    now = datetime(2026, 11, 23, 23, 0, tzinfo=TZ).astimezone(UTC)
+    with sessions() as s:
+        s.add(
+            PhonePositionRow(
+                entity_id="device_tracker.phone",
+                latitude=50.668,
+                longitude=4.612,
+                accuracy_m=15,
+                observed_at=now,
+                received_at=now,
+            )
+        )
+        version = s.scalars(select(ScheduleVersion).where(ScheduleVersion.state == "active")).one()
+        trip = next(t for t in version.summary["travel"] if t["destination"] == "campus")
+        shift = datetime.fromisoformat(trip["end"]) - (now + timedelta(minutes=50))
+        for t in version.summary["travel"]:
+            t["start"] = (datetime.fromisoformat(t["start"]) - shift).isoformat()
+            t["end"] = (datetime.fromisoformat(t["end"]) - shift).isoformat()
+            t["departure"] = None
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(version, "summary")
+        s.commit()
+    stib = FixtureStib()
+    departure_job(sessions, StibRouting(), now, stib)  # type: ignore[arg-type]
+    with sessions() as s:
+        state = get_setting(s, "departure_check")
+    assert stib.calls == 1, state
+    assert any("STIB temps réel : ligne 59" in w for w in state["warnings"])

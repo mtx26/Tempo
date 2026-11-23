@@ -1,0 +1,32 @@
+{
+ "results": [
+  {
+   "pointid": "5022",
+   "lineid": "92",
+   "passingtimes": "[{\"destination\":{\"fr\":\"FORT-JACO\",\"nl\":\"FORT-JACO\"},\"expectedArrivalTime\":\"2026-11-23T23:30:51.024+01:00\",\"lineId\":\"92\"},{\"destination\":{\"fr\":\"FORT-JACO\",\"nl\":\"FORT-JACO\"},\"expectedArrivalTime\":\"2026-11-23T23:42:51.024+01:00\",\"lineId\":\"92\"}]"
+  },
+  {
+   "pointid": "0501",
+   "lineid": "4",
+   "passingtimes": "[{\"destination\":{\"fr\":\"WIELS\",\"nl\":\"WIELS\"},\"expectedArrivalTime\":\"2026-11-23T23:22:40.005+01:00\",\"lineId\":\"4\"},{\"destination\":{\"fr\":\"WIELS\",\"nl\":\"WIELS\"},\"expectedArrivalTime\":\"2026-11-23T23:52:40.005+01:00\",\"lineId\":\"4\"}]"
+  },
+  {
+   "pointid": "0501",
+   "lineid": "10",
+   "passingtimes": "[{\"destination\":{\"fr\":\"GARE DU MIDI\",\"nl\":\"ZUIDSTATION\"},\"expectedArrivalTime\":\"2026-11-23T23:20:37.95+01:00\",\"lineId\":\"10\"},{\"destination\":{\"fr\":\"GARE DU MIDI\",\"nl\":\"ZUIDSTATION\"},\"expectedArrivalTime\":\"2026-11-23T23:29:37.95+01:00\",\"lineId\":\"10\"}]"
+  },
+  {
+   "pointid": "3168",
+   "lineid": "59",
+   "passingtimes": "[{\"destination\":{\"fr\":\"BORDET STATION\",\"nl\":\"BORDET STATION\"},\"expectedArrivalTime\":\"2026-11-23T23:18:47.923+01:00\",\"lineId\":\"59\",\"message\":{\"de\":\"UmgeleiteteLinie\",\"fr\":\"Ligne déviée\",\"nl\":\"Lijn omgeleid\",\"en\":\"Line diverted\"}},{\"destination\":{\"fr\":\"BORDET STATION\",\"nl\":\"BORDET STATION\"},\"expectedArrivalTime\":\"2026-11-23T23:18:47.923+01:00\",\"lineId\":\"59\",\"message\":{\"de\":\"UmgeleiteteLinie\",\"fr\":\"Ligne déviée\",\"nl\":\"Lijn omgeleid\",\"en\":\"Line diverted\"}}]"
+  },
+  {
+   "pointid": "0631",
+   "lineid": "10",
+   "passingtimes": "[{\"destination\":{\"fr\":\"GARE DU MIDI\",\"nl\":\"ZUIDSTATION\"},\"expectedArrivalTime\":\"2026-11-23T23:25:37.95+01:00\",\"lineId\":\"10\",\"message\":{\"de\":\"Nichteinsteigen\",\"fr\":\"Ne pas embarquer\",\"nl\":\"Niet instappen\",\"en\":\"Do not embark\"}},{\"destination\":{\"fr\":\"GARE DU MIDI\",\"nl\":\"ZUIDSTATION\"},\"expectedArrivalTime\":\"2026-11-23T23:34:37.95+01:00\",\"lineId\":\"10\",\"message\":{\"de\":\"Nichteinsteigen\",\"fr\":\"Ne pas embarquer\",\"nl\":\"Niet instappen\",\"en\":\"Do not embark\"}}]"
+  }
+ ],
+ "totalCount": 5,
+ "parameters": {},
+ "metadata": {}
+}

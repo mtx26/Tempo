@@ -21,6 +21,7 @@ from tempo.ai.llm import Interpreter, build_interpreter
 from tempo.sync.training_mail import ImapSource, MailSource
 from tempo.transport.motis import MotisClient
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
+from tempo.transport.stib import StibRealtime
 from tempo.worker.jobs import (
     departure_job,
     fetch_ics,
@@ -51,6 +52,8 @@ class WorkerSettings(BaseSettings):
     timezone: str = "Europe/Brussels"
     ics_interval_minutes: int = 30
     anthropic_api_key: SecretStr | None = None
+    bmc_partner_key: SecretStr | None = None
+    """Belgian Mobility key (secret ``tempo_bmc_partner_key``): raises the STIB request cap."""
     training_imap_host: str | None = None
     training_imap_user: str | None = None
     training_imap_password: SecretStr | None = None
@@ -82,6 +85,7 @@ def tick(
     due_departure: bool,
     mail: MailSource | None = None,
     interpreter: Interpreter | None = None,
+    stib: StibRealtime | None = None,
 ) -> None:
     """One scheduling round; each job records its own outcome in ``job_run``."""
     ics_url = settings.ics_url
@@ -90,7 +94,7 @@ def tick(
         run_job(sessions, "ics_sync", lambda: ics_sync(sessions, fetch_ics(http, url), now, tz))
     run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz))
     if due_departure:
-        run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now))
+        run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now, stib))
     if due_ics and now.astimezone(tz).hour == 4 and now.astimezone(tz).minute < 31:
         run_job(sessions, "retention", lambda: retention_job(sessions, now))
     if mail is not None and due_ics:
@@ -133,6 +137,7 @@ def main() -> None:  # pragma: no cover - process loop, jobs are tested individu
     )
     interpreter = build_interpreter(settings.anthropic_api_key)
     mail = mail_source(settings)
+    stib = StibRealtime(key=settings.bmc_partner_key)
     if settings.ics_url is None:
         logger.warning("TEMPO_ICS_URL not set: university timetable sync disabled")
     stop = threading.Event()
@@ -157,6 +162,7 @@ def main() -> None:  # pragma: no cover - process loop, jobs are tested individu
                 due_departure,
                 mail,
                 interpreter,
+                stib,
             )
             last_ics = now if due_ics else last_ics
             last_departure = now if due_departure else last_departure

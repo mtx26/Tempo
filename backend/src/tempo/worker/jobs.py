@@ -51,7 +51,8 @@ from tempo.sync.training_mail import MailSource, import_messages
 from tempo.transport.departure import DepartureStatus, check_departure
 from tempo.transport.location import LocatedEvent, PhonePosition
 from tempo.transport.places import Coordinates, Place
-from tempo.transport.routing import RoutingProvider
+from tempo.transport.routing import Journey, RoutingProvider
+from tempo.transport.stib import StibRealtime, StibUnavailableError, leg_advice
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +327,37 @@ def _coordinates(session: Session, place_id: str) -> tuple[float, float]:
     return row.latitude, row.longitude
 
 
-def departure_job(sessions: Sessions, routing: RoutingProvider, now: datetime) -> str | None:
+STIB_LOOKAHEAD = timedelta(minutes=60)
+
+
+def _stib_notes(stib: StibRealtime | None, journey: Journey | None, now: datetime) -> list[str]:
+    """Official STIB realtime notes for STIB legs boarding within the next hour (on demand,
+    cached and quota-capped by ``StibRealtime``)."""
+    if stib is None or journey is None:
+        return []
+    legs = [
+        leg
+        for leg in journey.legs
+        if leg.agency == "STIB" and leg.start.astimezone(UTC) - now <= STIB_LOOKAHEAD
+    ]
+    if not legs:
+        return []
+    try:
+        snapshot = stib.snapshot()
+    except StibUnavailableError as exc:
+        return [f"STIB temps réel indisponible ({exc}) : horaire théorique uniquement"]
+    notes: list[str] = []
+    for leg in legs:
+        notes += leg_advice(snapshot, leg.origin_stop_id, leg.line, leg.scheduled_start)
+    return list(dict.fromkeys(notes))
+
+
+def departure_job(
+    sessions: Sessions,
+    routing: RoutingProvider,
+    now: datetime,
+    stib: StibRealtime | None = None,
+) -> str | None:
     with sessions() as session:
         trip = _next_outbound(session, now)
         if trip is None:
@@ -367,7 +398,7 @@ def departure_job(sessions: Sessions, routing: RoutingProvider, now: datetime) -
             "leave_at": None if advice.leave_at is None else advice.leave_at.isoformat(),
             "minutes_late": advice.minutes_late,
             "reason": advice.reason,
-            "warnings": advice.warnings,
+            "warnings": [*advice.warnings, *_stib_notes(stib, advice.journey, now)],
             "checked_at": now.isoformat(),
             "event_title": trip.title,
             "event_start": trip.end.isoformat(),

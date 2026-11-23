@@ -61,6 +61,7 @@ def _leg(raw: dict[str, Any]) -> Leg:
     return Leg(
         mode=str(raw["mode"]),
         origin_name=str(raw["from"]["name"]),
+        origin_stop_id=raw["from"].get("stopId"),
         destination_name=str(raw["to"]["name"]),
         start=_time(raw["startTime"]),
         end=_time(raw["endTime"]),

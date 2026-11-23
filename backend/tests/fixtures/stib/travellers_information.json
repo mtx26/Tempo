@@ -1,0 +1,31 @@
+{
+ "results": [
+  {
+   "id": "23917376",
+   "content": "[{\"text\":[{\"en\":\"Works. From 27 Apr until end of April 2027, bus 50 diverted. To continue to GARE DU MIDI, take bus 49.\",\"fr\":\"Travaux. Du 27/4/26 à fin avril 2027, bus 50 dévié. Pour continuer vers GARE DU MIDI, prenez le bus 49.\",\"nl\":\"Werken. Van 27/4/26 tot eind april 2027, bus 50 omgeleid. Om verder naar ZUIDSTATION te reizen, neem bus 49.\"}],\"type\":\"Description\"}]",
+   "type": "LongText",
+   "lines": "[{\"id\":\"50\"}]",
+   "priority": 4,
+   "points": "[{\"id\":\"2524\"}]"
+  },
+  {
+   "id": "23847810",
+   "content": "[{\"text\":[{\"en\":\"Works.From 27 Apr 26 until autumn 2027, T81 replaced by T-bus to GARE DU MIDI. Stop T- bus: av. Roi Soldat 2.\",\"fr\":\"Travaux. Du 27/4/26 à automne 2027, tram 81 remplacé par T-bus jsq GARE DU MIDI. Arrêt du T-bus: av. Roi Soldat 2.\",\"nl\":\"Werken. Van 27/4/26 tot herfst 2027, tram 81 vervangen door T-bus tot ZUIDSTATION.Halte T-bus: Koning Soldaatlaan 2.\"}],\"type\":\"Description\"}]",
+   "type": "LongText",
+   "lines": "[{\"id\":\"81\"}]",
+   "priority": 4,
+   "points": "[{\"id\":\"6857\"}]"
+  },
+  {
+   "id": "23917365",
+   "content": "[{\"text\":[{\"en\":\"Works. 27 Apr 2026-April 2027, T51 interrupted btw LEMONNIER and GARE DU MIDI. For GARE DU MIDI, tram 82.\",\"fr\":\"Travaux. 27/4/26-avril 2027, T51 interrompu entre LEMONNIER et GARE DU MIDI. Pour GARE DU MIDI, tram 82.\",\"nl\":\"Werken. 27/4/26-april 2027, tram 51 onderbroken ts LEMONNIER en ZUIDSTATION. Voor ZUIDSTATION, tram 82.\"}],\"type\":\"Description\"}]",
+   "type": "LongText",
+   "lines": "[{\"id\":\"51\"}]",
+   "priority": 5,
+   "points": "[{\"id\":\"6659F\"},{\"id\":\"6650G\"}]"
+  }
+ ],
+ "totalCount": 3,
+ "parameters": {},
+ "metadata": {}
+}

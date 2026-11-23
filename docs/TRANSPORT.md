@@ -143,3 +143,21 @@ answers "can I still make it from where I am now, and when must I leave?" with l
 Journeys leaving before `now` are ignored. Warnings: live delays ≥ 2 min, timed severe notices,
 static-only legs. Scheduling the checks (planning time, evening before, near departure) and the HA
 notifications belong to the worker (M7); not wired yet.
+
+## STIB realtime (milestone 13) — `stib.py`
+Verified 2026-11-23 by anonymous requests (HTTP 200, JSON): the Belgian Mobility portal serves
+STIB snapshots at `https://api-management-discovery-production.azure-api.net/api/datasets/stibmivb/`
+`rt/WaitingTimes` (next passages per stop and line, ISO times with offset, optional message) and
+`rt/TravellersInformation` (free-text disruptions with lines/points); `rt/VehiclePositions` exists
+(stop + distance, no GPS) and is not used. The old `opendata-api.stib-mivb.be` / Opendatasoft
+portals redirect or are gone. STIB still has **no GTFS-RT**: MOTIS cannot use STIB realtime.
+
+- Stop mapping verified on a real snapshot: every `pointid` (940/940) equals a STIB GTFS `stop_id`
+  without its platform letter (`0470F` -> `0470`); MOTIS stop ids are `stib_<stop_id>`.
+- Use in Tempo: during a departure check, when the journey boards a STIB line within 60 min, the
+  worker adds "STIB temps réel : ligne 59 vers X, passage prévu à HH:MM", the line message
+  (e.g. "Ligne déviée") and matching traveller information to the advice/notification.
+  Future plans keep the static STIB timetable (no trip ids, no delays in these feeds).
+- Quota: on-demand only, cached 15 min, capped at 20 requests/24 h anonymous (2 000 with the key
+  secret `tempo_bmc_partner_key`; key acceptance on this host still unverified).
+- Fixtures: `backend/tests/fixtures/stib/*.json` (real snapshot extracts, CC BY 4.0).

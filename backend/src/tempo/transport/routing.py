@@ -78,6 +78,8 @@ class Leg:
     line: str | None = None
     agency: str | None = None
     distance_m: float | None = None
+    origin_stop_id: str | None = None
+    """MOTIS stop id of the boarding stop (e.g. ``stib_0470F``) for realtime lookups."""
     alerts: tuple[ServiceAlert, ...] = ()
 
     def __post_init__(self) -> None:
