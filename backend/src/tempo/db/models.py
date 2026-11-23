@@ -165,3 +165,117 @@ class PhonePositionRow(Base):
     accuracy_m: Mapped[float]
     observed_at: Mapped[datetime]
     received_at: Mapped[datetime]
+
+
+class PlaceRow(Base):
+    """Named place with coordinates (home, campus, club...). Configured from Home Assistant."""
+
+    __tablename__ = "place"
+    __table_args__ = (
+        CheckConstraint("latitude BETWEEN -90 AND 90", name="latitude_range"),
+        CheckConstraint("longitude BETWEEN -180 AND 180", name="longitude_range"),
+    )
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    latitude: Mapped[float]
+    longitude: Mapped[float]
+
+
+class PlaceAliasRow(Base):
+    """Exact location text (e.g. iCal LOCATION) mapped to a place; normalised (casefold)."""
+
+    __tablename__ = "place_alias"
+    alias: Mapped[str] = mapped_column(String(500), primary_key=True)
+    place_id: Mapped[str] = mapped_column(ForeignKey("place.id", ondelete="CASCADE"))
+
+
+class AvailabilityRow(Base):
+    """Weekly window in which study is allowed, at a place (local wall-clock time)."""
+
+    __tablename__ = "availability_window"
+    __table_args__ = (
+        CheckConstraint("weekday BETWEEN 0 AND 6", name="weekday_range"),
+        CheckConstraint("end_minute > start_minute", name="positive_duration"),
+        CheckConstraint("start_minute >= 0 AND end_minute <= 1440", name="minute_range"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    weekday: Mapped[int]
+    """0 = Monday."""
+    start_minute: Mapped[int]
+    end_minute: Mapped[int]
+    place_id: Mapped[str] = mapped_column(ForeignKey("place.id", ondelete="CASCADE"))
+
+
+class ActivityRow(Base):
+    """Training (flexible: day/time movable, content and duration kept) or race (fixed)."""
+
+    __tablename__ = "activity"
+    __table_args__ = (
+        CheckConstraint("kind IN ('training', 'race')", name="kind"),
+        CheckConstraint("duration_minutes > 0", name="positive_duration"),
+        CheckConstraint("latest_end_at > earliest_start_at", name="window"),
+        UniqueConstraint("source", "source_ref", name="source_ref"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(10))
+    title: Mapped[str] = mapped_column(String(300))
+    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    """Prescribed content, preserved verbatim (e.g. from the coach's e-mail)."""
+    duration_minutes: Mapped[int]
+    earliest_start_at: Mapped[datetime]
+    latest_end_at: Mapped[datetime]
+    """Races: exactly start + duration. Trainings: the window they may move in."""
+    preferred_start_at: Mapped[datetime | None]
+    place_id: Mapped[str | None] = mapped_column(ForeignKey("place.id", ondelete="SET NULL"))
+    planned_start_at: Mapped[datetime | None]
+    locked: Mapped[bool] = mapped_column(default=False, server_default="false")
+    status: Mapped[str] = mapped_column(String(20), default="active", server_default="active")
+    source: Mapped[str] = mapped_column(String(20), default="manual", server_default="manual")
+    source_ref: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ProposalRow(Base):
+    """Change to a protected commitment awaiting the user's approval in Home Assistant."""
+
+    __tablename__ = "proposal"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'approved', 'rejected', 'obsolete')", name="status"),
+        Index("ix_proposal_pending", "created_at", postgresql_where="status = 'pending'"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(300))
+    details: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    dedupe_key: Mapped[str] = mapped_column(String(300), unique=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
+    created_at: Mapped[datetime]
+    decided_at: Mapped[datetime | None]
+
+
+class NotificationRow(Base):
+    __tablename__ = "notification"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(300))
+    message: Mapped[str] = mapped_column(Text)
+    dedupe_key: Mapped[str] = mapped_column(String(300), unique=True)
+    created_at: Mapped[datetime]
+    acknowledged_at: Mapped[datetime | None]
+
+
+class SettingRow(Base):
+    """Small key/value configuration set from Home Assistant (home place, tracker, prefs)."""
+
+    __tablename__ = "app_setting"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(default=dict)
+
+
+class JobRunRow(Base):
+    __tablename__ = "job_run"
+    name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    last_started_at: Mapped[datetime | None]
+    last_finished_at: Mapped[datetime | None]
+    last_status: Mapped[str] = mapped_column(String(20), default="never", server_default="never")
+    last_error: Mapped[str | None] = mapped_column(Text)

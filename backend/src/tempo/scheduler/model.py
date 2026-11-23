@@ -108,6 +108,9 @@ class PlanningProblem:
     demands: list[StudyDemand]
     locked_blocks: list[PlannedBlock]
     preferences: Preferences = field(default_factory=Preferences)
+    previous_blocks: list[PlannedBlock] = field(default_factory=list)
+    """Unlocked blocks of the current plan: moving one costs ``STABILITY_PENALTY`` so a
+    re-plan only reshuffles when it buys something (less lateness or unplanned effort)."""
 
     def __post_init__(self) -> None:
         ids = [d.task_id for d in self.demands]

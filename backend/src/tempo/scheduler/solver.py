@@ -41,6 +41,9 @@ from tempo.scheduler.validate import busy_conflicts
 ADJACENCY_PENALTY = 120
 SHORT_BLOCK_PENALTY = 30
 OVERSHOOT_PENALTY_PER_MINUTE = 2
+STABILITY_PENALTY = 200
+"""Cost of moving (or dropping) a previously proposed block: above the adjacency and
+short-block penalties, far below unplanned effort; ~200 minutes of soft lateness."""
 
 type Span = tuple[int, int]
 
@@ -291,8 +294,32 @@ class _Builder:
             self.penalties.append(OVERSHOOT_PENALTY_PER_MINUTE * overshoot)
 
         self._add_daily_constraints(days)
+        self._add_stability(days)
         model.add_no_overlap(self.intervals)
         model.minimize(sum(self.penalties))
+
+    def _add_stability(self, days: list[Span]) -> None:
+        model, g = self.model, self.prefs.granularity_minutes
+        for index, previous in enumerate(self.problem.previous_blocks):
+            start = self.clock.floor(previous.start)
+            size = self.clock.floor(previous.end) - start
+            day = next((i for i, (s, e) in enumerate(days) if s <= start < e), None)
+            candidates = [
+                b for b in self.blocks if b.day == day and b.demand.task_id == previous.task_id
+            ]
+            kept: list[cp_model.IntVar] = []
+            if start % g == 0 and size > 0:
+                for k, block in enumerate(candidates):
+                    same = model.new_bool_var(f"kept_{index}_{k}")
+                    model.add(block.start == start).only_enforce_if(same)
+                    model.add(block.effective == size).only_enforce_if(same)
+                    model.add_implication(same, block.present)
+                    kept.append(same)
+            if kept:
+                model.add(sum(kept) <= 1)
+                self.penalties.append(STABILITY_PENALTY * (1 - sum(kept)))
+            # A block that cannot be kept (task done, day past...) costs nothing: it is a
+            # constant and does not influence the choice.
 
     def _add_daily_constraints(self, days: list[Span]) -> None:
         prefs, model = self.prefs, self.model
