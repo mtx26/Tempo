@@ -148,3 +148,20 @@ class AuditEntry(Base):
     entity: Mapped[str] = mapped_column(String(50))
     entity_id: Mapped[str] = mapped_column(String(64))
     details: Mapped[dict[str, Any]] = mapped_column(default=dict)
+
+
+class PhonePositionRow(Base):
+    """Latest position of a configured HA phone tracker; only the latest fix is kept."""
+
+    __tablename__ = "phone_position"
+    __table_args__ = (
+        CheckConstraint("latitude BETWEEN -90 AND 90", name="latitude_range"),
+        CheckConstraint("longitude BETWEEN -180 AND 180", name="longitude_range"),
+        CheckConstraint("accuracy_m >= 0", name="accuracy_non_negative"),
+    )
+    entity_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    latitude: Mapped[float]
+    longitude: Mapped[float]
+    accuracy_m: Mapped[float]
+    observed_at: Mapped[datetime]
+    received_at: Mapped[datetime]

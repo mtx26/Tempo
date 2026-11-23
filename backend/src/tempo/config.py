@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     api_token: SecretStr = Field(min_length=MIN_TOKEN_LENGTH)
     """Shared service token used by the Home Assistant integration (Bearer auth)."""
 
+    database_url: SecretStr | None = None
+    """SQLAlchemy URL of PostgreSQL (e.g. from the Docker secret ``tempo_database_url``)."""
+
     timezone: str = "Europe/Brussels"
     """IANA timezone used to interpret local wall-clock planning rules."""
 
