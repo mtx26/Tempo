@@ -10,23 +10,27 @@
 - Milestone 3 (scheduler): DONE — CP-SAT planner `tempo.scheduler.solver.solve` + independent validator
   `tempo.scheduler.validate.validate_plan` (docs/SCHEDULER.md). Reviewed adversarially by agent `scheduler`;
   10 findings fixed with regression tests.
-- Milestone 2b (persistence): IN PROGRESS, uncommitted — SQLAlchemy models, Alembic scaffolding, integration
-  tests against a local pgserver PostgreSQL 16 (D016). Initial migration and ICS repository not written yet.
-- Deployment: none. Local commits only: `43a9091` (phase 0 + M1 + ICS), M3 commit (see git log).
+- Milestone 2b (persistence): DONE — SQLAlchemy 2 models, Alembic migration 0001 (reversible, concurrency-safe),
+  safe idempotent ICS sync repository with audit (D017, D018). Reviewed by agent `security`; findings fixed with
+  tests (false deletions, suspect feeds, concurrency, audit detail, overlong UIDs). Validated against a REAL local
+  PostgreSQL 16 (pgserver, D016); production PostgreSQL on Swarm not tested.
+- Repository split (D010): `../tempo-homeassistant` created locally (commit `c485e2c`, scaffold only, OWNER
+  placeholders, not published). `homeassistant/` removed from this repo.
+- Deployment: none. Local commits only: `43a9091` (phase 0 + M1 + ICS), `3e51017` (M3), M2b commit (see git log).
 
 ## Quality gates (last local run, backend/)
-- M3 validation: `uv run pytest -q --ignore=tests/integration`: 89 passed, coverage 98 % (scheduler, domain,
-  sync, api, config); ruff + mypy strict pass on those packages; pip-audit: no known vulnerabilities.
+- Last full run (M2b): `TEMPO_TEST_DATABASE_URL=… uv run pytest -q --cov=tempo`: 106 passed (15 integration on
+  real PostgreSQL 16), coverage 98 %; ruff + `mypy --strict src tests` pass; pip-audit: no known vulnerabilities.
+- Without `TEMPO_TEST_DATABASE_URL`, the 15 integration tests are reported SKIPPED (explicit reason).
 - `uv run ruff check .` / `ruff format --check .`: pass.
 - `uv run mypy src tests` (strict): pass.
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. Persistence: write initial Alembic revision in `backend/src/tempo/db/alembic/versions/`, implement
-   `tempo/db/ics_repository.py` (`get_or_create_source`, `apply_ics_sync`, `active_events`), make
-   `tests/integration/test_persistence.py` pass with `TEMPO_TEST_DATABASE_URL` from `scripts/dev_postgres.py`.
-2. Split repositories (temps.txt §4): create local public-ready repo for the HA integration (sibling dir).
-3. Travel constraints (M4) with a MOTIS client contract + mocks (no claim of real validation).
+1. M4 travel: domain (places, location aliases, phone position freshness, origin inference from event chain),
+   RoutingProvider protocol + MOTIS `/api/v6/plan` client built from the OpenAPI contract (mocked HTTP only —
+   NOT validated against a real MOTIS), travel blocks as busy intervals for the scheduler, honest UNKNOWN status.
+2. M6 HA integration in `../tempo-homeassistant`; M5 training sync; M7 worker/approvals; M9 deployment docs.
 
 ## Session log
 - Initial starter files and requirements authored.

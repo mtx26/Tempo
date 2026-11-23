@@ -236,3 +236,16 @@ def test_moving_sync_window_does_not_report_false_removals() -> None:
     after = parse_ics(data, *new_window, default_tz=BRUSSELS).events
     diff = diff_events(before, after, window=(new_window[0], old_window[1]))
     assert diff.is_empty
+
+
+def test_overlong_uid_is_skipped_not_crashing_storage() -> None:
+    uid = "x" * 600
+    data = _calendar(*_event(uid, "DTSTART:20261022T080000Z", "DTEND:20261022T090000Z"))
+    result = parse_ics(data, *WINDOW, default_tz=BRUSSELS)
+    assert result.events == []
+    assert result.invalid_uids == {uid}
+
+
+def test_invalid_events_are_listed_by_uid() -> None:
+    data = _calendar(*_event("broken", "DTSTART:20261022T090000Z", "DTEND:20261022T080000Z"))
+    assert parse_ics(data, *WINDOW, default_tz=BRUSSELS).invalid_uids == {"broken"}

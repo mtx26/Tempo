@@ -28,6 +28,9 @@ type EventKey = tuple[str, str | None]
 type Window = tuple[datetime, datetime]
 
 
+MAX_UID_LENGTH = 512
+
+
 class IcsParseError(ValueError):
     """The payload is not a usable iCalendar document."""
 
@@ -39,6 +42,8 @@ class IcsImport:
     """Source items deliberately not imported, with the reason."""
     warnings: list[str] = field(default_factory=list)
     """Imported items whose source is suspicious and deserves user attention."""
+    invalid_uids: set[str] = field(default_factory=set)
+    """UIDs present in the source but unusable: stored occurrences must NOT be deleted for them."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,18 @@ class _SourceScan:
     recurring: set[str] = field(default_factory=set)
     invalid: dict[EventKey, str] = field(default_factory=dict)
     duplicates: dict[str, list[Any]] = field(default_factory=dict)
+
+
+class _Skipped(list[str]):
+    """Skipped-item messages plus the set of UIDs that were invalid in the source."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invalid_uids: set[str] = set()
+
+    def invalid(self, uid: str, reason: object) -> None:
+        self.invalid_uids.add(uid)
+        self.append(f"{uid}: invalid event ({reason})")
 
 
 def _as_aware(value: datetime, default_tz: ZoneInfo) -> datetime:
@@ -82,6 +99,8 @@ def _recurrence_key(component: Any, default_tz: ZoneInfo) -> str | None:
 
 def _source_problem(component: Any, default_tz: ZoneInfo) -> str | None:
     """Return why a raw VEVENT cannot be trusted, or ``None``."""
+    if len(_text(component, "UID") or "") > MAX_UID_LENGTH:
+        return f"UID longer than {MAX_UID_LENGTH} characters"
     values: dict[str, datetime] = {}
     for name in ("DTSTART", "DTEND"):
         if name not in component:
@@ -125,7 +144,7 @@ def _scan_sources(calendar: Calendar, default_tz: ZoneInfo) -> _SourceScan:
 
 
 def _build_event(
-    component: Any, uid: str, recurrence_id: str | None, default_tz: ZoneInfo, skipped: list[str]
+    component: Any, uid: str, recurrence_id: str | None, default_tz: ZoneInfo, skipped: _Skipped
 ) -> FixedEvent | None:
     start = component.decoded("DTSTART")
     end = component.decoded("DTEND") if "DTEND" in component else None
@@ -145,7 +164,7 @@ def _build_event(
             status=EventStatus.TENTATIVE if status_text == "TENTATIVE" else EventStatus.CONFIRMED,
         )
     except ValueError as exc:
-        skipped.append(f"{uid}: invalid event ({exc})")
+        skipped.invalid(uid, exc)
         return None
 
 
@@ -154,7 +173,7 @@ def _overlaps(event: FixedEvent, window: Window) -> bool:
 
 
 def _import_duplicates(
-    scan: _SourceScan, window: Window, default_tz: ZoneInfo, skipped: list[str]
+    scan: _SourceScan, window: Window, default_tz: ZoneInfo, skipped: _Skipped
 ) -> tuple[list[FixedEvent], list[str]]:
     """Keep every event of a duplicated non-recurring UID, keyed by its start time."""
     events: list[FixedEvent] = []
@@ -166,7 +185,7 @@ def _import_duplicates(
                 continue
             problem = _source_problem(raw, default_tz)
             if problem:
-                skipped.append(f"{uid}: invalid event ({problem})")
+                skipped.invalid(uid, problem)
                 continue
             start = raw.decoded("DTSTART")
             key = _utc_iso(start, default_tz) if isinstance(start, datetime) else None
@@ -191,7 +210,9 @@ def parse_ics(
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise IcsParseError("invalid iCalendar payload") from exc
 
-    skipped = [f"{uid}: invalid event ({reason})" for (uid, _), reason in scan.invalid.items()]
+    skipped = _Skipped()
+    for (invalid_uid, _), reason in scan.invalid.items():
+        skipped.invalid(invalid_uid, reason)
     events, warnings = _import_duplicates(scan, (window_start, window_end), default_tz, skipped)
     for component in occurrences:
         if component.name != "VEVENT":
@@ -212,7 +233,10 @@ def parse_ics(
             events.append(event)
     events.sort(key=lambda e: (e.start, e.uid))
     return IcsImport(
-        events=events, skipped=list(dict.fromkeys(skipped)), warnings=list(dict.fromkeys(warnings))
+        events=events,
+        skipped=list(dict.fromkeys(skipped)),
+        warnings=list(dict.fromkeys(warnings)),
+        invalid_uids=skipped.invalid_uids,
     )
 
 

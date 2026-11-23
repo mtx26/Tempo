@@ -8,7 +8,7 @@ Phone/Desktop â†’ existing Home Assistant (single UI, existing remote access) â†
 - `tempo-worker`: scheduled iCal/email/transport sync, recalculation, notifications and recovery.
 - `tempo-postgres`: authoritative durable store, versioned migrations and audit log.
 - `tempo-routing`: MOTIS + OpenStreetMap + validated Belgian GTFS/NeTEx feeds and realtime adapters.
-- `homeassistant/custom_components/tempo`: config flow, coordinator, calendar, todo, sensors, conversation integration and actions (implement incrementally; do not claim entities exist yet).
+- `custom_components/tempo` in the separate public-ready repository `tempo-homeassistant` (D010): config flow, coordinator, calendar, todo, sensors, conversation integration and actions (implement incrementally; do not claim entities exist yet).
 
 ## Sources
 - HA configured phone tracker for actual position, freshness and accuracy checks; future origin derives from preceding event or explicit future location when GPS alone is unsuitable.
