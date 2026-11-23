@@ -1,0 +1,180 @@
+"""Weekly training plan from the coach's ``.docx`` attachment (M5b, docs/TRAINING_EMAILS.md).
+
+Format: a date range ``Semaine du 23 au 29/11/2026`` and one table whose header row holds the
+weekdays (Monday..Sunday) and whose other rows (objective, theme, detailed instructions) hold the
+session of each day; empty columns mean no training.
+
+Rules implemented here (deterministic, nothing invented):
+- the full text of every row is kept verbatim in the session notes;
+- the total duration is read ONLY from the session/theme row (where the coach writes it, e.g.
+  ``Endurance fondamentale 1h15'``) and only when exactly one explicit duration is there.
+  Durations in the detailed instructions belong to parts of the session (``RAC : 10'``, ``r 30"``,
+  ``20' footing``, repetitions) and are never summed or promoted to a total. Otherwise the
+  duration is None: "to confirm" by the user;
+- a session whose theme says rest (``Repos``) is not a training;
+- a competition keyword (course, compétition, cross, semi, marathon, trail) marks a race; it is
+  never scheduled without the user's approval (fixed commitment).
+"""
+
+import io
+import re
+import unicodedata
+import zipfile
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+from docx import Document
+from docx.table import Table
+
+MAX_DOCX_BYTES = 2_000_000
+MAX_UNCOMPRESSED = 20_000_000
+WEEKDAYS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
+REST_WORDS = ("repos", "off", "rien")
+RACE_WORDS = ("competition", "course", "cross", "semi", "marathon", "trail", "10 km", "10km")
+PART_PREFIX = re.compile(
+    r"(?:^|[\s(,;+])(rac|retour au calme|echauffement|echauf|ech\.?|r|recup|recuperation|x)"
+    r"\s*[:=]?\s*$"
+)
+_DURATION = re.compile(r"(?<![\d.])(\d{1,2})\s*h\s*(\d{2})?\s*'?|(?<![\dx.])(\d{1,3})\s*'(?!')")
+_WEEK = re.compile(
+    r"semaine\s+du\s+(?P<d1>\d{1,2})(?:[/.](?P<m1>\d{1,2}))?(?:[/.](?P<y1>\d{4}))?"
+    r"\s+au\s+(?P<d2>\d{1,2})[/.](?P<m2>\d{1,2})[/.](?P<y2>\d{4})"
+)
+
+
+class PlanFormatError(ValueError):
+    """The attachment is not a readable weekly plan (reported to the user, nothing imported)."""
+
+
+def _plain(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+@dataclass(frozen=True, slots=True)
+class PlanSession:
+    weekday: int
+    """0 = Monday: the coach's suggestion, not a commitment."""
+    day: date
+    title: str
+    notes: str
+    duration_minutes: int | None
+    """None = no single explicit total duration: to be confirmed by the user."""
+    is_race: bool
+    order: int
+    """Position of the session in the week (recovery/sequence constraints)."""
+
+
+@dataclass(slots=True)
+class WeeklyPlan:
+    monday: date
+    sunday: date
+    sessions: list[PlanSession] = field(default_factory=list)
+
+
+def total_duration(text: str) -> int | None:
+    """The single explicit total duration in ``text`` (minutes), else None."""
+    totals: set[int] = set()
+    plain = _plain(text)
+    for match in _DURATION.finditer(plain):
+        prefix = plain[max(0, match.start() - 25) : match.start()]
+        if PART_PREFIX.search(prefix) or re.search(r"\d\s*x\s*$", prefix):
+            continue  # part of the session (warm-up, recovery, repetitions)
+        hours_form = match[3] is None
+        minutes = int(match[1]) * 60 + int(match[2] or 0) if hours_form else int(match[3])
+        if 0 < minutes <= 6 * 60:
+            totals.add(minutes)
+    return totals.pop() if len(totals) == 1 else None
+
+
+def _check_archive(data: bytes) -> None:
+    if len(data) > MAX_DOCX_BYTES:
+        raise PlanFormatError("attachment larger than 2 MB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if sum(info.file_size for info in archive.infolist()) > MAX_UNCOMPRESSED:
+                raise PlanFormatError("attachment expands too much (zip bomb guard)")
+    except zipfile.BadZipFile as exc:
+        raise PlanFormatError("attachment is not a .docx file") from exc
+
+
+def _week(texts: list[str], today: date) -> tuple[date, date]:
+    for text in texts:
+        match = _WEEK.search(_plain(text))
+        if match is None:
+            continue
+        year, month = int(match["y2"]), int(match["m2"])
+        end = date(year, month, int(match["d2"]))
+        start_month = int(match["m1"] or month)
+        start_year = int(match["y1"] or (year - 1 if start_month > month else year))
+        start = date(start_year, start_month, int(match["d1"]))
+        if start.weekday() != 0 or (end - start).days != 6:
+            raise PlanFormatError(f"week range {start}..{end} is not Monday..Sunday")
+        return start, end
+    raise PlanFormatError("no 'Semaine du ... au ...' range found")
+
+
+def _weekday_columns(table: Table) -> tuple[int, dict[int, int]] | None:
+    for row_index, row in enumerate(table.rows):
+        columns: dict[int, int] = {}
+        for column_index, cell in enumerate(row.cells):
+            name = _plain(cell.text).strip()
+            if name in WEEKDAYS:
+                columns[column_index] = WEEKDAYS.index(name)
+        if len(columns) >= 5:
+            return row_index, columns
+    return None
+
+
+def parse_plan_docx(data: bytes, today: date) -> WeeklyPlan:
+    _check_archive(data)
+    try:
+        document = Document(io.BytesIO(data))
+    except Exception as exc:  # python-docx raises several types for corrupt files
+        raise PlanFormatError("unreadable .docx") from exc
+    texts = [p.text for p in document.paragraphs]
+    for table in document.tables:
+        texts += [cell.text for row in table.rows for cell in row.cells]
+    monday, sunday = _week(texts, today)
+    for table in document.tables:
+        found = _weekday_columns(table)
+        if found is None:
+            continue
+        header_row, columns = found
+        cells: dict[int, list[tuple[str, str]]] = {d: [] for d in range(7)}
+        for row in table.rows[header_row + 1 :]:
+            label = row.cells[0].text.strip()
+            for column_index, weekday in columns.items():
+                value = row.cells[column_index].text.strip()
+                if value:
+                    cells[weekday].append((label, value))
+        plan = WeeklyPlan(monday, sunday)
+        order = 0
+        for weekday in range(7):
+            entries = cells[weekday]
+            if not entries:
+                continue
+            body = "\n".join(f"{label} : {value}" if label else value for label, value in entries)
+            plain = _plain(body)
+            values = [value for _, value in entries]
+            theme = next(
+                (v for label, v in entries if _plain(label).startswith(("seance", "theme"))),
+                values[0],
+            )
+            first_line = theme.splitlines()[0].strip()
+            if any(re.fullmatch(rf"\s*{w}\s*", _plain(first_line)) for w in REST_WORDS):
+                continue
+            plan.sessions.append(
+                PlanSession(
+                    weekday=weekday,
+                    day=monday + timedelta(days=weekday),
+                    title=first_line[:300],
+                    notes=body[:10_000],
+                    duration_minutes=total_duration(theme),
+                    is_race=any(word in plain for word in RACE_WORDS),
+                    order=order,
+                )
+            )
+            order += 1
+        return plan
+    raise PlanFormatError("no weekly table with Monday..Sunday columns found")

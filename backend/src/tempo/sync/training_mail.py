@@ -32,6 +32,8 @@ from tempo.ai.apply import apply_result, from_extraction, known_places, result_t
 from tempo.ai.llm import Interpreter
 from tempo.ai.text_parser import ParseResult, parse_text
 from tempo.planning.service import get_setting, notify, propose, set_setting
+from tempo.sync.coach_import import apply_weekly_plan
+from tempo.sync.coach_plan import MAX_DOCX_BYTES, PlanFormatError, parse_plan_docx
 
 logger = logging.getLogger(__name__)
 MAX_MESSAGES = 200
@@ -47,12 +49,17 @@ class MailMessage:
     sender: str
     subject: str
     body: str
+    attachments: tuple[tuple[str, bytes], ...] = ()
+    """``.docx`` attachments only (file name, content), size-checked."""
 
     @property
     def digest(self) -> str:
         """Idempotency key: Message-ID is chosen by the sender, so the content is included."""
-        data = f"{self.message_id}\n{self.subject}\n{self.body}".encode()
-        return hashlib.sha256(data).hexdigest()[:32]
+        digest = hashlib.sha256(f"{self.message_id}\n{self.subject}\n{self.body}".encode())
+        for name, content in self.attachments:
+            digest.update(name.encode())
+            digest.update(hashlib.sha256(content).digest())
+        return digest.hexdigest()[:32]
 
 
 class MailSource(Protocol):
@@ -95,6 +102,24 @@ def _text_body(message: EmailMessage) -> str:
         extractor.close()
         text = "".join(extractor.parts)
     return text[:MAX_BODY_CHARS]
+
+
+DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+MAX_ATTACHMENTS = 3
+
+
+def docx_attachments(message: EmailMessage) -> tuple[tuple[str, bytes], ...]:
+    found: list[tuple[str, bytes]] = []
+    for part in message.iter_attachments():
+        name = str(part.get_filename() or "")
+        if part.get_content_type() != DOCX_TYPE and not name.casefold().endswith(".docx"):
+            continue
+        content = part.get_payload(decode=True)
+        if isinstance(content, bytes) and 0 < len(content) <= MAX_DOCX_BYTES:
+            found.append((name[:200] or "plan.docx", content))
+        if len(found) >= MAX_ATTACHMENTS:
+            break
+    return tuple(found)
 
 
 def authenticated(message: EmailMessage, sender: str) -> bool:
@@ -176,6 +201,7 @@ class ImapSource:
                         sender,
                         str(message.get("Subject", ""))[:300],
                         _text_body(message),
+                        docx_attachments(message),
                     )
                 )
         return messages
@@ -224,6 +250,20 @@ def _import_one(
     interpreter: Interpreter | None,
     stats: dict[str, int],
 ) -> None:
+    for name, content in message.attachments:
+        try:
+            plan = parse_plan_docx(content, today)
+        except PlanFormatError as exc:
+            notify(
+                session,
+                "coach_plan_unreadable",
+                "Plan d'entraînement illisible",
+                f"La pièce jointe « {name} » n'a pas pu être lue : {exc}. Rien n'a été importé.",
+                f"coach_plan_unreadable:{message.digest}:{name}",
+            )
+            continue
+        report = apply_weekly_plan(session, plan, tz=tz, today=today, origin=message.digest)
+        stats["trainings"] += len(report.created) + len(report.updated)
     parsed = parse_text(message.body, today)
     direct = ParseResult(activities=[a for a in parsed.activities if a.kind == "training"])
     races = ParseResult(activities=[a for a in parsed.activities if a.kind == "race"])

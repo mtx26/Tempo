@@ -212,7 +212,12 @@ class ActivityRow(Base):
     __tablename__ = "activity"
     __table_args__ = (
         CheckConstraint("kind IN ('training', 'race')", name="kind"),
-        CheckConstraint("duration_minutes > 0", name="positive_duration"),
+        CheckConstraint(
+            "duration_minutes IS NULL OR duration_minutes > 0", name="positive_duration"
+        ),
+        CheckConstraint(
+            "duration_minutes IS NOT NULL OR status = 'to_confirm'", name="duration_known"
+        ),
         CheckConstraint("latest_end_at > earliest_start_at", name="window"),
         UniqueConstraint("source", "source_ref", name="source_ref"),
     )
@@ -221,7 +226,8 @@ class ActivityRow(Base):
     title: Mapped[str] = mapped_column(String(300))
     notes: Mapped[str] = mapped_column(Text, default="", server_default="")
     """Prescribed content, preserved verbatim (e.g. from the coach's e-mail)."""
-    duration_minutes: Mapped[int]
+    duration_minutes: Mapped[int | None]
+    """None only while ``status = 'to_confirm'`` (coach plan without explicit total duration)."""
     earliest_start_at: Mapped[datetime]
     latest_end_at: Mapped[datetime]
     """Races: exactly start + duration. Trainings: the window they may move in."""
@@ -233,6 +239,13 @@ class ActivityRow(Base):
     source: Mapped[str] = mapped_column(String(20), default="manual", server_default="manual")
     source_ref: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    user_modified: Mapped[bool] = mapped_column(default=False, server_default="false")
+    """Edited by the user: a re-sent coach plan never overwrites it silently."""
+    sequence_group: Mapped[str | None] = mapped_column(String(100))
+    """Sessions of one coach plan week keep their order and recovery days (same group)."""
+    sequence_index: Mapped[int | None]
+    preferred_day: Mapped[date | None] = mapped_column(Date)
+    """The coach's suggested day (a soft preference, not a commitment)."""
 
 
 class ProposalRow(Base):

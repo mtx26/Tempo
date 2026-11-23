@@ -204,7 +204,14 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
             ActivityRow.earliest_start_at < horizon_end,
         )
     )
-    for act in activities:
+    activity_rows = list(activities)
+    activities_by_group: dict[str, list[ActivityRow]] = {}
+    for act in activity_rows:
+        if act.sequence_group is not None:
+            activities_by_group.setdefault(act.sequence_group, []).append(act)
+    for act in activity_rows:
+        if act.duration_minutes is None:
+            continue  # duration to confirm: never scheduled with a guessed length
         place = directory.get(act.place_id) if act.place_id else None
         duration = timedelta(minutes=act.duration_minutes)
         fixed_start = (
@@ -237,6 +244,10 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
                     place,
                     act.preferred_start_at,
                     act.planned_start_at,
+                    act.preferred_day,
+                    act.sequence_group,
+                    act.sequence_index or 0,
+                    _recovery_days(act, activities_by_group),
                 )
             )
 
@@ -307,6 +318,27 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         buffer=buffer,
     )
     return LoadedInput(data, task_ids)
+
+
+MAX_RECOVERY_DAYS = 2
+
+
+def _recovery_days(act: ActivityRow, groups: dict[str, list[ActivityRow]]) -> int:
+    """Calendar days to keep after the previous session of the same coach week: the gap the
+    coach planned between the two suggested days, capped at ``MAX_RECOVERY_DAYS``."""
+    if act.sequence_group is None or act.preferred_day is None:
+        return 0
+    earlier = [
+        other
+        for other in groups.get(act.sequence_group, [])
+        if other.preferred_day is not None
+        and (other.sequence_index or 0) < (act.sequence_index or 0)
+    ]
+    if not earlier:
+        return 0
+    previous = max(earlier, key=lambda other: other.sequence_index or 0)
+    assert previous.preferred_day is not None  # noqa: S101 - filtered above
+    return min(max((act.preferred_day - previous.preferred_day).days, 0), MAX_RECOVERY_DAYS)
 
 
 def active_version(session: Session) -> ScheduleVersion | None:

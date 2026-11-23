@@ -80,7 +80,7 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
     places = {p.id: p.name for p in session.scalars(select(PlaceRow))}
     for act in session.scalars(select(ActivityRow).where(ActivityRow.status == "active")):
         begins = act.earliest_start_at if act.kind == "race" else act.planned_start_at
-        if begins is None:
+        if begins is None or act.duration_minutes is None:
             continue
         ends = begins + timedelta(minutes=act.duration_minutes)
         if utc(ends) <= utc(start) or utc(begins) >= utc(end):

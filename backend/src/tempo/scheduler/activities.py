@@ -11,9 +11,10 @@ Objective: place every session (missing one costs far more than anything else), 
 to the previous placement (stability), then to the preferred start.
 """
 
+import itertools
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from ortools.sat.python import cp_model
@@ -23,6 +24,8 @@ from tempo.scheduler.model import Interval, utc
 GRID_MINUTES = 15
 MISSING_PENALTY = 10_000_000
 STABILITY_WEIGHT = 4
+DAY_PREFERENCE_PENALTY = 600
+"""Per day away from the coach's suggested day (soft: about 10 h of start-time distance)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,13 @@ class FlexibleActivity:
     previous_start: datetime | None = None
     travel_before: timedelta = timedelta(0)
     travel_after: timedelta = timedelta(0)
+    preferred_day: date | None = None
+    """Coach's suggested day: a soft preference, never a constraint."""
+    sequence_group: str | None = None
+    """Sessions of one plan week: placed in ``sequence_index`` order."""
+    sequence_index: int = 0
+    min_days_after_previous: int = 0
+    """Calendar days required after the previous session of the group (recovery)."""
 
     def __post_init__(self) -> None:
         if self.duration <= timedelta(0):
@@ -103,8 +113,17 @@ def plan_activities(
             night_spans.append((0, math.floor(_minutes(origin, opens))))
         day += timedelta(days=1)
 
+    origin_day = origin.astimezone(timezone).date()
+
+    def local_day(minute: int) -> int:
+        when = (origin + timedelta(minutes=minute)).astimezone(timezone)
+        return (when.date() - origin_day).days
+
     penalties: list[cp_model.LinearExprT] = []
     entries: list[tuple[FlexibleActivity, cp_model.IntVar, cp_model.IntVar]] = []
+    days: dict[int, cp_model.IntVar] = {}
+    session_ends: dict[int, cp_model.LinearExpr] = {}
+    presents: dict[int, cp_model.IntVar] = {}
     for index, item in enumerate(activities):
         duration = math.ceil(item.duration.total_seconds() / 60)
         before = math.ceil(item.travel_before.total_seconds() / 60)
@@ -132,6 +151,20 @@ def plan_activities(
                 )
                 model.add_no_overlap([session, night])
         penalties.append(MISSING_PENALTY * (1 - present))
+        presents[index], session_ends[index] = present, start + duration
+        if item.preferred_day is not None or item.sequence_group is not None:
+            # Local calendar day of each possible start (DST-safe: computed per slot).
+            table = [local_day(GRID_MINUTES * value) for value in range(first, last + 1)]
+            day_var = model.new_int_var(min(table), max(table), f"day_{index}")
+            offset = model.new_int_var(0, last - first, f"offset_{index}")
+            model.add(offset == slot - first)
+            model.add_element(offset, table, day_var)
+            days[index] = day_var
+            if item.preferred_day is not None:
+                wanted = (item.preferred_day - origin_day).days
+                gap = model.new_int_var(0, 10**4, f"daygap_{index}")
+                model.add_abs_equality(gap, day_var - wanted)
+                penalties.append(DAY_PREFERENCE_PENALTY * gap)
         for weight, anchor in ((STABILITY_WEIGHT, item.previous_start), (1, item.preferred_start)):
             if anchor is not None:
                 target = round(_minutes(origin, anchor))
@@ -139,6 +172,21 @@ def plan_activities(
                 model.add_abs_equality(distance, start - target)
                 penalties.append(weight * distance)
         entries.append((item, present, slot))
+
+    groups: dict[str, list[int]] = {}
+    for index, item in enumerate(activities):
+        if item.sequence_group is not None:
+            groups.setdefault(item.sequence_group, []).append(index)
+    for members in groups.values():
+        members.sort(key=lambda i: activities[i].sequence_index)
+        for before_index, after_index in itertools.pairwise(members):
+            both = [presents[before_index], presents[after_index]]
+            model.add(
+                GRID_MINUTES * entries[after_index][2] >= session_ends[before_index]
+            ).only_enforce_if(both)
+            rest = activities[after_index].min_days_after_previous
+            if rest:
+                model.add(days[after_index] >= days[before_index] + rest).only_enforce_if(both)
 
     model.add_no_overlap(intervals)
     model.minimize(sum(penalties))

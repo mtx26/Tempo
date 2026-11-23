@@ -82,6 +82,10 @@ class TrainingRequest:
     place: Place | None = None
     preferred_start: datetime | None = None
     previous_start: datetime | None = None
+    preferred_day: date | None = None
+    sequence_group: str | None = None
+    sequence_index: int = 0
+    min_days_after_previous: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +203,10 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 previous_start=request.previous_start,
                 travel_before=before,
                 travel_after=after,
+                preferred_day=request.preferred_day,
+                sequence_group=request.sequence_group,
+                sequence_index=request.sequence_index,
+                min_days_after_previous=request.min_days_after_previous,
             )
         )
     activity_plan = plan_activities(flexible, fixed_busy, tz)

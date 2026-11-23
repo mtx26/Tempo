@@ -316,6 +316,8 @@ def _activity_out(row: ActivityRow) -> dict[str, Any]:
         "locked": row.locked,
         "status": row.status,
         "source": row.source,
+        "preferred_day": None if row.preferred_day is None else row.preferred_day.isoformat(),
+        "user_modified": row.user_modified,
     }
 
 
@@ -372,9 +374,49 @@ def patch_activity(
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
     if changes.get("locked") and row.kind == "training" and row.planned_start_at is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "training not placed yet: nothing to lock")
+    if changes.get("status") == "active" and row.duration_minutes is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "confirm the duration first")
     for key, value in changes.items():
         setattr(row, key, value)
+    if changes:
+        row.user_modified = True  # a re-sent coach plan will not overwrite it silently
     audit(session, ACTOR, "activity_updated", "activity", str(row.id), fields=sorted(changes))
+    set_setting(session, "replan_requested", datetime.now(UTC).isoformat())
+    return _activity_out(row)
+
+
+class ConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    duration_minutes: int = Field(gt=0, le=24 * 60)
+    start: AwareDatetime | None = None
+    """Required for a race (fixed start); must be on the race day."""
+
+
+@router.post("/activities/{activity_id}/confirm")
+def confirm_activity(
+    activity_id: uuid.UUID, body: ConfirmIn, session: SessionDep
+) -> dict[str, Any]:
+    """Give the duration (and race start) the coach's plan did not state: never guessed."""
+    row = session.get(ActivityRow, activity_id, with_for_update=True)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "activity not found")
+    if row.status != "to_confirm":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"activity is {row.status}")
+    duration = timedelta(minutes=body.duration_minutes)
+    if row.kind == "race":
+        if body.start is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "a race needs its start")
+        if not row.earliest_start_at <= body.start < row.latest_end_at:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "start must be on the race day"
+            )
+        row.earliest_start_at, row.latest_end_at = body.start, body.start + duration
+    elif row.latest_end_at - row.earliest_start_at < duration:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "longer than its window")
+    row.duration_minutes = body.duration_minutes
+    row.status = "active"
+    row.user_modified = True
+    audit(session, ACTOR, "activity_confirmed", "activity", str(row.id))
     set_setting(session, "replan_requested", datetime.now(UTC).isoformat())
     return _activity_out(row)
 

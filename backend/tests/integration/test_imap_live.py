@@ -22,13 +22,27 @@ pytestmark = [
 ]
 
 
-def send(user: str, sender: str, subject: str, body: str, display: str | None = None) -> None:
+def send(
+    user: str,
+    sender: str,
+    subject: str,
+    body: str,
+    display: str | None = None,
+    attachment: bytes | None = None,
+) -> None:
     message = EmailMessage()
     message["From"] = f"{display} <{sender}>" if display else sender
     message["To"] = user
     message["Subject"] = subject
     message["Message-ID"] = f"<{uuid.uuid4()}@test>"
     message.set_content(body)
+    if attachment is not None:
+        message.add_attachment(
+            attachment,
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="Plan Matis (1).docx",
+        )
     assert HOST is not None
     with smtplib.SMTP(HOST, 3025, timeout=10) as smtp:
         smtp.send_message(message)
@@ -65,3 +79,27 @@ def test_only_the_authorised_sender_is_read() -> None:
 def test_invalid_sender_configuration_is_refused() -> None:
     with pytest.raises(ValueError):
         ImapSource("h", "u", "p", 'coach@x.test" OR ALL')
+
+
+def test_coach_docx_attachment_is_extracted() -> None:
+    from tests.docx_fixtures import plan_docx
+
+    assert HOST is not None
+    user = f"student-{uuid.uuid4().hex[:8]}@localhost"
+    docx = plan_docx()
+    send(user, "coach@club.test", "plan", "Confirme la réception", "Jean-Charles", docx)
+    insecure = ssl.create_default_context()
+    insecure.check_hostname = False
+    insecure.verify_mode = ssl.CERT_NONE
+    source = ImapSource(
+        HOST,
+        user,
+        user,
+        "coach@club.test",
+        port=3993,
+        ssl_context=insecure,
+        require_authentication=False,
+    )
+    [message] = source.fetch(datetime.now(UTC).date() - timedelta(days=1))
+    assert message.subject == "plan" and "Confirme" in message.body
+    assert message.attachments == (("Plan Matis (1).docx", docx),)
