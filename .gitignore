@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.pyc
+*.log
+*.db
+*.sqlite3
+secrets/
+*.pem
+*.key
+.DS_Store
