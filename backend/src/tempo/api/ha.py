@@ -30,7 +30,9 @@ def get_session(request: Request) -> Iterator[Session]:
             raise
 
 
-SessionDep = Annotated[Session, Depends(get_session)]
+# scope="function": commit BEFORE the response is sent, so a 2xx always means the write is
+# durable and visible to the next request (default "request" scope commits afterwards).
+SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 
 
 def _out(row: StudyTaskRow) -> TaskOut:
