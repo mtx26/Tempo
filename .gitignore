@@ -20,3 +20,7 @@ dist/
 *.secret
 .pgdata/
 routing/data/
+graphify-out/
+
+# graphify knowledge graph (local tool output, not versioned)
+graphify-out/
