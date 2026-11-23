@@ -3,7 +3,11 @@
 > **Read `docs/HANDOFF.md` first**: authoritative state as of 2026-11-23 (commit `d89ba6e`), interrupted work,
 > full list of what is NOT done, pending user decisions and known traps. Some status lines below are stale.
 
-## Status (2026-11-23)
+## Status (2026-11-23, end of session 3)
+- Application complete and verified locally (backend 378 tests with real PostgreSQL 16, real MOTIS,
+  real IMAP; HA integration 68 tests on HA 2026.2.3 + 2026.10.4; cross-repo contract test).
+  Last fixes: DB session committed before the HTTP response (`2b52471`, found by the contract
+  test), missed-session tracking (`8f45ade`), Swarm stack + runbook (`2d89ad1`). Not deployed.
 - **Full application backend: DONE locally** (session 3) — planning engine (fixed iCal, flexible
   trainings with travel, fixed races, day outings, mandatory travel, travel-aware study windows,
   CP-SAT + validator, re-planning stability), DB service (versions, proposals, notifications),
@@ -65,16 +69,10 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. Contract test `backend/tests/integration/test_ha_contract.py` (UNCOMMITTED, FAILING): the HA
-   client's `put_place("club", ...)` then `places()` returns only `home` (line ~93). Debug: compare
-   the client's PUT path/payload with `/v1/places/{id}` (aliases normalisation? 409 swallowed?).
-   Run: `TEMPO_TEST_HA_REPO=../../tempo-homeassistant TEMPO_TEST_DATABASE_URL=... uv run pytest
-   tests/integration/test_ha_contract.py`.
-2. M9: Swarm stack file `deploy/stack.yml` (not deployed) + runbook; M5b DOCX training plans once
-   the coach's sender address is provided (docs/TRAINING_EMAILS.md).
-3. Done this session: planning engine/service, full HA API, worker, M5a, AI interpret, security
-   review fixes (`3c9bc03`), DB roles + backup/restore drill, E2E with real MOTIS, HA integration
-   (`../tempo-homeassistant`, 68 tests on HA 2026.2.3 and 2026.10.4).
+All technically achievable work without the user is done (see "Blockers"). Optional low-priority
+items: iCal series-master move paired as "changed" (D012), DST-gap flag for floating times,
+CP-SAT greedy warm start, same-subject adjacency across midnight, STIB waiting-times adapter,
+HA brand icon. Everything else needs a user decision or credentials.
 Local services: PostgreSQL via `backend/scripts/dev_postgres.py` (if pgserver times out after an
 unclean stop, postgres may still come up on the printed port — check `.pgdata/log`); MOTIS
 `tempo-motis-brussels` (18080); nationwide volume `tempo-routing-belgium` (server

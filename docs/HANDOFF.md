@@ -6,6 +6,13 @@ Written 2026-11-23 for a future model/session. **This file is authoritative over
 ---
 
 ## 0. Session 3 summary (2026-11-23, latest)
+State: application complete locally; nothing pushed, published or deployed. Remaining work needs
+the user: deployment approval + secrets (docs/DEPLOYMENT.md "Swarm deployment"), Belgian
+Mobility key, coach's sender address + .docx sample (M5b, docs/TRAINING_EMAILS.md), HA repo
+publication + licence, LLM key (optional). Contract test:
+`TEMPO_TEST_HA_REPO=../../tempo-homeassistant` (needs the sibling repo).
+Unexplained event: `routing/config/*.yml` disappeared from disk once (restored from git).
+
 Commits after `cca3329`: `99a1c24` schema 0003 + stability + trainings, `a05006e`/`501b8d1`
 planning engine + service, `52400a4` HA API, `db78fb0` worker, `4bf6b74` M5 + interpret/LLM.
 Run everything: PostgreSQL (`dev_postgres.py`), MOTIS Brussels (18080), GreenMail for IMAP
