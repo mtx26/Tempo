@@ -9,3 +9,24 @@ Before production: verify resources for Belgian graph and MOTIS, test HA connect
 - Two roles: a migration role (DDL) used by a one-shot migration job, and a runtime role with only DML
   rights; `audit_entry` limited to INSERT/SELECT for the runtime role (append-only audit).
 - A failed sync must be recorded in a separate transaction by the worker (milestone 7).
+
+## Images (built and smoke-tested locally 2026-11-23; nothing pushed or deployed)
+| Image | Source | Notes |
+|---|---|---|
+| `tempo-backend` | `backend/Dockerfile` | uv 0.13.9 + python:3.13-slim-bookworm pinned by digest, multi-stage, non-root uid 10002, 599 MB (venv 307 MB, mostly OR-Tools). Default `python -m tempo.api` (port 8000); relay `python -m tempo.transport.rt_relay` (port 8090). |
+| `tempo-routing` | `routing/Dockerfile` | MOTIS v2.11.4 release binary pinned by SHA-256, non-root. |
+
+Smoke test (local, `--read-only --tmpfs /tmp`): API `/health` 200, no `Server` header, `/v1/status`
+401 without token and 200 with the token read from `/run/secrets/tempo_api_token`; token not in
+logs. Relay `/health` 200 in anonymous mode without calling the portal.
+
+Service requirements for the future stack:
+- `tempo-api`: secrets `tempo_api_token`, `tempo_database_url`; internal network shared with HA.
+- `tempo-rt-relay`: **replicas: 1**; secret `tempo_relay_bmc_partner_key` (optional, Standard
+  tier); `TEMPO_RELAY_STATE_FILE` on a small persistent volume; outbound HTTPS to
+  `api-management-discovery-production.azure-api.net` only; reachable by `tempo-routing` only.
+- `tempo-routing`: data volume from `motis import`, config `routing/config/belgium.yml`.
+- Health checks: the image has no curl; use
+  `python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"`.
+- Still open before deployment: 401 rate limiting and token rotation (two valid tokens), worker,
+  migration job, DB roles, backups/restore drill, resource benchmark on the Swarm node.

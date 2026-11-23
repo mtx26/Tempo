@@ -9,6 +9,8 @@
   and registered (`tempo.transport.feeds`); GTFS-RT relay (`tempo.transport.rt_relay`: key secret,
   quota guard, back-off, freshness 503, TEC repair 50 % → 100 %); service alerts parsed and filtered
   by impact period (D021, D022); real +7 min live delay observed. Standard key not yet available.
+- **M1 image: DONE locally** — `backend/Dockerfile` (pinned digests, non-root, read-only FS OK),
+  `python -m tempo.api` entry point (`server_header=False`); smoke-tested, see docs/DEPLOYMENT.md.
 - **M4d (departure re-check): DONE (library)** — `tempo.transport.departure.check_departure`: fresh
   phone GPS only, live routing, statuses on_time/leave_now/leave_earlier/at_risk/late/impossible/
   unknown_*. Not yet scheduled by a worker nor exposed to HA (M7/M6).
@@ -51,7 +53,8 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. M1 leftovers that block deployment: Dockerfile for api/worker/relay, dev compose stack.
+1. M1 leftovers: dev compose stack (api + postgres + relay + motis); API 401 rate limiting and
+   token rotation (two valid tokens) — security items before any deployment.
 2. M6 HA integration in `../tempo-homeassistant` (needs user OK for HA test toolkit); M5 training
    sync; M7 worker/approvals; M9 deployment docs.
 Local services: PostgreSQL via `backend/scripts/dev_postgres.py` (if pgserver times out after an

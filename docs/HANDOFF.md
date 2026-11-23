@@ -62,12 +62,12 @@ from `routing/README.md`, otherwise `test_motis_live.py` fails (correct signal, 
 ## 3. Remaining roadmap (not started unless stated)
 
 ### M1 leftovers (backend foundation)
-- Docker image for the backend API/worker (multi-stage, non-root, pinned base) — not written.
+- Docker image for the backend: DONE (`backend/Dockerfile`, API + relay; worker entry point later).
 - `docker-compose`/dev stack (api + postgres + motis) — not written.
 - CI `.github/workflows/backend.yml` exists (with Postgres service + pip-audit) but has **never run**
   (no remote). It does not start MOTIS, so live MOTIS tests will be skipped in CI.
-- Server entrypoint (uvicorn) not written: when writing it, set `server_header=False`, add 401 rate
-  limiting, support two valid tokens for rotation (open items from the security review).
+- Server entrypoint `python -m tempo.api` written (`server_header=False`). Still open: 401 rate
+  limiting, two valid tokens for rotation (security review items).
 
 ### M2 leftovers (domain and sync)
 - **Availability rules** (weekly windows configured in HA, tagged with a place) — no model/table/API yet.
