@@ -41,10 +41,15 @@ Code: `backend/src/tempo/transport/`.
   `tests/test_travel.py`).
 
 ## Verification status — read carefully
-- **Verified:** request building and response parsing against a fixture **hand-written from
-  the MOTIS OpenAPI contract** (2026-11-23); all travel logic against a deterministic fake provider.
-- **NOT verified:** a real MOTIS server, real Belgian GTFS/GTFS-RT data, real delays, STIB
-  (no realtime feed: legs will report `realtime = false`), timestamp format actually emitted by
-  MOTIS (assumed RFC 3339 with offset, parsed strictly).
-- Real-time re-checks before departure, disruption alerts and multiple departure reminders are
-  part of milestone 7 (worker).
+- **Verified against a REAL MOTIS v2.11.4** (local Docker, Brussels region: STIB + SNCB GTFS of
+  2026-11-23, SNCB GTFS-RT, BBBike OSM — see `routing/README.md`):
+  `tests/integration/test_motis_live.py` (health, arrive-by deadlines, depart-at, STIB never
+  realtime, out-of-region ⇒ no journey, out-of-timetable ⇒ error with MOTIS' reason, full day of
+  travel routed end to end). A real response is recorded in
+  `tests/fixtures/motis_plan_v6_real_brussels.json` and parsed offline.
+- Observed: SNCB GTFS-RT applied (163/164 updates resolved); SNCB legs report `realTime=true`
+  for running trips; STIB legs are static only, as expected. No delay was observed during the
+  session, so **delay handling is verified only on synthetic data**.
+- **NOT verified yet:** nationwide data (config prepared in `routing/config/belgium.yml`), TEC and
+  De Lijn realtime (need a Standard account key), Swarm deployment, long-running feed refresh.
+- Timestamps emitted by MOTIS are RFC 3339 with `Z`; parsed strictly.

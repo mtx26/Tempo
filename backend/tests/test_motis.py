@@ -115,3 +115,34 @@ def test_naive_query_time_is_rejected() -> None:
 def test_invalid_base_url_is_rejected(url: str) -> None:
     with pytest.raises(ValueError):
         MotisClient(url)
+
+
+# --- recorded from a REAL MOTIS v2.11.4 (Brussels test region) ------------------------------
+
+REAL = json.loads(
+    (Path(__file__).parent / "fixtures" / "motis_plan_v6_real_brussels.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def test_recorded_real_response_parses_into_consistent_journeys() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=REAL)
+
+    journeys = client(handler).plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True)
+    assert len(journeys) == len(REAL["itineraries"]) + len(REAL["direct"])
+    agencies = {leg.agency for j in journeys for leg in j.legs if leg.is_transit}
+    assert "STIB" in agencies
+    stib_legs = [leg for j in journeys for leg in j.legs if leg.agency == "STIB"]
+    assert all(not leg.realtime for leg in stib_legs)  # STIB publishes no realtime feed
+
+
+def test_server_error_message_is_kept_in_the_exception() -> None:
+    message = "query time 2027-01-22 09:56 is outside of loaded timetable window"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(400, json={"error": message})
+
+    with pytest.raises(RoutingUnavailableError, match="outside of loaded timetable window"):
+        client(handler).plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True)

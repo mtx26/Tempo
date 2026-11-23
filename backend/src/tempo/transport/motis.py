@@ -57,6 +57,18 @@ def _journey(raw: dict[str, Any]) -> Journey:
     )
 
 
+MAX_ERROR_TEXT = 300
+
+
+def _error_text(response: httpx2.Response) -> str:
+    """MOTIS error message (e.g. query outside the loaded timetable window), truncated."""
+    try:
+        text = str(response.json().get("error", ""))
+    except (ValueError, AttributeError):
+        text = response.text
+    return " ".join(text.split())[:MAX_ERROR_TEXT] or "no error message"
+
+
 class MotisClient:
     def __init__(
         self,
@@ -92,7 +104,9 @@ class MotisClient:
         except httpx2.HTTPError as exc:
             raise RoutingUnavailableError(f"MOTIS request failed: {type(exc).__name__}") from exc
         if response.status_code != 200:
-            raise RoutingUnavailableError(f"MOTIS returned HTTP {response.status_code}")
+            raise RoutingUnavailableError(
+                f"MOTIS returned HTTP {response.status_code}: {_error_text(response)}"
+            )
         try:
             body = response.json()
             raw = [*body.get("direct", []), *body["itineraries"]]

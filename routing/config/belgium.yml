@@ -1,0 +1,28 @@
+# MOTIS configuration — nationwide Belgium (prepared; benchmark before production).
+server:
+  port: 8080
+osm: /input/osm.pbf
+timetable:
+  first_day: TODAY
+  num_days: 60
+  # Anonymous Belgian Mobility quota (100 req/day) only allows ONE realtime feed polled every
+  # 30 min. TEC and De Lijn realtime need a free Standard account key (12 000 req/day): add
+  #   headers: { bmc-partner-key: <key> }
+  # to each rt entry from a secret at deployment time and lower update_interval to 60.
+  update_interval: 1800
+  http_timeout: 30
+  datasets:
+    stib:
+      path: /input/stib.gtfs.zip
+    sncb:
+      path: /input/sncb.gtfs.zip
+      rt:
+        - url: https://api-management-discovery-production.azure-api.net/api/gtfs/feed/nmbssncb/rt/trip-update?format=protobuf
+    tec:
+      path: /input/tec.gtfs.zip
+    delijn:
+      path: /input/delijn.gtfs.zip
+street_routing: true
+osr_footpath: true
+geocoding: false
+reverse_geocoding: false

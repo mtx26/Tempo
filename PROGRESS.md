@@ -16,13 +16,17 @@
   PostgreSQL 16 (pgserver, D016); production PostgreSQL on Swarm not tested.
 - Milestone 4 (transport): CODE DONE — places/aliases, phone position freshness, origin inference, MOTIS
   `/api/v6/plan` client (httpx2), mandatory travel blocks, travel-aware study windows, end-to-end with the
-  planner. Reviewed by agent `transport` (9 findings fixed). **MOTIS NOT validated against a real server.**
+  planner. Reviewed by agent `transport` (9 findings fixed). Commit `8e86135`.
+- Milestone 4b (real MOTIS): DONE for the Brussels test region — local Docker MOTIS v2.11.4 (pinned SHA-256),
+  STIB + SNCB GTFS, SNCB GTFS-RT, BBBike OSM; import 20 s, 182 MB, ~103 MB RAM; 7 live integration tests
+  pass; real response recorded as fixture; MOTIS error reasons surfaced. Nationwide config prepared, not run.
 - Repository split (D010): `../tempo-homeassistant` created locally (commit `c485e2c`, scaffold only, OWNER
   placeholders, not published). `homeassistant/` removed from this repo.
 - Deployment: none. Local commits only: `43a9091` (phase 0 + M1 + ICS), `3e51017` (M3), `220cda8` (M2b), M4 commit (see git log).
 
 ## Quality gates (last local run, backend/)
-- Last full run (M4): 170 passed (15 integration on real PostgreSQL 16), coverage 98 %; ruff, mypy strict, pip-audit clean.
+- Last full run (M4b, PostgreSQL + MOTIS live): 179 passed, coverage 98 %; ruff, mypy strict clean.
+- Previous run (M4): 170 passed (15 integration on real PostgreSQL 16), coverage 98 %; ruff, mypy strict, pip-audit clean.
 - Previous run (M2b): `TEMPO_TEST_DATABASE_URL=… uv run pytest -q --cov=tempo`: 106 passed (15 integration on
   real PostgreSQL 16), coverage 98 %; ruff + `mypy --strict src tests` pass; pip-audit: no known vulnerabilities.
 - Without `TEMPO_TEST_DATABASE_URL`, the 15 integration tests are reported SKIPPED (explicit reason).
@@ -31,9 +35,10 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. Local MOTIS smoke test with Docker Desktop (available since 2026-11-23): MOTIS v2.11.x linux binary,
-   STIB + SNCB GTFS (anonymous BMC downloads, CC BY 4.0), small OSM extract; check the client against real
-   responses; record findings in docs/TRANSPORT.md. Disk: 31 GB free — keep data under ~2 GB.
+1. Nationwide MOTIS benchmark locally (`python routing/fetch_data.py belgium`, config/belgium.yml): measure
+   download size, import time, RAM, disk, query latency; record in routing/README.md and FEASIBILITY.md.
+   Local services used by tests: PostgreSQL via `backend/scripts/dev_postgres.py`, MOTIS container
+   `tempo-motis-brussels` on 127.0.0.1:18080 (stop with `docker stop tempo-motis-brussels`).
 2. M6 HA integration in `../tempo-homeassistant`; M5 training sync; M7 worker/approvals; M9 deployment docs.
 
 ## Session log
