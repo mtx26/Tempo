@@ -14,6 +14,7 @@ Written 2026-11-23 for a future model/session. **This file is authoritative over
 | `220cda8` | M2b PostgreSQL schema, Alembic 0001, safe idempotent iCal sync with audit | integration tests on a REAL local PostgreSQL 16 |
 | `8e86135` | M4 transport: places, phone position freshness, origin inference, MOTIS client, mandatory travel, travel-aware study windows (`docs/TRANSPORT.md`) | unit tests + fakes |
 | `e84bafd` | M4b real MOTIS v2.11.4 in Docker (Brussels region), 7 live integration tests (`routing/README.md`) | live tests against the real local MOTIS |
+| (M4c) | Nationwide benchmark, 10 Belgian feeds, GTFS-RT relay, TEC repair, alerts | 255 tests + live portal/national MOTIS |
 | `d89ba6e` | M6a private API for HA: `/v1/tasks` (list/create/patch), `/v1/location`, Alembic 0002 `phone_position` | integration tests on real PostgreSQL |
 
 Last full run (at `d89ba6e`): **198 tests passed**, coverage 98 %, `ruff check`, `ruff format --check`,
@@ -41,7 +42,9 @@ from `routing/README.md`, otherwise `test_motis_live.py` fails (correct signal, 
 
 ## 2. Interrupted work (finish or redo first)
 
-1. **Nationwide MOTIS import benchmark — interrupted, result unknown.**
+1. ~~Nationwide MOTIS import benchmark~~ — **DONE in M4c** (the import had in fact succeeded:
+   3 min 29 s, exit 0). Results in `routing/README.md`. Text below kept for history.
+   **Nationwide MOTIS import benchmark — (was) interrupted.**
    Data downloaded to `routing/data/belgium/` (957 MB: OSM 700 MB, De Lijn 184 MB, TEC 97 MB, STIB, SNCB;
    manifest.json present). The import container `tempo-motis-import-be` (volume `tempo-routing-belgium`,
    `--memory 7g`, config `routing/config/belgium.yml`) was started in background; the session ended before
@@ -83,9 +86,14 @@ from `routing/README.md`, otherwise `test_motis_live.py` fails (correct signal, 
   availability) or persists `schedule_version` / `study_block` rows.
 
 ### M4 leftovers (transport)
-- Nationwide benchmark (§2.1). TEC and De Lijn **realtime** need a free Belgian Mobility **Standard
-  account key** (user action), stored as a secret, then `bmc-partner-key` header + `update_interval: 60`.
-  Anonymous quota (100 req/day) only allows SNCB realtime every 30 min.
+- M4c done: 10 feeds + relay + TEC repair + alerts (docs/TRANSPORT.md "Belgian feeds", D021/D022).
+  Remaining: Standard key from the user (secret `tempo_relay_bmc_partner_key`) and verification that
+  the portal host accepts it; relay long-running test; gzip support unknown (~6 GB/day downloads at
+  default intervals — consider longer intervals on the home server); SNCB 10 % unresolved trip
+  updates not investigated; relay has no Dockerfile/Swarm service yet.
+- M4d done as a library (`departure.py`); scheduling of checks + HA notifications = M7/M6.
+- Relay deployment: one replica, persistent `TEMPO_RELAY_STATE_FILE`; `belgium.yml` with relay
+  URLs was not re-imported as-is (keys match the MOTIS-dumped config; verify on first import).
 - STIB has no GTFS-RT: optional later adapter using STIB waiting-times JSON API.
 - Delay handling only verified on synthetic data (no delay observed live).
 - No MOTIS pagination (`nextPageCursor`); one malformed leg invalidates the whole answer (strict).

@@ -4,6 +4,14 @@
 > full list of what is NOT done, pending user decisions and known traps. Some status lines below are stale.
 
 ## Status (2026-11-23)
+- **M4c (Belgian realtime feeds): DONE locally** — nationwide MOTIS benchmark finished (import 3 min 29 s,
+  1.8 GB, server 0.7–0.9 GB RAM, median query 100–130 ms); 10 Belgian feeds verified by real requests
+  and registered (`tempo.transport.feeds`); GTFS-RT relay (`tempo.transport.rt_relay`: key secret,
+  quota guard, back-off, freshness 503, TEC repair 50 % → 100 %); service alerts parsed and filtered
+  by impact period (D021, D022); real +7 min live delay observed. Standard key not yet available.
+- **M4d (departure re-check): DONE (library)** — `tempo.transport.departure.check_departure`: fresh
+  phone GPS only, live routing, statuses on_time/leave_now/leave_earlier/at_risk/late/impossible/
+  unknown_*. Not yet scheduled by a worker nor exposed to HA (M7/M6).
 - Phase 0 (feasibility): desk research done → `docs/FEASIBILITY.md`. MOTIS Belgium benchmark NOT done (needs server/Docker).
 - Milestone 1 (backend foundation): PARTIAL — `backend/` uv project, typed `Settings`, FastAPI app factory,
   public `/health`, bearer-protected `/v1/status`. Postgres, Alembic, Docker dev stack: not started.
@@ -28,6 +36,11 @@
 - Deployment: none. Local commits only: `43a9091` (phase 0 + M1 + ICS), `3e51017` (M3), `220cda8` (M2b), M4 commit (see git log).
 
 ## Quality gates (last local run, backend/)
+- M4c + M4d: 278 passed with real PostgreSQL 16 + real MOTIS Brussels (10 skipped there, run
+  separately: nationwide MOTIS 7/7, live portal 3/3), coverage 98 %; ruff, ruff format, mypy strict
+  clean; pip-audit: no known vulnerabilities. Adversarial review by agent `transport`: 3 bugs + 5
+  issues fixed with regression tests; its "stale data kept by MOTIS" hypothesis was tested live
+  and refuted (MOTIS drops realtime when the relay answers 503).
 - Last full run (M4b, PostgreSQL + MOTIS live): 179 passed, coverage 98 %; ruff, mypy strict clean.
 - Previous run (M4): 170 passed (15 integration on real PostgreSQL 16), coverage 98 %; ruff, mypy strict, pip-audit clean.
 - Previous run (M2b): `TEMPO_TEST_DATABASE_URL=… uv run pytest -q --cov=tempo`: 106 passed (15 integration on
@@ -38,13 +51,17 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. Nationwide MOTIS benchmark locally (`python routing/fetch_data.py belgium`, config/belgium.yml): measure
-   download size, import time, RAM, disk, query latency; record in routing/README.md and FEASIBILITY.md.
-   Local services used by tests: PostgreSQL via `backend/scripts/dev_postgres.py`, MOTIS container
-   `tempo-motis-brussels` on 127.0.0.1:18080 (stop with `docker stop tempo-motis-brussels`).
-2. M6 HA integration in `../tempo-homeassistant`; M5 training sync; M7 worker/approvals; M9 deployment docs.
+1. M1 leftovers that block deployment: Dockerfile for api/worker/relay, dev compose stack.
+2. M6 HA integration in `../tempo-homeassistant` (needs user OK for HA test toolkit); M5 training
+   sync; M7 worker/approvals; M9 deployment docs.
+Local services: PostgreSQL via `backend/scripts/dev_postgres.py` (if pgserver times out after an
+unclean stop, postgres may still come up on the printed port — check `.pgdata/log`); MOTIS
+`tempo-motis-brussels` (18080); nationwide volume `tempo-routing-belgium` (server
+`tempo-motis-belgium`, stopped) and test copy `tempo-routing-belgium-rttest` (container
+`tempo-motis-be-rttest`, stopped, config points to a relay on host.docker.internal:8090).
 
 ## Session log
+- 2026-11-23 (M4c): nationwide benchmark, 10 feeds verified, relay + TEC repair, alerts policy.
 - Initial starter files and requirements authored.
 - 2026-11-23: environment audit, feasibility research (MOTIS v2.11.4, Belgian Mobility portal & terms,
   HACS/HA manifest rules), backend skeleton, domain models, ICS import. TDD found two real library issues
@@ -59,7 +76,9 @@
 
 ## Blockers / decisions requiring user
 - D010: HACS repository layout (dedicated public integration repo vs. public monorepo).
-- Create a free Belgian Mobility developer account (Standard tier) before live polling; key stored as a secret.
+- Create a free Belgian Mobility developer account (Standard tier); key → Docker secret
+  `tempo_relay_bmc_partner_key`. Then run `TEMPO_TEST_BMC_KEY=... TEMPO_TEST_PORTAL_LIVE=1 pytest
+  tests/integration/test_portal_live.py` to verify the key header on this host (unverified).
 - Install Docker Desktop (or use WSL Ubuntu) for local PostgreSQL/MOTIS tests; C: has only 32 GB free.
 - MOTIS Belgium resource benchmark must run on the Swarm node — requires approval and access.
 - Choose LLM API provider and secret management strategy.

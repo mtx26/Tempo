@@ -170,6 +170,18 @@ wheels = [
 ]
 
 [[package]]
+name = "gtfs-realtime-bindings"
+version = "2.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/63/3e3d190df599b6d25e2c0793f6653bb696c1be8480263ef417ea70a40f25/gtfs_realtime_bindings-2.2.0.tar.gz", hash = "sha256:1e184075ff6aae1f8e8c91ae28eb946af5e5b656b743a41a7bca37818784886b", size = 12013, upload-time = "2026-07-29T19:12:47.132Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/14/a73fbb70b7948cd2d2f1c48846889fc6c944a6aede25a31d8111a1d48dcf/gtfs_realtime_bindings-2.2.0-py3-none-any.whl", hash = "sha256:4f222a962bcb8715d9305cc08e7f7662cc70e7479f377e2694439a50724bc676", size = 11297, upload-time = "2026-07-29T19:12:46.089Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -714,6 +726,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
+    { name = "gtfs-realtime-bindings" },
     { name = "httpx2" },
     { name = "icalendar" },
     { name = "ortools" },
@@ -732,12 +745,14 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-protobuf" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.1" },
     { name = "fastapi", specifier = ">=0.165" },
+    { name = "gtfs-realtime-bindings", specifier = ">=2.0" },
     { name = "httpx2", specifier = ">=2.16" },
     { name = "icalendar", specifier = ">=7.3.2" },
     { name = "ortools", specifier = ">=9.15" },
@@ -756,6 +771,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-cov", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.9" },
+    { name = "types-protobuf", specifier = ">=7.35.1.20261122" },
 ]
 
 [[package]]
@@ -765,6 +781,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ee/9f/c5201d42a484c061e528825fc8e2d565f5abd50a4ced6fb7d29c4ec99b2b/truststore-0.10.5.tar.gz", hash = "sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd", size = 28091, upload-time = "2026-10-12T22:27:31.808Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl", hash = "sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c", size = 19017, upload-time = "2026-10-12T22:27:30.377Z" },
+]
+
+[[package]]
+name = "types-protobuf"
+version = "7.35.1.20261122"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2b/01/2b04865447656eeb92eb075e42c221d6a2262aef89ccc2053d556381404a/types_protobuf-7.35.1.20261122.tar.gz", hash = "sha256:705644f0c8618252eacf878047dc649b875eb8f4b7518df336513173334a1976", size = 69901, upload-time = "2026-11-22T08:57:48.005Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/9c/1f3c4f73b50db06a1ec4f1c76d696738d5bbe3c85966abfc3f7ac8bdd83c/types_protobuf-7.35.1.20261122-py3-none-any.whl", hash = "sha256:b4e002599d9d7e8e377dd0faa5e70d133081148a0e370ba920f93c402526ed90", size = 86471, upload-time = "2026-11-22T08:57:46.937Z" },
 ]
 
 [[package]]

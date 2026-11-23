@@ -87,7 +87,8 @@ are written to **skip explicitly**, never to pass silently.
 
 Technically feasible with these gates:
 1. User creates a free Belgian Mobility account (Standard tier) before live polling.
-2. MOTIS Belgium import benchmarked on the Swarm node (RAM, disk, import time, query latency) —
-   not possible on this PC (no Docker, 32 GB free).
+2. MOTIS Belgium import benchmarked on the Swarm node (RAM, disk, import time, query latency).
+   Done on the dev PC on 2026-11-23 (import 3 min 29 s, 1.8 GB data, ~0.7–0.9 GB server RAM, median
+   query 100–130 ms; routing/README.md); still to repeat on the Swarm node before production.
 3. STIB realtime explicitly unsupported in MVP; Tempo reports "static timetable only" for STIB legs.
 4. Decide HACS repository layout (D010) and LLM provider before the corresponding milestones.

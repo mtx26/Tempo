@@ -4,7 +4,10 @@ Resolution is deliberately exact (case- and whitespace-insensitive): an unknown 
 ``None`` so the caller asks the user, instead of guessing a place.
 """
 
+import math
 from dataclasses import dataclass, field
+
+EARTH_RADIUS_M = 6_371_008.8
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +21,13 @@ class Coordinates:
 
     def as_motis(self) -> str:
         return f"{self.lat:.6f},{self.lon:.6f}"
+
+    def distance_m(self, other: "Coordinates") -> float:
+        """Great-circle (haversine) distance in metres."""
+        lat1, lat2 = math.radians(self.lat), math.radians(other.lat)
+        d_lat, d_lon = lat2 - lat1, math.radians(other.lon - self.lon)
+        h = math.sin(d_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(d_lon / 2) ** 2
+        return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(h))
 
 
 @dataclass(frozen=True, slots=True)

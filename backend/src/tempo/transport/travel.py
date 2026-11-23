@@ -4,7 +4,11 @@ Conventions (docs/REQUIREMENTS.md: travel is mandatory, never invented):
 - Outbound trips must arrive ``buffer`` before the event; the travel block spans from the
   chosen departure up to the event start (the margin is part of the block).
 - Return trips have no deadline: the block spans from the event end to the arrival.
-- Among feasible journeys the latest departure wins (least waiting), then fewest transfers.
+- Among feasible journeys the latest departure wins (least waiting); only between equal
+  departures do fewer timed severe notices, then fewer transfers, decide. Alerts never exclude
+  a journey (MOTIS attaches network-wide notices); cancelled trips are already removed by the
+  provider.
+- Live delays and relevant severe notices of chosen journeys are reported as ``warnings``.
 - No feasible journey ⇒ IMPOSSIBLE (reported, gap blocked). Routing outage ⇒ UNKNOWN (reported,
   gap blocked). No journey is ever fabricated.
 """
@@ -47,6 +51,8 @@ class TravelBlock:
 class TravelPlan:
     blocks: list[TravelBlock] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    """Live delays and disruption notices on routed journeys (informative, not blocking)."""
 
     def busy_intervals(self) -> list[Interval]:
         return [Interval(b.start, b.end) for b in self.blocks if b.end > b.start]
@@ -98,7 +104,7 @@ def _arrive_by(
     ]
     if not feasible:
         return None
-    return max(feasible, key=lambda j: (_u(j.departure), -j.transfers))
+    return max(feasible, key=lambda j: (_u(j.departure), -j.severe_disruptions, -j.transfers))
 
 
 def _depart_after(
@@ -108,11 +114,39 @@ def _depart_after(
     feasible = [j for j in journeys if _u(j.departure) >= _u(earliest)]
     if not feasible:
         return None
-    return min(feasible, key=lambda j: (_u(j.arrival), j.transfers))
+    return min(feasible, key=lambda j: (_u(j.arrival), j.severe_disruptions, j.transfers))
 
 
 def _label(origin: Place, destination: Place, when: datetime) -> str:
     return f"{origin.name} -> {destination.name} ({when.isoformat()})"
+
+
+REPORTED_DELAY = timedelta(minutes=2)
+
+
+def _warn(plan: TravelPlan, message: str) -> None:
+    if message not in plan.warnings:
+        plan.warnings.append(message)
+
+
+def _journey_warnings(plan: TravelPlan, journey: Journey, label: str) -> None:
+    for leg in journey.legs:
+        late = max(leg.delay, leg.arrival_delay)
+        if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
+            minutes = int(late.total_seconds() // 60)
+            _warn(plan, f"live delay +{minutes} min on {leg.line or leg.mode} ({label})")
+    for alert in journey.timed_disruptions:
+        if alert.severe:
+            _warn(plan, f"disruption notice {alert.effect}: {alert.header} ({label})")
+    agencies = sorted(
+        {leg.agency or leg.mode for leg in journey.legs for a in leg.alerts if not a.impact_periods}
+    )
+    if any(alert.severe for alert in journey.untimed_disruptions):
+        _warn(
+            plan,
+            f"operator notices without impact period ({', '.join(agencies)}) were not checked "
+            "against the planned journeys",
+        )
 
 
 def _outbound(
@@ -146,6 +180,7 @@ def _outbound(
             journey.departure, target.start, origin, target.place, TravelStatus.ROUTED, journey
         )
     )
+    _journey_warnings(plan, journey, _label(origin, target.place, deadline))
 
 
 def _return_trip(
@@ -164,6 +199,7 @@ def _return_trip(
                 last.end, journey.arrival, last.place, end_place, TravelStatus.ROUTED, journey
             )
         )
+        _journey_warnings(plan, journey, label)
         return
     if status is TravelStatus.IMPOSSIBLE:
         plan.issues.append(f"no return journey found {label}")

@@ -1,8 +1,8 @@
 """HTTP client for a private MOTIS instance (``GET /api/v6/plan``).
 
-Built from the MOTIS OpenAPI contract read on 2026-11-23 (docs/FEASIBILITY.md §3). Only
-validated against hand-written fixtures; compatibility with a running MOTIS server is NOT yet
-verified. Any transport or format problem raises ``RoutingUnavailableError`` — never partial data.
+Built from the MOTIS OpenAPI contract read on 2026-11-23 (docs/FEASIBILITY.md §3) and verified
+against a REAL MOTIS v2.11.4 (Brussels and nationwide data, recorded fixtures, live tests). Any
+transport or format problem raises ``RoutingUnavailableError`` — never partial data.
 """
 
 from datetime import UTC, datetime
@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import httpx2
 
 from tempo.transport.places import Coordinates
-from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
+from tempo.transport.routing import Journey, Leg, RoutingUnavailableError, ServiceAlert
 
 PLAN_PATH = "/api/v6/plan"
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -25,6 +25,36 @@ def _time(value: Any) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("timestamp without UTC offset")
     return parsed
+
+
+UNSET_BEFORE = datetime(1970, 1, 2, tzinfo=UTC)
+
+
+def _optional_time(value: Any) -> datetime | None:
+    """Missing bound, or an epoch-0 placeholder for "no bound", means unbounded."""
+    if value is None:
+        return None
+    parsed = _time(value)
+    return None if parsed < UNSET_BEFORE else parsed
+
+
+def _alert(raw: dict[str, Any]) -> ServiceAlert:
+    header = str(raw.get("headerText") or "").strip()
+    description = str(raw.get("descriptionText") or "").strip()
+    effect = str(raw.get("effect") or "UNKNOWN_EFFECT")
+    periods = tuple(
+        (_optional_time(p.get("start")), _optional_time(p.get("end")))
+        for p in raw.get("impactPeriod") or ()
+    )
+    url = raw.get("url")
+    return ServiceAlert(
+        header=header or description[:120] or effect,
+        description=description,
+        cause=str(raw.get("cause") or "UNKNOWN_CAUSE"),
+        effect=effect,
+        url=str(url) if url else None,
+        impact_periods=periods,
+    )
 
 
 def _leg(raw: dict[str, Any]) -> Leg:
@@ -41,6 +71,7 @@ def _leg(raw: dict[str, Any]) -> Leg:
         line=raw.get("routeShortName"),
         agency=raw.get("agencyName"),
         distance_m=raw.get("distance"),
+        alerts=tuple(_alert(alert) for alert in raw.get("alerts") or ()),
     )
 
 

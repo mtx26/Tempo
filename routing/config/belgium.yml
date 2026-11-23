@@ -1,27 +1,47 @@
-# MOTIS configuration — nationwide Belgium (prepared; benchmark before production).
+# MOTIS configuration — nationwide Belgium (benchmarked locally 2026-11-23, see README.md).
+#
+# Realtime goes through the Tempo GTFS-RT relay (backend `tempo.transport.rt_relay`), never
+# directly to the Belgian Mobility portal:
+#   - the relay holds the bmc-partner-key (Docker secret) and enforces the portal quota, so no
+#     key is ever written into this file or into the routing data volume;
+#   - the relay repairs TEC (start_time shifted by 12 h: ~50 % of TEC trip updates unusable
+#     otherwise) and refuses stale or broken feeds with HTTP 503. With incremental_rt_update:
+#     false MOTIS then DROPS its realtime data for that feed (verified live 2026-11-23), so
+#     stale delays are never shown as live.
+# MOTIS may poll the relay every minute: the relay only calls the portal when its own
+# interval (default 2 min trip updates / 10 min alerts with a Standard key) has elapsed.
+# Without a key the relay serves only SNCB trip updates (anonymous quota): the other five
+# URLs answer 404 and MOTIS logs an error for them — expected, not a failure of Tempo.
+# Host `tempo-rt-relay` = Swarm service name; locally use
+#   docker run --add-host tempo-rt-relay:host-gateway ...
 server:
   port: 8080
 osm: /input/osm.pbf
 timetable:
   first_day: TODAY
   num_days: 60
-  # Anonymous Belgian Mobility quota (100 req/day) only allows ONE realtime feed polled every
-  # 30 min. TEC and De Lijn realtime need a free Standard account key (12 000 req/day): add
-  #   headers: { bmc-partner-key: <key> }
-  # to each rt entry from a secret at deployment time and lower update_interval to 60.
-  update_interval: 1800
+  update_interval: 60
+  incremental_rt_update: false   # required: see header (stale data must disappear)
   http_timeout: 30
   datasets:
     stib:
+      # STIB-MIVB publishes no GTFS-RT: STIB legs are static timetable only.
       path: /input/stib.gtfs.zip
     sncb:
       path: /input/sncb.gtfs.zip
       rt:
-        - url: https://api-management-discovery-production.azure-api.net/api/gtfs/feed/nmbssncb/rt/trip-update?format=protobuf
+        - url: http://tempo-rt-relay:8090/feeds/nmbssncb/trip-updates.pbf
+        - url: http://tempo-rt-relay:8090/feeds/nmbssncb/alerts.pbf
     tec:
       path: /input/tec.gtfs.zip
+      rt:
+        - url: http://tempo-rt-relay:8090/feeds/tec/trip-updates.pbf
+        - url: http://tempo-rt-relay:8090/feeds/tec/alerts.pbf
     delijn:
       path: /input/delijn.gtfs.zip
+      rt:
+        - url: http://tempo-rt-relay:8090/feeds/delijn/trip-updates.pbf
+        - url: http://tempo-rt-relay:8090/feeds/delijn/alerts.pbf
 street_routing: true
 osr_footpath: true
 geocoding: false

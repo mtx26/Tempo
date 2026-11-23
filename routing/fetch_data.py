@@ -19,6 +19,7 @@ import json
 import sys
 import time
 import urllib.request
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,6 +39,9 @@ REGIONS: dict[str, dict[str, str]] = {
     },
 }
 USER_AGENT = "tempo-dev-routing-fetch/0.1"
+REPAIRED_FEEDS = ("tec.gtfs.zip",)
+"""Feeds whose realtime is repaired by dropping start_time (backend tempo.transport.gtfsrt, D021):
+only valid while their static GTFS has no frequencies.txt."""
 CHUNK = 1 << 20
 
 
@@ -72,6 +76,12 @@ def main(region: str) -> None:
         print(f"downloading {name} ...", flush=True)
         manifest[name] = download(url, folder / name)
         time.sleep(7)  # stay well below the anonymous 10 requests/minute limit
+    for name in REPAIRED_FEEDS:
+        if name in manifest and "frequencies.txt" in zipfile.ZipFile(folder / name).namelist():
+            raise SystemExit(
+                f"{name} now contains frequencies.txt: the TEC start_time repair (D021) is no "
+                "longer valid. Disable it (feeds.py needs_repair) and re-check TEC resolution."
+            )
     (folder / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest, indent=2))
 

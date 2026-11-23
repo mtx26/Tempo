@@ -1,0 +1,759 @@
+{
+ "requestParameters": {},
+ "debugOutput": {
+  "algorithm": 1,
+  "direct": 4,
+  "execute_time": 21,
+  "fares": 0,
+  "fastest_direct": 0,
+  "fp_update_prevented_by_lower_bound": 1577,
+  "interval_extensions": 0,
+  "lb_time": 2,
+  "n_dest_offsets": 57,
+  "n_earliest_arrival_updated_by_footpath": 6087,
+  "n_earliest_arrival_updated_by_route": 21221,
+  "n_earliest_trip_calls": 143710,
+  "n_events_skipped_by_early_termination": 0,
+  "n_execute_bwd": 8,
+  "n_execute_fwd": 5,
+  "n_footpaths_visited": 15022,
+  "n_routes_visited": 43672,
+  "n_routing_time": 0,
+  "n_start_offsets": 26,
+  "n_td_dest_offsets": 0,
+  "n_td_start_offsets": 0,
+  "prepare": 8,
+  "prepare_backward_WALK": 7,
+  "prepare_forward_WALK": 1,
+  "route_update_prevented_by_lower_bound": 0,
+  "search_interval_reduction_by_early_termination": 0
+ },
+ "from": {
+  "name": "START",
+  "lat": 50.0003,
+  "lon": 5.7155,
+  "vertexType": "NORMAL"
+ },
+ "to": {
+  "name": "END",
+  "lat": 50.6245,
+  "lon": 5.5668,
+  "vertexType": "NORMAL"
+ },
+ "direct": [],
+ "itineraries": [
+  {
+   "duration": 6120,
+   "startTime": "2026-11-24T07:19:00Z",
+   "endTime": "2026-11-24T09:01:00Z",
+   "transfers": 0,
+   "id": "CkwhKxiV1AkASUAp6SYxCKzcFkAyEnRlY19nczp0ZWM6WDcyNWFlYznPaKuSyABJQEHA6siRzuAWQEjk9JTYBlC0+pTYBloEV0FMS2ABCqEBCgNFNjkSOjIwMjYxMTI0XzA3OjQxX3RlY19ndDp0ZWM6NTY2NzYwOTYtWC0yMDI2LVNDLU4zLVNlbS1OLTMtMTEaEnRlY19nczp0ZWM6WDcyNWFlYyHPaKuSyABJQCnA6siRzuAWQDITdGVjX2dzOnRlYzpMbGdndWlsQzm+4qlHGlBJQEHXZ876lEMWQEi0+pTYBlCYo5XYBloDQlVTYAEKTRoTdGVjX2dzOnRlYzpMbGdndWlsQyG+4qlHGlBJQCnXZ876lEMWQDkOLbKd709JQEG/fR04Z0QWQEiYo5XYBlDMpJXYBloEV0FMS2AB",
+   "legs": [
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "START",
+      "lat": 50.0003,
+      "lon": 5.7155,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T07:19:00Z",
+      "scheduledDeparture": "2026-11-24T07:19:00Z",
+      "vertexType": "NORMAL"
+     },
+     "to": {
+      "name": "Bastogne PÃ©piniÃ¨re",
+      "stopId": "tec_gs:tec:X725aec",
+      "parentId": "tec_gs:tec:p_bapÃ©p",
+      "lat": 50.006121,
+      "lon": 5.719538,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T07:31:00Z",
+      "scheduledArrival": "2026-11-24T07:31:00Z",
+      "scheduledTrack": "3",
+      "track": "3",
+      "description": "Rue de la PÃ©piniÃ¨re",
+      "vertexType": "TRANSIT"
+     },
+     "duration": 720,
+     "startTime": "2026-11-24T07:19:00Z",
+     "endTime": "2026-11-24T07:31:00Z",
+     "scheduledStartTime": "2026-11-24T07:19:00Z",
+     "scheduledEndTime": "2026-11-24T07:31:00Z",
+     "realTime": false,
+     "scheduled": false,
+     "distance": 824.0,
+     "alerts": []
+    },
+    {
+     "mode": "BUS",
+     "from": {
+      "name": "Bastogne PÃ©piniÃ¨re",
+      "stopId": "tec_gs:tec:X725aec",
+      "parentId": "tec_gs:tec:p_bapÃ©p",
+      "lat": 50.006121,
+      "lon": 5.719538,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T07:31:00Z",
+      "scheduledDeparture": "2026-11-24T07:31:00Z",
+      "scheduledTrack": "3",
+      "track": "3",
+      "description": "Rue de la PÃ©piniÃ¨re",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "to": {
+      "name": "LiÃ¨ge, Gare des Guillemins",
+      "stopId": "tec_gs:tec:LlgguilC",
+      "parentId": "tec_gs:tec:p_lggui",
+      "lat": 50.62580200000001,
+      "lon": 5.565998,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T08:58:00Z",
+      "scheduledArrival": "2026-11-24T08:58:00Z",
+      "scheduledTrack": "C",
+      "track": "C",
+      "description": "Place des Guillemins",
+      "vertexType": "TRANSIT",
+      "pickupType": "NOT_ALLOWED",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA"
+     },
+     "duration": 5220,
+     "startTime": "2026-11-24T07:31:00Z",
+     "endTime": "2026-11-24T08:58:00Z",
+     "scheduledStartTime": "2026-11-24T07:31:00Z",
+     "scheduledEndTime": "2026-11-24T08:58:00Z",
+     "realTime": false,
+     "scheduled": true,
+     "interlineWithPreviousLeg": false,
+     "headsign": "LIEGE Gare des Guillemins",
+     "tripFrom": {
+      "name": "ARLON Maison de la Culture",
+      "stopId": "tec_gs:tec:X601dab",
+      "parentId": "tec_tec:s-arlonmaisondelaculture",
+      "lat": 49.679086,
+      "lon": 5.80181,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T06:41:00Z",
+      "scheduledDeparture": "2026-11-24T06:41:00Z",
+      "description": "Parc des Expositions",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "tripTo": {
+      "name": "LiÃ¨ge, Gare des Guillemins",
+      "stopId": "tec_gs:tec:LlgguilC",
+      "parentId": "tec_gs:tec:p_lggui",
+      "lat": 50.62580200000001,
+      "lon": 5.565998,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T08:58:00Z",
+      "scheduledArrival": "2026-11-24T08:58:00Z",
+      "scheduledTrack": "C",
+      "track": "C",
+      "description": "Place des Guillemins",
+      "vertexType": "TRANSIT",
+      "pickupType": "NOT_ALLOWED",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA"
+     },
+     "routeId": "tec_gr:tec:X1969-23699",
+     "routeUrl": "",
+     "directionId": "1",
+     "routeColor": "ffcd00",
+     "routeTextColor": "000000",
+     "routeType": 3,
+     "agencyName": "LETEC",
+     "agencyUrl": "http://www.letec.be",
+     "agencyFareUrl": "",
+     "agencyId": "tec",
+     "tripId": "20261124_07:41_tec_gt:tec:56676096-X-2026-SC-N3-Sem-N-3-11",
+     "routeShortName": "E69",
+     "routeLongName": "LiÃ¨ge - Bastogne - Arlon",
+     "tripShortName": "209",
+     "displayName": "E69",
+     "cancelled": false,
+     "source": "/input/tec.gtfs.zip/stop_times.txt:7115189:7115189",
+     "alerts": [
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "REDUCED_SERVICE",
+       "url": "https://letec.be/Traffic/Detail/f5982efe-cdbc-4bb5-d5e1-08df1ef3ae8e",
+       "headerText": "JournÃ©e d'action syndicale le lundi 23 novembre.",
+       "descriptionText": "En raison de la journÃ©e d'action syndicale de ce lundi 23 novembre, des perturbations sont Ã  prÃ©voir sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      },
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-22T23:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-22T23:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "UNKNOWN_EFFECT",
+       "url": "https://letec.be/Traffic/Detail/3f45a433-5138-4b89-3a2a-08df1ef22cad",
+       "headerText": "LiÃ¨ge- Verviers | JournÃ©e d'actions syndicales du 23 novembre",
+       "descriptionText": "JournÃ©e d'actions syndicales le lundi 23 novembre : perturbations en cours sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      },
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-23T03:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-23T03:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "UNKNOWN_EFFECT",
+       "url": "https://letec.be/Traffic/Detail/36c12d0c-12f1-4aa9-d5c6-08df1ef3ae8e",
+       "headerText": "JournÃ©e d'actions syndicales le 23 novembre : perturbations Ã  craindre sur le rÃ©seau LETEC",
+       "descriptionText": "En raison de la journÃ©e d'actions syndicales de ce lundi 23 novembre, des perturbations sont Ã  prÃ©voir sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      },
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "REDUCED_SERVICE",
+       "url": "https://letec.be/Traffic/Detail/9f05f23a-666d-4ca3-d5f1-08df1ef3ae8e",
+       "headerText": "JournÃ©e d'actions syndicales le lundi 23 novembre : perturbations Ã  craindre sur le rÃ©seau",
+       "descriptionText": "En raison de la journÃ©e d'actions syndicales de ce lundi 23 novembre, des perturbations sont Ã  prÃ©voir sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      }
+     ],
+     "bikesAllowed": false,
+     "wheelchairAccessible": "ACCESSIBLE",
+     "reservation": "NONE"
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "LiÃ¨ge, Gare des Guillemins",
+      "stopId": "tec_gs:tec:LlgguilC",
+      "parentId": "tec_gs:tec:p_lggui",
+      "lat": 50.62580200000001,
+      "lon": 5.565998,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T08:58:00Z",
+      "departure": "2026-11-24T08:58:00Z",
+      "scheduledArrival": "2026-11-24T08:58:00Z",
+      "scheduledDeparture": "2026-11-24T08:58:00Z",
+      "scheduledTrack": "C",
+      "track": "C",
+      "description": "Place des Guillemins",
+      "vertexType": "TRANSIT",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA"
+     },
+     "to": {
+      "name": "END",
+      "lat": 50.6245,
+      "lon": 5.5668,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T09:01:00Z",
+      "scheduledArrival": "2026-11-24T09:01:00Z",
+      "vertexType": "NORMAL"
+     },
+     "duration": 180,
+     "startTime": "2026-11-24T08:58:00Z",
+     "endTime": "2026-11-24T09:01:00Z",
+     "scheduledStartTime": "2026-11-24T08:58:00Z",
+     "scheduledEndTime": "2026-11-24T09:01:00Z",
+     "realTime": false,
+     "scheduled": false,
+     "distance": 207.0,
+     "alerts": []
+    }
+   ]
+  },
+  {
+   "duration": 7680,
+   "startTime": "2026-11-24T07:42:00Z",
+   "endTime": "2026-11-24T09:50:00Z",
+   "transfers": 1,
+   "id": "CkwhKxiV1AkASUAp6SYxCKzcFkAyEnRlY19nczp0ZWM6WDcyNWFmaDlbs5WX/P9IQEEEdF/ObNcWQEjI/5TYBlDsgpXYBloEV0FMS2ABCqABCgNFNzgSOjIwMjYxMTI0XzA4OjQzX3RlY19ndDp0ZWM6NTY2NzY0NDUtWC0yMDI2LVNDLU4zLVNlbS1OLTMtMTEaEnRlY19nczp0ZWM6WDcyNWFmaCFbs5WX/P9IQCkEdF/ObNcWQDISdGVjX2dzOnRlYzpYOTAyYWZkOUWcTrLVGUlAQUj6tIr+QBVASOyCldgGUMyVldgGWgNCVVNgAQpxGhJ0ZWNfZ3M6dGVjOlg5MDJhZmQhRZxOstUZSUApSPq0iv5AFUAyGnNuY2JfZ3M6bm1ic3NuY2I6ODg2NDM0NV8xOQH6KAHfGUlAQRlL1iTLQBVASMyVldgGUMSWldgGWgRXQUxLYAFxAAAAAAAAAAAK3gEKAUwSTjIwMjYxMTI0XzA5OjM2X3NuY2JfZ3Q6bm1ic3NuY2I6ODhfX19fOjA0Njo6ODg2NDM0NTo4ODQxNjczOjIxOjExMTQ6MjAyNzA5MzA6NBoac25jYl9nczpubWJzc25jYjo4ODY0MzQ1XzEhAfooAd8ZSUApGUvWJMtAFUAyGnNuY2JfZ3M6bm1ic3NuY2I6ODg0MTAwNF85OST17KvaT0lAQbD+tMh1RBZASPCYldgGUNC6ldgGWg1SRUdJT05BTF9SQUlMYAFpAAAAAAAAAABxAAAAAAAA8D8KXRoac25jYl9nczpubWJzc25jYjo4ODQxMDA0XzkhJPXsq9pPSUApsP60yHVEFkA5Di2yne9PSUBBv30dOGdEFkBI0LqV2AZQyLuV2AZaBFdBTEtgAWkAAAAAAADwPw==",
+   "legs": [
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "START",
+      "lat": 50.0003,
+      "lon": 5.7155,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T07:42:00Z",
+      "scheduledDeparture": "2026-11-24T07:42:00Z",
+      "vertexType": "NORMAL"
+     },
+     "to": {
+      "name": "Bastogne Gare du Sud",
+      "stopId": "tec_gs:tec:X725afh",
+      "parentId": "tec_gs:tec:p_basud",
+      "lat": 49.999896,
+      "lon": 5.710376,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T07:49:00Z",
+      "scheduledArrival": "2026-11-24T07:49:00Z",
+      "scheduledTrack": "6",
+      "track": "6",
+      "description": "Place de la Gare",
+      "vertexType": "TRANSIT"
+     },
+     "duration": 420,
+     "startTime": "2026-11-24T07:42:00Z",
+     "endTime": "2026-11-24T07:49:00Z",
+     "scheduledStartTime": "2026-11-24T07:42:00Z",
+     "scheduledEndTime": "2026-11-24T07:49:00Z",
+     "realTime": false,
+     "scheduled": false,
+     "distance": 492.0,
+     "alerts": []
+    },
+    {
+     "mode": "BUS",
+     "from": {
+      "name": "Bastogne Gare du Sud",
+      "stopId": "tec_gs:tec:X725afh",
+      "parentId": "tec_gs:tec:p_basud",
+      "lat": 49.999896,
+      "lon": 5.710376,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T07:49:00Z",
+      "scheduledDeparture": "2026-11-24T07:49:00Z",
+      "scheduledTrack": "6",
+      "track": "6",
+      "description": "Place de la Gare",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "to": {
+      "name": "MARLOIE Gare - Quai 4",
+      "stopId": "tec_gs:tec:X902afd",
+      "parentId": "tec_tec:s-marloiegarequai4",
+      "lat": 50.201834,
+      "lon": 5.313471,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T08:29:00Z",
+      "scheduledArrival": "2026-11-24T08:29:00Z",
+      "description": "Rue de Marlida - Place de la Gare",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "duration": 2400,
+     "startTime": "2026-11-24T07:49:00Z",
+     "endTime": "2026-11-24T08:29:00Z",
+     "scheduledStartTime": "2026-11-24T07:49:00Z",
+     "scheduledEndTime": "2026-11-24T08:29:00Z",
+     "realTime": false,
+     "scheduled": true,
+     "interlineWithPreviousLeg": false,
+     "headsign": "MARCHE WEX-Rocade",
+     "tripFrom": {
+      "name": "Bastogne PÃ©piniÃ¨re",
+      "stopId": "tec_gs:tec:X725aeb",
+      "parentId": "tec_gs:tec:p_bapÃ©p",
+      "lat": 50.006177,
+      "lon": 5.719758000000001,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T07:43:00Z",
+      "scheduledDeparture": "2026-11-24T07:43:00Z",
+      "scheduledTrack": "2",
+      "track": "2",
+      "description": "Rue de la PÃ©piniÃ¨re",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "tripTo": {
+      "name": "MARCHE WEX-Rocade",
+      "stopId": "tec_gs:tec:X901bua",
+      "parentId": "tec_tec:s-marchewexrocade",
+      "lat": 50.241659,
+      "lon": 5.335397,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T08:41:00Z",
+      "scheduledArrival": "2026-11-24T08:41:00Z",
+      "description": "N839",
+      "vertexType": "TRANSIT",
+      "pickupType": "NOT_ALLOWED",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA"
+     },
+     "routeId": "tec_gr:tec:X1978-20671",
+     "routeUrl": "",
+     "directionId": "0",
+     "routeColor": "ffcd00",
+     "routeTextColor": "000000",
+     "routeType": 3,
+     "agencyName": "LETEC",
+     "agencyUrl": "http://www.letec.be",
+     "agencyFareUrl": "",
+     "agencyId": "tec",
+     "tripId": "20261124_08:43_tec_gt:tec:56676445-X-2026-SC-N3-Sem-N-3-11",
+     "routeShortName": "E78",
+     "routeLongName": "Bastogne - Marloie - Marche - Namur",
+     "tripShortName": "210",
+     "displayName": "E78",
+     "cancelled": false,
+     "source": "/input/tec.gtfs.zip/stop_times.txt:7164252:7164252",
+     "alerts": [
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-22T23:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-22T23:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "UNKNOWN_EFFECT",
+       "url": "https://letec.be/Traffic/Detail/3f45a433-5138-4b89-3a2a-08df1ef22cad",
+       "headerText": "LiÃ¨ge- Verviers | JournÃ©e d'actions syndicales du 23 novembre",
+       "descriptionText": "JournÃ©e d'actions syndicales le lundi 23 novembre : perturbations en cours sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      },
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-23T03:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-23T03:00:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "UNKNOWN_EFFECT",
+       "url": "https://letec.be/Traffic/Detail/36c12d0c-12f1-4aa9-d5c6-08df1ef3ae8e",
+       "headerText": "JournÃ©e d'actions syndicales le 23 novembre : perturbations Ã  craindre sur le rÃ©seau LETEC",
+       "descriptionText": "En raison de la journÃ©e d'actions syndicales de ce lundi 23 novembre, des perturbations sont Ã  prÃ©voir sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      },
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "REDUCED_SERVICE",
+       "url": "https://letec.be/Traffic/Detail/9f05f23a-666d-4ca3-d5f1-08df1ef3ae8e",
+       "headerText": "JournÃ©e d'actions syndicales le lundi 23 novembre : perturbations Ã  craindre sur le rÃ©seau",
+       "descriptionText": "En raison de la journÃ©e d'actions syndicales de ce lundi 23 novembre, des perturbations sont Ã  prÃ©voir sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      },
+      {
+       "communicationPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "impactPeriod": [
+        {
+         "start": "2026-11-22T23:01:00Z",
+         "end": "2026-11-23T22:59:00Z"
+        }
+       ],
+       "cause": "STRIKE",
+       "effect": "REDUCED_SERVICE",
+       "url": "https://letec.be/Traffic/Detail/f5982efe-cdbc-4bb5-d5e1-08df1ef3ae8e",
+       "headerText": "JournÃ©e d'action syndicale le lundi 23 novembre.",
+       "descriptionText": "En raison de la journÃ©e d'action syndicale de ce lundi 23 novembre, des perturbations sont Ã  prÃ©voir sur le rÃ©seau LETEC. VÃ©rifiez votre horaire sur le site letec.be ou l'app avant tout dÃ©placement."
+      }
+     ],
+     "bikesAllowed": false,
+     "wheelchairAccessible": "ACCESSIBLE",
+     "reservation": "NONE"
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "MARLOIE Gare - Quai 4",
+      "stopId": "tec_gs:tec:X902afd",
+      "parentId": "tec_tec:s-marloiegarequai4",
+      "lat": 50.201834,
+      "lon": 5.313471,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T08:29:00Z",
+      "departure": "2026-11-24T08:29:00Z",
+      "scheduledArrival": "2026-11-24T08:29:00Z",
+      "scheduledDeparture": "2026-11-24T08:29:00Z",
+      "description": "Rue de Marlida - Place de la Gare",
+      "vertexType": "TRANSIT",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "to": {
+      "name": "Marloie",
+      "stopId": "sncb_gs:nmbssncb:8864345_1",
+      "parentId": "sncb_gs:nmbssncb:S8864345",
+      "lat": 50.20211805821237,
+      "lon": 5.3132749324602395,
+      "level": 0.0,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T08:31:00Z",
+      "scheduledArrival": "2026-11-24T08:31:00Z",
+      "scheduledTrack": "1",
+      "track": "1",
+      "description": "NMBSSNCB RAIL PLATFORM",
+      "vertexType": "TRANSIT"
+     },
+     "duration": 120,
+     "startTime": "2026-11-24T08:29:00Z",
+     "endTime": "2026-11-24T08:31:00Z",
+     "scheduledStartTime": "2026-11-24T08:29:00Z",
+     "scheduledEndTime": "2026-11-24T08:31:00Z",
+     "realTime": false,
+     "scheduled": false,
+     "distance": 102.0,
+     "alerts": []
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "Marloie",
+      "stopId": "sncb_gs:nmbssncb:8864345_1",
+      "parentId": "sncb_gs:nmbssncb:S8864345",
+      "lat": 50.20211805821237,
+      "lon": 5.3132749324602395,
+      "level": 0.0,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T08:36:00Z",
+      "scheduledDeparture": "2026-11-24T08:36:00Z",
+      "scheduledTrack": "1",
+      "track": "1",
+      "description": "NMBSSNCB RAIL PLATFORM",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NOT_ALLOWED",
+      "cancelled": false,
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "to": {
+      "name": "LiÃ¨ge-Guillemins",
+      "stopId": "sncb_gs:nmbssncb:8841004_9",
+      "parentId": "sncb_gs:nmbssncb:S8841004",
+      "lat": 50.623860827161735,
+      "lon": 5.566855560347605,
+      "level": 1.0,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T09:48:00Z",
+      "scheduledArrival": "2026-11-24T09:48:00Z",
+      "scheduledTrack": "9",
+      "track": "9",
+      "description": "NMBSSNCB RAIL PLATFORM",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "duration": 4320,
+     "startTime": "2026-11-24T08:36:00Z",
+     "endTime": "2026-11-24T09:48:00Z",
+     "scheduledStartTime": "2026-11-24T08:36:00Z",
+     "scheduledEndTime": "2026-11-24T09:48:00Z",
+     "realTime": false,
+     "scheduled": true,
+     "interlineWithPreviousLeg": false,
+     "headsign": "Liers",
+     "tripFrom": {
+      "name": "Marloie",
+      "stopId": "sncb_gs:nmbssncb:8864345_1",
+      "parentId": "sncb_gs:nmbssncb:S8864345",
+      "lat": 50.20211805821237,
+      "lon": 5.3132749324602395,
+      "level": 0.0,
+      "tz": "Europe/Brussels",
+      "departure": "2026-11-24T08:36:00Z",
+      "scheduledDeparture": "2026-11-24T08:36:00Z",
+      "scheduledTrack": "1",
+      "track": "1",
+      "description": "NMBSSNCB RAIL PLATFORM",
+      "vertexType": "TRANSIT",
+      "pickupType": "NORMAL",
+      "dropoffType": "NOT_ALLOWED",
+      "cancelled": false,
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "tripTo": {
+      "name": "Liers",
+      "stopId": "sncb_gs:nmbssncb:8841673_1",
+      "parentId": "sncb_gs:nmbssncb:S8841673",
+      "lat": 50.69812589572714,
+      "lon": 5.570042093773784,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T10:14:00Z",
+      "scheduledArrival": "2026-11-24T10:14:00Z",
+      "scheduledTrack": "1",
+      "track": "1",
+      "description": "NMBSSNCB RAIL PLATFORM",
+      "vertexType": "TRANSIT",
+      "pickupType": "NOT_ALLOWED",
+      "dropoffType": "NORMAL",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA"
+     },
+     "routeId": "sncb_gr:nmbssncb:540",
+     "routeUrl": "",
+     "directionId": "0",
+     "routeColor": "016ab3",
+     "routeTextColor": "ffffff",
+     "routeType": 2,
+     "agencyName": "NMBS/SNCB",
+     "agencyUrl": "http://www.belgiantrain.be/",
+     "agencyFareUrl": "",
+     "agencyId": "nmbssncb",
+     "tripId": "20261124_09:36_sncb_gt:nmbssncb:88____:046::8864345:8841673:21:1114:20270930:4",
+     "routeShortName": "L",
+     "routeLongName": "Liers -- Marloie",
+     "tripShortName": "5581",
+     "displayName": "L",
+     "cancelled": false,
+     "source": "/input/sncb.gtfs.zip/stop_times.txt:464702:464722",
+     "alerts": [
+      {
+       "cause": "UNKNOWN_CAUSE",
+       "effect": "NO_SERVICE",
+       "url": "http://www.belgianrail.be/jp/nmbs-realtime/help.exe/fr?tpl=showmap_external&tplParamHimMsgInfoGroup=trouble&messageID=115513&channelFilter=custom1&",
+       "headerText": "Walcourt - Couvin : Aucun train",
+       "descriptionText": "La circulation des trains est interrompue entre Walcourt et Couvin. La circulation des trains sera interrompue jusqu'Ã  la fin de la journÃ©e. Vous pouvez prendre des bus de remplacement SNCB munis de votre ticket de train. Entre Charleroi-Central et Walcourt : Des retards et suppressions sont possibles. Ã‰coutez les annonces, consultez les Ã©crans ou planifiez votre voyage sur sncb.be ou l'app SNCB. Cause : panne au niveau des signaux Ã  proximitÃ© de la gare de Yves-GomezÃ©e. OÃ¹ prendre mon bus?"
+      },
+      {
+       "cause": "UNKNOWN_CAUSE",
+       "effect": "SIGNIFICANT_DELAYS",
+       "url": "http://www.belgianrail.be/jp/nmbs-realtime/help.exe/fr?tpl=showmap_external&tplParamHimMsgInfoGroup=trouble&messageID=115557&channelFilter=custom1&",
+       "headerText": "Termonde - Opwijk : Situation rÃ©tablie",
+       "descriptionText": "Le problÃ¨me est rÃ©solu. Des retards restent possibles. Ã‰coutez les annonces, consultez les Ã©crans ou planifiez votre voyage sur sncb.be ou l'app SNCB. Cause : train en panne Ã  Lebbeke."
+      },
+      {
+       "cause": "CONSTRUCTION",
+       "effect": "NO_SERVICE",
+       "url": "http://www.belgianrail.be/jp/nmbs-realtime/help.exe/fr?tpl=showmap_external&tplParamHimMsgInfoGroup=works&messageID=114709&channelFilter=rss_line_90&",
+       "headerText": "Charleroi-Central - ChÃ¢telet - Tamines",
+       "descriptionText": "Les week-ends, du 21/11 au 6/12, Infrabel effectue des travaux. La plupart des trains IC Mouscron - Namur - Liers sont remplacÃ©s par des bus SNCB entre Charleroi-Central et Tamines. La plupart des trains S61 Wavre - Charleroi-Central - Jambes sont remplacÃ©s par des bus SNCB entre Chatelet et Tamines. Le planificateur de voyages tient dÃ©jÃ  compte de ces adaptations. Les temps de parcours des bus SNCB peuvent varier selon la densitÃ© du trafic. Ceci peut entraÃ®ner des temps de trajet plus longs. OÃ¹ prendre mon bus ? OÃ¹ prendre mon bus ?"
+      },
+      {
+       "cause": "CONSTRUCTION",
+       "effect": "DETOUR",
+       "url": "http://www.belgianrail.be/jp/nmbs-realtime/help.exe/fr?tpl=showmap_external&tplParamHimMsgInfoGroup=works&messageID=115363&channelFilter=rss_line_90&",
+       "headerText": "Bruxelles-Luxembourg - Vilvorde/Louvain",
+       "descriptionText": "Le week-end du 5-6/12, Infrabel effectue des travaux. Le parcours des trains suivants est adaptÃ© : S5 Malines - Bruxelles-Luxembourg - Hal S19 Landen - Bruxelles-Luxembourg - Nivelles Vous pouvez, munis de votre ticket de train, prendre des bus De Lijn et de la STIB. Le planificateur de voyages tient dÃ©jÃ  compte de ces adaptations. Plus d'infos OÃ¹ prendre mon bus ?"
+      }
+     ],
+     "bikesAllowed": true,
+     "wheelchairAccessible": "NOT_ACCESSIBLE",
+     "reservation": "NONE"
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "LiÃ¨ge-Guillemins",
+      "stopId": "sncb_gs:nmbssncb:8841004_9",
+      "parentId": "sncb_gs:nmbssncb:S8841004",
+      "lat": 50.623860827161735,
+      "lon": 5.566855560347605,
+      "level": 1.0,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T09:48:00Z",
+      "departure": "2026-11-24T09:48:00Z",
+      "scheduledArrival": "2026-11-24T09:48:00Z",
+      "scheduledDeparture": "2026-11-24T09:48:00Z",
+      "scheduledTrack": "9",
+      "track": "9",
+      "description": "NMBSSNCB RAIL PLATFORM",
+      "vertexType": "TRANSIT",
+      "cancelled": false,
+      "arrivalTimestampReason": "NO_RT_DATA",
+      "departureTimestampReason": "NO_RT_DATA"
+     },
+     "to": {
+      "name": "END",
+      "lat": 50.6245,
+      "lon": 5.5668,
+      "tz": "Europe/Brussels",
+      "arrival": "2026-11-24T09:50:00Z",
+      "scheduledArrival": "2026-11-24T09:50:00Z",
+      "vertexType": "NORMAL"
+     },
+     "duration": 120,
+     "startTime": "2026-11-24T09:48:00Z",
+     "endTime": "2026-11-24T09:50:00Z",
+     "scheduledStartTime": "2026-11-24T09:48:00Z",
+     "scheduledEndTime": "2026-11-24T09:50:00Z",
+     "realTime": false,
+     "scheduled": false,
+     "distance": 104.0,
+     "alerts": []
+    }
+   ]
+  }
+ ]
+}

@@ -7,14 +7,15 @@ Phone/Desktop â†’ existing Home Assistant (single UI, existing remote access) â†
 - `tempo-api`: FastAPI, validation, domain rules, proposal/approval API, model tool orchestration.
 - `tempo-worker`: scheduled iCal/email/transport sync, recalculation, notifications and recovery.
 - `tempo-postgres`: authoritative durable store, versioned migrations and audit log.
-- `tempo-routing`: MOTIS + OpenStreetMap + validated Belgian GTFS/NeTEx feeds and realtime adapters.
+- `tempo-routing`: MOTIS + OpenStreetMap + Belgian GTFS static (TEC, SNCB, De Lijn, STIB).
+- `tempo-rt-relay`: internal GTFS-RT relay (TripUpdates + Alerts of TEC, SNCB, De Lijn) between the Belgian Mobility portal and MOTIS: holds the portal key secret, enforces quota, validates freshness, repairs TEC (D021). Internal network only.
 - `custom_components/tempo` in the separate public-ready repository `tempo-homeassistant` (D010): config flow, coordinator, calendar, todo, sensors, conversation integration and actions (implement incrementally; do not claim entities exist yet).
 
 ## Sources
 - HA configured phone tracker for actual position, freshness and accuracy checks; future origin derives from preceding event or explicit future location when GPS alone is unsuitable.
 - University ICS/iCal for FIXED timetable; stable IDs, cancellations, time zones, sync history.
 - Only explicitly authorized sender/thread for sport emails; content preserved.
-- Belgian Mobility Open Data for TEC, SNCB, STIB, De Lijn static and realtime where available. Verify feed access, quotas, licenses, data quality, SIRI/GTFS-RT support and STIB adapters before implementation.
+- Belgian Mobility Open Data: 4 GTFS static + 3 TripUpdates + 3 Alerts feeds, verified 2026-11-23 (docs/TRANSPORT.md "Belgian feeds"). STIB has no realtime (static only; optional waiting-times adapter later).
 - OSM for pedestrian routing; MOTIS as candidate, OpenTripPlanner fallback after benchmark.
 
 ## Domain model

@@ -25,6 +25,44 @@ def _aware_utc(name: str, value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+SEVERE_EFFECTS = frozenset(
+    {"NO_SERVICE", "REDUCED_SERVICE", "SIGNIFICANT_DELAYS", "DETOUR", "STOP_MOVED"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceAlert:
+    """Operator notice attached to a leg by MOTIS (GTFS-RT Service Alerts).
+
+    MOTIS attaches network-wide notices (e.g. every SNCB alert on every SNCB leg) and notices
+    outside their impact period, so an alert is NOT proof that the leg is affected: Tempo
+    reports alerts relevant in time as warnings and never drops a journey because of them.
+    Cancellations and delays come from trip updates (``Leg.cancelled``, ``Leg.delay``).
+    """
+
+    header: str
+    description: str = ""
+    cause: str = "UNKNOWN_CAUSE"
+    effect: str = "UNKNOWN_EFFECT"
+    url: str | None = None
+    impact_periods: tuple[tuple[datetime | None, datetime | None], ...] = ()
+    """Empty: no period published (unbounded)."""
+
+    @property
+    def severe(self) -> bool:
+        return self.effect in SEVERE_EFFECTS
+
+    def active_during(self, start: datetime, end: datetime) -> bool:
+        if not self.impact_periods:
+            return True
+        s, e = _aware_utc("start", start), _aware_utc("end", end)
+        return any(
+            (p_start is None or _aware_utc("period start", p_start) < e)
+            and (p_end is None or _aware_utc("period end", p_end) > s)
+            for p_start, p_end in self.impact_periods
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Leg:
     mode: str
@@ -40,6 +78,7 @@ class Leg:
     line: str | None = None
     agency: str | None = None
     distance_m: float | None = None
+    alerts: tuple[ServiceAlert, ...] = ()
 
     def __post_init__(self) -> None:
         start, end = _aware_utc("leg start", self.start), _aware_utc("leg end", self.end)
@@ -55,6 +94,17 @@ class Leg:
     @property
     def delay(self) -> timedelta:
         return self.start.astimezone(UTC) - self.scheduled_start.astimezone(UTC)
+
+    @property
+    def arrival_delay(self) -> timedelta:
+        return self.end.astimezone(UTC) - self.scheduled_end.astimezone(UTC)
+
+    @property
+    def relevant_alerts(self) -> tuple[ServiceAlert, ...]:
+        """Alerts whose impact period overlaps the leg (scheduled or live times)."""
+        first = min(_aware_utc("s", self.start), _aware_utc("s", self.scheduled_start))
+        last = max(_aware_utc("e", self.end), _aware_utc("e", self.scheduled_end))
+        return tuple(a for a in self.alerts if a.active_during(first, last))
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +143,38 @@ class Journey:
     @property
     def uses_realtime(self) -> bool:
         return any(leg.realtime for leg in self.legs)
+
+    @property
+    def disruptions(self) -> tuple[ServiceAlert, ...]:
+        """Distinct alerts relevant in time to at least one leg (network-wide ones included)."""
+        seen: dict[ServiceAlert, None] = {}
+        for leg in self.legs:
+            for alert in leg.relevant_alerts:
+                seen.setdefault(alert, None)  # frozen dataclass: all fields form the key
+        return tuple(seen)
+
+    @property
+    def timed_disruptions(self) -> tuple[ServiceAlert, ...]:
+        """Relevant alerts with a published impact period overlapping the journey.
+
+        Alerts without any period (all SNCB notices observed on 2026-11-23, which MOTIS attaches
+        to every SNCB leg) cannot be tied to this journey and are excluded here."""
+        return tuple(alert for alert in self.disruptions if alert.impact_periods)
+
+    @property
+    def untimed_disruptions(self) -> tuple[ServiceAlert, ...]:
+        return tuple(alert for alert in self.disruptions if not alert.impact_periods)
+
+    @property
+    def severe_disruptions(self) -> int:
+        return sum(1 for alert in self.timed_disruptions if alert.severe)
+
+    @property
+    def max_delay(self) -> timedelta:
+        return max(
+            (max(leg.delay, leg.arrival_delay) for leg in self.legs if leg.is_transit),
+            default=timedelta(0),
+        )
 
 
 class RoutingProvider(Protocol):
