@@ -11,23 +11,33 @@ A failing job records its error in ``job_run`` in a separate transaction (securi
 a failed sync must leave a trace even though its own transaction was rolled back).
 """
 
+import ipaddress
 import logging
+import socket
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx2
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.ai.llm import Interpreter
 from tempo.db.ics_repository import apply_ics_sync, get_or_create_source
-from tempo.db.models import JobRunRow, PhonePositionRow
+from tempo.db.models import (
+    ActivityRow,
+    JobRunRow,
+    NotificationRow,
+    PhonePositionRow,
+    ProposalRow,
+    ScheduleVersion,
+    StudyBlockRow,
+)
 from tempo.planning.service import (
     PlanningNotConfiguredError,
     active_version,
@@ -104,25 +114,55 @@ def run_job(sessions: Sessions, name: str, job: Callable[[], Any]) -> bool:
 # --- iCal ---
 
 
-def fetch_ics(client: httpx2.Client, url: str, *, allow_http: bool = False) -> bytes:
-    scheme = urlsplit(url).scheme
-    if scheme != "https" and not (allow_http and scheme == "http"):
-        raise JobError("iCal URL must use https")
+MAX_REDIRECTS = 5
+REDIRECTS = frozenset({301, 302, 303, 307, 308})
+
+
+def is_public_host(host: str) -> bool:
+    """Every address the host resolves to is public (no redirect into the internal network)."""
     try:
-        with client.stream("GET", url, follow_redirects=True) as response:
-            if response.status_code != 200:
-                raise JobError(f"iCal download failed: HTTP {response.status_code}")
-            chunks: list[bytes] = []
-            size = 0
-            for chunk in response.iter_bytes():
-                size += len(chunk)
-                if size > MAX_ICS_BYTES:
-                    raise JobError("iCal feed larger than 10 MB: refused")
-                chunks.append(chunk)
-    except httpx2.HTTPError as exc:
-        # Never include the URL: it is a secret (it often embeds a personal token).
-        raise JobError(f"iCal download failed: {type(exc).__name__}") from None
-    return b"".join(chunks)
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return False
+    addresses = {info[4][0] for info in infos}
+    return bool(addresses) and all(ipaddress.ip_address(a).is_global for a in addresses)
+
+
+def fetch_ics(
+    client: httpx2.Client,
+    url: str,
+    *,
+    allow_http: bool = False,
+    host_check: Callable[[str], bool] = is_public_host,
+) -> bytes:
+    """Download the feed. Redirects are followed manually: each hop must stay https and point to
+    a public host. Errors never include the URL (it often embeds a personal token)."""
+    for _ in range(MAX_REDIRECTS + 1):
+        parts = urlsplit(url)
+        if parts.scheme != "https" and not (allow_http and parts.scheme == "http"):
+            raise JobError("iCal URL must use https")
+        if not parts.hostname or not host_check(parts.hostname):
+            raise JobError("iCal host is not a public address")
+        try:
+            with client.stream("GET", url, follow_redirects=False) as response:
+                if response.status_code in REDIRECTS and "location" in response.headers:
+                    url = urljoin(url, response.headers["location"])
+                    continue
+                if response.status_code != 200:
+                    raise JobError(f"iCal download failed: HTTP {response.status_code}")
+                chunks: list[bytes] = []
+                size = 0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > MAX_ICS_BYTES:
+                        raise JobError("iCal feed larger than 10 MB: refused")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except JobError:
+            raise
+        except Exception as exc:  # any client error: report its type only, never the URL
+            raise JobError(f"iCal download failed: {type(exc).__name__}") from None
+    raise JobError("iCal download failed: too many redirects")
 
 
 def ics_sync(
@@ -385,3 +425,54 @@ def training_mail_job(
         stats = import_messages(session, messages, tz=tz, today=today, interpreter=interpreter)
         session.commit()
         return stats
+
+
+# --- retention ---
+
+NOTIFICATION_RETENTION = timedelta(days=90)
+PROPOSAL_RETENTION = timedelta(days=180)
+VERSION_RETENTION = timedelta(days=30)
+ACTIVITY_RETENTION = timedelta(days=180)
+
+
+def _deleted(session: Session, statement: Any) -> int:
+    result = session.execute(statement)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
+    """Purge personal data that is no longer useful. ``audit_entry`` is append-only for the
+    runtime role and is pruned only by the owner role (docs/DEPLOYMENT.md)."""
+    with sessions() as session:
+        old_versions = select(ScheduleVersion.id).where(
+            ScheduleVersion.state.in_(("superseded", "rejected")),
+            ScheduleVersion.created_at < now - VERSION_RETENTION,
+        )
+        counts = {
+            "study_blocks": _deleted(
+                session,
+                delete(StudyBlockRow).where(StudyBlockRow.schedule_version_id.in_(old_versions)),
+            ),
+            "schedule_versions": _deleted(
+                session, delete(ScheduleVersion).where(ScheduleVersion.id.in_(old_versions))
+            ),
+            "notifications": _deleted(
+                session,
+                delete(NotificationRow).where(
+                    NotificationRow.acknowledged_at < now - NOTIFICATION_RETENTION
+                ),
+            ),
+            "proposals": _deleted(
+                session,
+                delete(ProposalRow).where(
+                    ProposalRow.status != "pending",
+                    ProposalRow.decided_at < now - PROPOSAL_RETENTION,
+                ),
+            ),
+            "activities": _deleted(
+                session,
+                delete(ActivityRow).where(ActivityRow.latest_end_at < now - ACTIVITY_RETENTION),
+            ),
+        }
+        session.commit()
+        return counts

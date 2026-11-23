@@ -5,7 +5,7 @@ understand, and its output is validated like any request. Without an API key Tem
 "not understood" with examples of supported phrasings: essential functions never depend on AI.
 """
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -19,7 +19,7 @@ from tempo.ai.text_parser import parse_text
 from tempo.api.ha import SessionDep
 from tempo.api.planning import PROPOSAL_HANDLERS
 from tempo.db.models import ProposalRow
-from tempo.planning.service import audit, set_setting
+from tempo.planning.service import audit, notify, set_setting
 
 router = APIRouter(prefix="/v1")
 EXAMPLES = (
@@ -85,14 +85,23 @@ def interpret(body: InterpretIn, request: Request, session: SessionDep) -> dict[
 def _apply_training_import(session: Session, row: ProposalRow) -> None:
     """Approved AI-interpreted e-mail content: insert it (still validated, idempotent)."""
     details = row.details
-    apply_result(
+    tz = ZoneInfo(details["timezone"])
+    applied = apply_result(
         session,
         result_from_json(details["result"]),
-        tz=ZoneInfo(details["timezone"]),
-        today=date.fromisoformat(details["today"]),
+        tz=tz,
+        today=datetime.now(UTC).astimezone(tz).date(),  # re-validated at approval time
         source="email_llm",
         source_ref=details["source_ref"],
     )
+    if applied.rejected:
+        notify(
+            session,
+            "training_rejected",
+            "Import refusé en partie",
+            " ; ".join(applied.rejected),
+            f"approval_rejected:{row.id}",
+        )
 
 
 PROPOSAL_HANDLERS["training_import"] = _apply_training_import

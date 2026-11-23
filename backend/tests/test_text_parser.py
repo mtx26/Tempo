@@ -86,3 +86,21 @@ def test_parse_text_mixed_message() -> None:
     assert result.unparsed == ["Salut !", "merci"]
     assert result.understood
     assert not parse_text("rien de spécial", TODAY).understood
+
+
+def test_sender_authentication_results() -> None:
+    from email.message import EmailMessage
+
+    from tempo.sync.training_mail import authenticated
+
+    def msg(*results: str) -> EmailMessage:
+        m = EmailMessage()
+        for value in results:
+            m["Authentication-Results"] = value
+        return m
+
+    assert authenticated(msg("mx.google.com; dkim=pass header.i=@club.be; dmarc=pass"), "c@club.be")
+    assert authenticated(msg("mx; dkim=pass header.d=club.be; spf=pass"), "c@club.be")
+    assert not authenticated(msg("mx; dkim=pass header.d=evil.test"), "c@club.be")
+    assert not authenticated(msg("mx; dmarc=fail; dkim=none"), "c@club.be")
+    assert not authenticated(msg(), "c@club.be")

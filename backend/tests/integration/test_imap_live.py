@@ -44,8 +44,19 @@ def test_only_the_authorised_sender_is_read() -> None:
     insecure = ssl.create_default_context()
     insecure.check_hostname = False
     insecure.verify_mode = ssl.CERT_NONE
-    source = ImapSource(HOST, user, user, "coach@club.test", port=3993, ssl_context=insecure)
-    messages = source.fetch(datetime.now(UTC).date() - timedelta(days=1))
+    since = datetime.now(UTC).date() - timedelta(days=1)
+    strict = ImapSource(HOST, user, user, "coach@club.test", port=3993, ssl_context=insecure)
+    assert strict.fetch(since) == []  # no Authentication-Results from this test server
+    source = ImapSource(
+        HOST,
+        user,
+        user,
+        "coach@club.test",
+        port=3993,
+        ssl_context=insecure,
+        require_authentication=False,
+    )
+    messages = source.fetch(since)
     assert [m.subject for m in messages] == ["Programme"]
     assert messages[0].sender == "coach@club.test"
     assert "footing 40 min" in messages[0].body

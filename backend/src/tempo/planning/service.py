@@ -198,7 +198,11 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
 
     trainings: list[TrainingRequest] = []
     activities = session.scalars(
-        select(ActivityRow).where(ActivityRow.status == "active", ActivityRow.latest_end_at > now)
+        select(ActivityRow).where(
+            ActivityRow.status == "active",
+            ActivityRow.latest_end_at > now,
+            ActivityRow.earliest_start_at < horizon_end,
+        )
     )
     for act in activities:
         place = directory.get(act.place_id) if act.place_id else None

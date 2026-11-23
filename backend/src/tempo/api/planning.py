@@ -33,6 +33,8 @@ from tempo.planning.views import schedule_items, summary
 ACTOR = "home_assistant"
 router = APIRouter(prefix="/v1")
 MAX_RANGE = timedelta(days=62)
+MAX_ACTIVITY_AHEAD = timedelta(days=60)
+MAX_WINDOW = timedelta(days=14)
 
 
 def _tz(request: Request) -> Any:
@@ -76,7 +78,9 @@ class PlaceIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
-    aliases: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(default_factory=list)
+    aliases: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=50
+    )
 
 
 def _norm(text: str) -> str:
@@ -205,7 +209,7 @@ class SettingsIn(BaseModel):
     )
     horizon_days: int | None = Field(default=None, ge=1, le=42)
     buffer_minutes: int | None = Field(default=None, ge=0, le=120)
-    stays: list[StayIn] | None = None
+    stays: list[StayIn] | None = Field(default=None, max_length=50)
     study_preferences: dict[str, int] | None = None
 
 
@@ -328,6 +332,12 @@ def create_activity(body: ActivityIn, session: SessionDep) -> dict[str, Any]:
     earliest, latest = body.window()
     if latest - earliest < timedelta(minutes=body.duration_minutes):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "window shorter than duration")
+    now = datetime.now(UTC)
+    if latest <= now or earliest > now + MAX_ACTIVITY_AHEAD or latest - earliest > MAX_WINDOW:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "activity must end in the future, start within 60 days, window at most 14 days",
+        )
     row = ActivityRow(
         kind=body.kind,
         title=body.title,
@@ -383,7 +393,7 @@ def _block(session: Session, block_id: uuid.UUID) -> StudyBlockRow:
 def lock_block(block_id: uuid.UUID, session: SessionDep) -> Response:
     """The user explicitly protects a block: it will never be moved without approval."""
     row = _block(session, block_id)
-    if not row.locked:
+    if not row.locked and row.state not in ("promoted", "done"):
         session.add(
             StudyBlockRow(
                 task_id=row.task_id, start_at=row.start_at, end_at=row.end_at, locked=True
@@ -482,11 +492,9 @@ def reject(proposal_id: uuid.UUID, session: SessionDep) -> dict[str, Any]:
 
 @router.get("/notifications")
 def list_notifications(
-    session: SessionDep, unread: bool = True, limit: int = 50
+    session: SessionDep, unread: bool = True, limit: Annotated[int, Query(ge=1, le=200)] = 50
 ) -> list[dict[str, Any]]:
-    query = (
-        select(NotificationRow).order_by(NotificationRow.created_at.desc()).limit(min(limit, 200))
-    )
+    query = select(NotificationRow).order_by(NotificationRow.created_at.desc()).limit(limit)
     if unread:
         query = query.where(NotificationRow.acknowledged_at.is_(None))
     return [

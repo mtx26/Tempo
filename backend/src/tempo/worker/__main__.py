@@ -26,6 +26,7 @@ from tempo.worker.jobs import (
     fetch_ics,
     ics_sync,
     replan_job,
+    retention_job,
     run_job,
     training_mail_job,
 )
@@ -58,6 +59,8 @@ class WorkerSettings(BaseSettings):
     training_allowed_sender: str | None = None
     """The ONLY sender whose e-mails are read (exact address)."""
     training_interval_minutes: int = 30
+    training_require_authentication: bool = True
+    """Only accept e-mails whose provider recorded DMARC/DKIM pass (anti-spoofing)."""
     departure_interval_minutes: int = 2
 
 
@@ -88,6 +91,8 @@ def tick(
     run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz))
     if due_departure:
         run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now))
+    if due_ics and now.astimezone(tz).hour == 4 and now.astimezone(tz).minute < 31:
+        run_job(sessions, "retention", lambda: retention_job(sessions, now))
     if mail is not None and due_ics:
         run_job(
             sessions,
@@ -113,6 +118,7 @@ def mail_source(settings: WorkerSettings) -> MailSource | None:
         settings.training_imap_password.get_secret_value(),
         settings.training_allowed_sender or "",
         mailbox=settings.training_imap_mailbox,
+        require_authentication=settings.training_require_authentication,
     )
 
 

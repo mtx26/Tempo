@@ -20,6 +20,11 @@ from tempo.db.models import ActivityRow, PlaceRow, StudyTaskRow
 from tempo.domain.models import TargetKind
 
 MAX_EFFORT = 100_000
+MAX_ACTIVITY_AHEAD = timedelta(days=60)
+"""Trainings/races further ahead are refused (also bounds solver input and date arithmetic)."""
+MAX_TASK_AHEAD = timedelta(days=366)
+MAX_ITEMS = 20
+"""Items applied per request/e-mail; more is refused (a forged e-mail must not flood the plan)."""
 TRAINING_SLACK = timedelta(days=1)
 """A training without explicit window may move one day earlier or later (flexible)."""
 
@@ -40,6 +45,8 @@ def activity_values(
     """Validated column values for an ``activity`` row, or a rejection reason."""
     if item.day < today:
         return None, f"{item.title} : date passée ({item.day.isoformat()})"
+    if item.day > today + MAX_ACTIVITY_AHEAD:
+        return None, f"{item.title} : date trop lointaine (plus de 60 jours)"
     if not 0 < item.duration_minutes <= 24 * 60:
         return None, f"{item.title} : durée invalide"
     place = item.place_id if item.place_id in known_places else None
@@ -70,6 +77,8 @@ def task_values(item: ParsedTask, today: date) -> tuple[dict[str, Any] | None, s
         return None, f"{item.subject} : effort invalide"
     if item.target_date < today:
         return None, f"{item.subject} : échéance passée"
+    if item.target_date > today + MAX_TASK_AHEAD:
+        return None, f"{item.subject} : échéance à plus d'un an"
     return {
         "subject": item.subject[:200],
         "effort_minutes": item.effort_minutes,
@@ -92,6 +101,11 @@ def apply_result(
     source_ref: str | None = None,
 ) -> Applied:
     outcome = Applied()
+    if len(result.tasks) + len(result.activities) > MAX_ITEMS:
+        outcome.rejected.append(
+            f"plus de {MAX_ITEMS} éléments dans un seul message : rien appliqué"
+        )
+        return outcome
     places = known_places(session)
     for task in result.tasks:
         values, reason = task_values(task, today)

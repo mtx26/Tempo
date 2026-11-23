@@ -265,3 +265,46 @@ def test_notifications_and_replan_request(api: TestClient, engine: Engine) -> No
     remaining = api.get("/v1/notifications", headers=AUTH).json()
     assert all(n["id"] != target["id"] for n in remaining)
     assert api.post("/v1/replan", headers=AUTH).status_code == 202
+
+
+def test_hardening_limits(api: TestClient, engine: Engine) -> None:
+    configure(api)
+    assert api.get("/v1/notifications", params={"limit": -1}, headers=AUTH).status_code == 422
+    assert api.get("/v1/notifications", params={"limit": 500}, headers=AUTH).status_code == 422
+    huge = {
+        "study_preferences": {
+            "granularity_minutes": 1,
+            "min_block_minutes": 1,
+            "preferred_block_minutes": 1,
+            "max_block_minutes": 1,
+        }
+    }
+    assert api.patch("/v1/settings", json=huge, headers=AUTH).status_code == 422
+    far = {
+        "kind": "race",
+        "title": "x",
+        "duration_minutes": 60,
+        "start": "2099-01-01T10:00:00+01:00",
+    }
+    assert api.post("/v1/activities", json=far, headers=AUTH).status_code == 422
+    many = {"name": "x", "latitude": 1, "longitude": 1, "aliases": [f"a{i}" for i in range(51)]}
+    assert api.put("/v1/places/x", json=many, headers=AUTH).status_code == 422
+
+
+def test_locking_the_same_block_twice_creates_one_lock(api: TestClient, engine: Engine) -> None:
+    configure(api)
+    api.post(
+        "/v1/tasks",
+        json={"subject": "maths", "effort_minutes": 90, "target_date": "2026-12-11"},
+        headers=AUTH,
+    )
+    run_replan(engine)
+    with Session(engine) as s:
+        block = s.scalars(select(StudyBlockRow)).first()
+    assert block is not None
+    for _ in range(2):
+        assert api.post(f"/v1/blocks/{block.id}/lock", headers=AUTH).status_code == 204
+    with Session(engine) as s:
+        assert (
+            len(list(s.scalars(select(StudyBlockRow).where(StudyBlockRow.locked.is_(True))))) == 1
+        )

@@ -95,6 +95,15 @@ class Preferences:
             raise ValueError("expected min <= preferred <= max block length")
         if self.max_blocks_per_subject_per_day < 1 or self.max_daily_study_minutes < 0:
             raise ValueError("invalid daily limits")
+        # Upper bounds keep the CP-SAT model small (model building is not time-limited).
+        if g not in (5, 10, 15, 30):
+            raise ValueError("granularity must be 5, 10, 15 or 30 minutes")
+        if self.min_block_minutes < 15 or self.max_block_minutes > 240:
+            raise ValueError("blocks must last between 15 and 240 minutes")
+        if self.max_blocks_per_subject_per_day > 4 or self.max_daily_study_minutes > 1440:
+            raise ValueError("at most 4 blocks per subject per day and 1440 minutes per day")
+        if not 0 <= self.min_gap_same_subject_minutes <= 240:
+            raise ValueError("same-subject gap must be between 0 and 240 minutes")
 
 
 @dataclass(frozen=True, slots=True)

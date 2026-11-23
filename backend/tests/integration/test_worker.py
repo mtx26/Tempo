@@ -37,6 +37,10 @@ TZ = ZoneInfo("Europe/Brussels")
 NOW = datetime(2026, 12, 7, 6, tzinfo=TZ)
 
 
+def PUBLIC(host: str) -> bool:  # noqa: N802 - constant-like test helper
+    return host != "internal.example"
+
+
 def ics(*events: tuple[str, str, str, str]) -> bytes:
     body = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Tempo tests//EN"]
     for uid, start, end, location in events:
@@ -124,28 +128,32 @@ def test_fetch_ics_guards() -> None:
         return httpx2.Response(200, content=FEED)
 
     client = httpx2.Client(transport=httpx2.MockTransport(ok))
-    assert fetch_ics(client, secret_url) == FEED
+    assert fetch_ics(client, secret_url, host_check=PUBLIC) == FEED
     with pytest.raises(JobError, match="https"):
-        fetch_ics(client, "http://univ.example/ical")
+        fetch_ics(client, "http://univ.example/ical", host_check=PUBLIC)
 
     def big(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, content=b"x" * (MAX_ICS_BYTES + 1))
 
     with pytest.raises(JobError, match="10 MB"):
-        fetch_ics(httpx2.Client(transport=httpx2.MockTransport(big)), secret_url)
+        fetch_ics(httpx2.Client(transport=httpx2.MockTransport(big)), secret_url, host_check=PUBLIC)
 
     def boom(request: httpx2.Request) -> httpx2.Response:
         raise httpx2.ConnectError("refused", request=request)
 
     with pytest.raises(JobError) as caught:
-        fetch_ics(httpx2.Client(transport=httpx2.MockTransport(boom)), secret_url)
+        fetch_ics(
+            httpx2.Client(transport=httpx2.MockTransport(boom)), secret_url, host_check=PUBLIC
+        )
     assert "SECRET123" not in str(caught.value)
 
     def forbidden(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(403)
 
     with pytest.raises(JobError, match="403"):
-        fetch_ics(httpx2.Client(transport=httpx2.MockTransport(forbidden)), secret_url)
+        fetch_ics(
+            httpx2.Client(transport=httpx2.MockTransport(forbidden)), secret_url, host_check=PUBLIC
+        )
 
 
 def test_replan_scheduling(sessions: sessionmaker[Session]) -> None:
@@ -215,3 +223,96 @@ def test_failed_job_is_recorded_separately(sessions: sessionmaker[Session]) -> N
         runs = {r.name: r for r in s.scalars(select(JobRunRow))}
     assert runs["ics_sync"].last_status == "error" and "boom" in (runs["ics_sync"].last_error or "")
     assert runs["replan"].last_status == "ok"
+
+
+def test_fetch_ics_redirects_stay_https_and_public() -> None:
+    secret = "https://univ.example/ical?token=SECRET123"
+
+    def redirect_to(location: str) -> httpx2.MockTransport:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            if request.url.host == "univ.example":
+                return httpx2.Response(302, headers={"location": location})
+            return httpx2.Response(200, content=FEED)
+
+        return httpx2.MockTransport(handler)
+
+    ok = httpx2.Client(transport=redirect_to("https://cdn.example/feed.ics"))
+    assert fetch_ics(ok, secret, host_check=PUBLIC) == FEED
+    downgrade = httpx2.Client(transport=redirect_to("http://cdn.example/feed.ics"))
+    with pytest.raises(JobError, match="https"):
+        fetch_ics(downgrade, secret, host_check=PUBLIC)
+    internal = httpx2.Client(transport=redirect_to("https://internal.example/x"))
+    with pytest.raises(JobError, match="public"):
+        fetch_ics(internal, secret, host_check=PUBLIC)
+
+    def invalid(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.InvalidURL("Invalid port: 'SECRET123'")
+
+    with pytest.raises(JobError) as caught:
+        fetch_ics(httpx2.Client(transport=httpx2.MockTransport(invalid)), secret, host_check=PUBLIC)
+    assert "SECRET123" not in str(caught.value)
+
+
+def test_private_addresses_are_not_public() -> None:
+    from tempo.worker.jobs import is_public_host
+
+    assert not is_public_host("127.0.0.1")
+    assert not is_public_host("10.0.0.5")
+    assert not is_public_host("no-such-host.invalid")
+
+
+def test_retention_purges_only_old_data(sessions: sessionmaker[Session]) -> None:
+    from tempo.db.models import NotificationRow, ProposalRow
+    from tempo.worker.jobs import retention_job
+
+    now = datetime(2027, 6, 1, tzinfo=TZ)
+    with sessions() as s:
+        s.add(
+            NotificationRow(
+                kind="k",
+                title="t",
+                message="m",
+                dedupe_key="old",
+                created_at=now - timedelta(days=200),
+                acknowledged_at=now - timedelta(days=100),
+            )
+        )
+        s.add(
+            NotificationRow(
+                kind="k",
+                title="t",
+                message="m",
+                dedupe_key="unread",
+                created_at=now - timedelta(days=200),
+            )
+        )
+        s.add(
+            ProposalRow(
+                kind="k",
+                title="t",
+                details={},
+                dedupe_key="p",
+                status="pending",
+                created_at=now - timedelta(days=400),
+            )
+        )
+        s.add(
+            ScheduleVersion(
+                state="superseded",
+                solver_status="x",
+                summary={},
+                created_at=now - timedelta(days=40),
+            )
+        )
+        s.add(
+            ScheduleVersion(
+                state="active", solver_status="x", summary={}, created_at=now - timedelta(days=40)
+            )
+        )
+        s.commit()
+    counts = retention_job(sessions, now)
+    assert counts["notifications"] == 1 and counts["schedule_versions"] == 1
+    assert counts["proposals"] == 0  # pending proposals are never purged
+    with sessions() as s:
+        assert [n.dedupe_key for n in s.scalars(select(NotificationRow))] == ["unread"]
+        assert [v.state for v in s.scalars(select(ScheduleVersion))] == ["active"]

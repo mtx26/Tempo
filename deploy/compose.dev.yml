@@ -11,6 +11,11 @@
 # gives api and routing outbound Internet; the Swarm stack must not.
 name: tempo-dev
 
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -27,6 +32,8 @@ services:
     networks: [backend]
 
   migrate:
+    <<: *hardening
+    mem_limit: 512m
     image: tempo-backend:dev
     command: ["python", "-m", "tempo.db", "upgrade"]
     secrets: [tempo_database_url]
@@ -37,6 +44,8 @@ services:
     networks: [backend]
 
   api:
+    <<: *hardening
+    mem_limit: 1g
     image: tempo-backend:dev
     secrets: [tempo_api_token, tempo_database_url]
     read_only: true
@@ -50,6 +59,8 @@ services:
     networks: [backend, front]
 
   worker:
+    <<: *hardening
+    mem_limit: 2g
     image: tempo-backend:dev
     command: ["python", "-m", "tempo.worker"]
     environment:
@@ -63,6 +74,8 @@ services:
     networks: [backend, egress]
 
   rt-relay:
+    <<: *hardening
+    mem_limit: 512m
     image: tempo-backend:dev
     command: ["python", "-m", "tempo.transport.rt_relay"]
     environment:
@@ -80,6 +93,8 @@ services:
       egress: {}
 
   routing:
+    <<: *hardening
+    mem_limit: 6g
     image: tempo-routing:v2.11.4
     command: ["server", "-d", "/data/belgium"]
     volumes: [tempo-routing-belgium:/data]

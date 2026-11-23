@@ -124,8 +124,9 @@ def plan_activities(
             start - before, before + duration + after, present, f"reserved_{index}"
         )
         intervals.append(reserved)
+        window_start, window_end = GRID_MINUTES * first, GRID_MINUTES * last + duration
         for night_index, (n_start, n_end) in enumerate(night_spans):
-            if n_end > n_start:
+            if n_end > n_start and n_start < window_end and n_end > window_start:
                 night = model.new_fixed_size_interval_var(
                     n_start, n_end - n_start, f"night_{index}_{night_index}"
                 )
