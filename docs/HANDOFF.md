@@ -6,7 +6,8 @@ Written 2026-11-23 for a future model/session. **This file is authoritative over
 ---
 
 ## 0. Session 3 summary (2026-11-23, latest)
-State: application complete locally; nothing pushed, published or deployed. Remaining work needs
+State: NOT finished (roadmap milestones 9-16 open); nothing pushed, published or deployed. No GitHub
+remote exists yet for either repository (push authorised only to existing repos). Remaining work needs
 the user: deployment approval + secrets (docs/DEPLOYMENT.md "Swarm deployment"), Belgian
 Mobility key, coach's sender address + .docx sample (M5b, docs/TRAINING_EMAILS.md), HA repo
 publication + licence, LLM key (optional). Contract test:

@@ -4,7 +4,9 @@
 > full list of what is NOT done, pending user decisions and known traps. Some status lines below are stale.
 
 ## Status (2026-11-23, end of session 3)
-- Application complete and verified locally (backend 378 tests with real PostgreSQL 16, real MOTIS,
+- NOT finished: milestones 9-16 of docs/ROADMAP.md remain (HACS readiness, dashboard, iCal/DST,
+  scheduler optimisation, transport autonomy, conversational agent, operations, docs).
+  Verified so far locally (backend 407 tests with real PostgreSQL 16, real MOTIS,
   real IMAP; HA integration 68 tests on HA 2026.2.3 + 2026.10.4; cross-repo contract test).
   Last fixes: DB session committed before the HTTP response (`2b52471`, found by the contract
   test), missed-session tracking (`8f45ade`), Swarm stack + runbook (`2d89ad1`). Not deployed.
