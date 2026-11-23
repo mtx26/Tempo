@@ -1,5 +1,8 @@
 # Progress
 
+> **Read `docs/HANDOFF.md` first**: authoritative state as of 2026-11-23 (commit `d89ba6e`), interrupted work,
+> full list of what is NOT done, pending user decisions and known traps. Some status lines below are stale.
+
 ## Status (2026-11-23)
 - Phase 0 (feasibility): desk research done → `docs/FEASIBILITY.md`. MOTIS Belgium benchmark NOT done (needs server/Docker).
 - Milestone 1 (backend foundation): PARTIAL — `backend/` uv project, typed `Settings`, FastAPI app factory,
