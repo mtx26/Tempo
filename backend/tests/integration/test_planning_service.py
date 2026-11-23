@@ -188,3 +188,23 @@ def test_cancelled_and_deleted_events_do_not_block(session: Session) -> None:
     session.flush()
     version = replan(session, FakeRouting(), NOW, TZ, reason="test")
     assert not any(t["destination"] == "campus" for t in version.summary["travel"])
+
+
+def test_past_undone_blocks_are_missed_notified_and_replanned(session: Session) -> None:
+    task = seed(session)
+    first = replan(session, FakeRouting(), NOW, TZ, reason="first")
+    blocks = list(
+        session.scalars(select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == first.id))
+    )
+    later = max(b.end_at for b in blocks[:1]) + timedelta(minutes=1)
+    second = replan(session, FakeRouting(), later, TZ, reason="later")
+    session.refresh(blocks[0])
+    assert blocks[0].state == "missed"
+    assert second.summary["missed_blocks"] >= 1
+    assert any(n.kind == "missed_block" for n in session.scalars(select(NotificationRow)))
+    fresh = list(
+        session.scalars(select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == second.id))
+    )
+    remaining = task.effort_minutes - task.completed_minutes
+    assert sum((b.end_at - b.start_at).total_seconds() // 60 for b in fresh) == remaining
+    assert all(b.start_at >= later for b in fresh)

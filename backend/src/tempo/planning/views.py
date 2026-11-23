@@ -73,6 +73,7 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                 "start": _iso(block.start_at),
                 "end": _iso(block.end_at),
                 "locked": block.locked,
+                "state": block.state,
                 "fixed": False,
             }
         )
@@ -177,6 +178,7 @@ def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
         "issues": plan.get("issues", []),
         "warnings": plan.get("warnings", []),
         "unplanned_minutes": sum(plan.get("unplanned_minutes", {}).values()),
+        "missed_blocks": plan.get("missed_blocks", 0),
         "next_event": next_event,
         "next_departure": next_departure,
         "departure_check": get_setting(session, "departure_check"),

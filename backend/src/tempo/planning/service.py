@@ -379,13 +379,43 @@ def _conflict_proposals(session: Session, data: PlanningInput) -> None:
                 )
 
 
+def mark_missed_blocks(session: Session, now: datetime) -> int:
+    """Past blocks never reported done become ``missed`` (requirements: track missed sessions).
+
+    Their effort was never added to ``completed_minutes``, so the re-plan places it again
+    automatically; the user is told once per block."""
+    rows = list(
+        session.scalars(
+            select(StudyBlockRow).where(
+                StudyBlockRow.state == "planned",
+                StudyBlockRow.end_at <= now,
+            )
+        )
+    )
+    subjects = {t.id: t.subject for t in session.scalars(select(StudyTaskRow))}
+    for row in rows:
+        row.state = "missed"
+        notify(
+            session,
+            "missed_block",
+            "Session d'étude manquée",
+            f"La session « {subjects.get(row.task_id, '?')} » du "
+            f"{row.start_at.isoformat(timespec='minutes')} n'a pas été marquée comme faite : "
+            "son temps est replanifié. Marquez-la comme faite si vous l'avez réalisée.",
+            f"missed:{row.id}",
+        )
+    return len(rows)
+
+
 def replan(
     session: Session, routing: RoutingProvider, now: datetime, tz: ZoneInfo, *, reason: str
 ) -> ScheduleVersion:
+    missed = mark_missed_blocks(session, now)
     loaded = build_input(session, now, tz)
     outcome = run_planning(loaded.data, routing)
     result = outcome.result
     summary: dict[str, Any] = {
+        "missed_blocks": missed,
         "reason": reason,
         "planned_at": now.isoformat(),
         "horizon_end": loaded.data.horizon_end.isoformat(),
