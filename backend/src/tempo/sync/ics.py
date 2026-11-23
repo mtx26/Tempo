@@ -71,6 +71,8 @@ class _Skipped(list[str]):
     def __init__(self) -> None:
         super().__init__()
         self.invalid_uids: set[str] = set()
+        self.dst: list[str] = []
+        """Warnings about wall-clock times changed by a DST transition."""
 
     def invalid(self, uid: str, reason: object) -> None:
         self.invalid_uids.add(uid)
@@ -79,6 +81,36 @@ class _Skipped(list[str]):
 
 def _as_aware(value: datetime, default_tz: ZoneInfo) -> datetime:
     return value.replace(tzinfo=default_tz) if value.tzinfo is None else value
+
+
+def dst_normalise(value: datetime) -> tuple[datetime, str | None]:
+    """Resolve wall-clock times that do not exist or exist twice because of a DST change.
+
+    - Non-existent (spring-forward gap, e.g. 02:30 on the last Sunday of March in Brussels):
+      the instant Python derives with ``fold=0`` is kept and the wall time is normalised to it
+      (02:30 -> 03:30 CEST), never silently shifted.
+    - Ambiguous (fall-back overlap, 02:30 happens twice): the FIRST occurrence (``fold=0``,
+      summer time) is used — the earlier, conservative interpretation for a commitment.
+    Both cases return a warning so the user can check the source.
+    """
+    if value.tzinfo is None:
+        return value, None
+    first = value.replace(fold=0)
+    second = value.replace(fold=1)
+    if first.utcoffset() == second.utcoffset():
+        return first, None
+    wall = first.replace(tzinfo=None)
+    round_trip = first.astimezone(UTC).astimezone(value.tzinfo).replace(tzinfo=None)
+    if round_trip != wall:
+        normalised = first.astimezone(UTC).astimezone(value.tzinfo)
+        return normalised, (
+            f"{wall.isoformat(timespec='minutes')} does not exist (DST change): "
+            f"interpreted as {normalised.isoformat(timespec='minutes')}"
+        )
+    return first, (
+        f"{wall.isoformat(timespec='minutes')} is ambiguous (DST change): first occurrence "
+        f"{first.isoformat(timespec='minutes')} used"
+    )
 
 
 def _utc_iso(value: datetime, default_tz: ZoneInfo) -> str:
@@ -153,12 +185,17 @@ def _build_event(
         skipped.append(f"{uid}: {kind} event not treated as a timed commitment")
         return None
     status_text = (_text(component, "STATUS") or "").upper()
+    start_at, start_issue = dst_normalise(_as_aware(start, default_tz))
+    end_at, end_issue = dst_normalise(_as_aware(end, default_tz))
+    for issue in (start_issue, end_issue):
+        if issue is not None:
+            skipped.dst.append(f"{uid}: {issue}")
     try:
         return FixedEvent(
             uid=uid,
             recurrence_id=recurrence_id,
-            start=_as_aware(start, default_tz),
-            end=_as_aware(end, default_tz),
+            start=start_at,
+            end=end_at,
             summary=_text(component, "SUMMARY") or "",
             location=_text(component, "LOCATION"),
             status=EventStatus.TENTATIVE if status_text == "TENTATIVE" else EventStatus.CONFIRMED,
@@ -235,7 +272,7 @@ def parse_ics(
     return IcsImport(
         events=events,
         skipped=list(dict.fromkeys(skipped)),
-        warnings=list(dict.fromkeys(warnings)),
+        warnings=list(dict.fromkeys([*warnings, *skipped.dst])),
         invalid_uids=skipped.invalid_uids,
     )
 

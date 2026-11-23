@@ -130,6 +130,43 @@ def _upsert(
             log.record("changed", key, fields)
 
 
+def _pair_moves(
+    session: Session,
+    source: CalendarSource,
+    stored: dict[OccurrenceKey, FixedEventRow],
+    incoming: dict[OccurrenceKey, FixedEvent],
+) -> list[tuple[FixedEventRow, FixedEvent]]:
+    """Occurrences whose key changed because the series moved (new RECURRENCE-ID) or a single
+    event became recurring: pair vanished and new occurrences of the same UID so they are
+    reported as CHANGED rows (D012), not removed + added.
+
+    Same count for a UID: chronological one-to-one pairing (the whole series shifted).
+    Otherwise: pairing only when an old and a new occurrence fall on the same local date."""
+    vanished: dict[str, list[FixedEventRow]] = {}
+    for key, row in stored.items():
+        if key not in incoming and row.deleted_at is None:
+            vanished.setdefault(key[0], []).append(row)
+    appeared: dict[str, list[FixedEvent]] = {}
+    for key, event in incoming.items():
+        if key not in stored and _find(session, source, key) is None:
+            appeared.setdefault(key[0], []).append(event)
+    pairs: list[tuple[FixedEventRow, FixedEvent]] = []
+    for uid in vanished.keys() & appeared.keys():
+        old = sorted(vanished[uid], key=lambda r: r.start_at)
+        new = sorted(appeared[uid], key=lambda e: e.start)
+        if len(old) == len(new):
+            pairs.extend(zip(old, new, strict=True))
+            continue
+        free = list(new)
+        for row in old:
+            day = row.start_at.astimezone(new[0].start.tzinfo).date()
+            match = next((e for e in free if e.start.date() == day), None)
+            if match is not None:
+                free.remove(match)
+                pairs.append((row, match))
+    return pairs
+
+
 def apply_ics_sync(
     session: Session,
     source: CalendarSource,
@@ -151,6 +188,13 @@ def apply_ics_sync(
     stored: dict[OccurrenceKey, FixedEventRow] = {(r.uid, r.recurrence_id): r for r in rows}
     incoming = {event.key: event for event in imported.events}
     log = _ChangeLog()
+    for row, event in _pair_moves(session, source, stored, incoming):
+        fields = ["recurrence_id", *_changed_fields(row, event)]
+        del stored[(row.uid, row.recurrence_id)]
+        row.recurrence_id = event.recurrence_id
+        _apply(row, event, now)
+        stored[event.key] = row
+        log.record("changed", event.key, sorted(set(fields)))
     _upsert(session, source, stored, incoming, log, now)
 
     to_remove = [

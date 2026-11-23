@@ -249,3 +249,63 @@ def test_overlong_uid_is_skipped_not_crashing_storage() -> None:
 def test_invalid_events_are_listed_by_uid() -> None:
     data = _calendar(*_event("broken", "DTSTART:20261022T090000Z", "DTEND:20261022T080000Z"))
     assert parse_ics(data, *WINDOW, default_tz=BRUSSELS).invalid_uids == {"broken"}
+
+
+def _one(*fields: str) -> list[str]:
+    return [
+        "BEGIN:VEVENT",
+        "UID:dst@u",
+        "DTSTAMP:20270101T000000Z",
+        "SUMMARY:x",
+        *fields,
+        "END:VEVENT",
+    ]
+
+
+def test_nonexistent_spring_forward_time_is_normalised_and_reported() -> None:
+    data = _calendar(
+        *_one(
+            "DTSTART;TZID=Europe/Brussels:20270328T023000",
+            "DTEND;TZID=Europe/Brussels:20270328T040000",
+        )
+    )
+    result = parse_ics(
+        data,
+        datetime(2027, 3, 1, tzinfo=UTC),
+        datetime(2027, 4, 30, tzinfo=UTC),
+        default_tz=BRUSSELS,
+    )
+    [event] = result.events
+    assert event.start == datetime(2027, 3, 28, 1, 30, tzinfo=UTC)  # 03:30 CEST, real instant
+    assert event.start.astimezone(BRUSSELS).hour == 3
+    assert any("does not exist" in w for w in result.warnings)
+
+
+def test_ambiguous_fall_back_floating_time_uses_first_occurrence_and_is_reported() -> None:
+    data = _calendar(*_one("DTSTART:20271031T023000", "DTEND:20271031T033000"))
+    result = parse_ics(
+        data,
+        datetime(2027, 10, 1, tzinfo=UTC),
+        datetime(2027, 11, 30, tzinfo=UTC),
+        default_tz=BRUSSELS,
+    )
+    [event] = result.events
+    # PEP 495: ambiguous wall times never compare equal across zones; compare in UTC.
+    assert event.start.astimezone(UTC) == datetime(2027, 10, 31, 0, 30, tzinfo=UTC)  # 02:30 CEST
+    assert any("ambiguous" in w for w in result.warnings)
+
+
+def test_ordinary_times_produce_no_dst_warning() -> None:
+    data = _calendar(
+        *_one(
+            "DTSTART;TZID=Europe/Brussels:20270329T100000",
+            "DTEND;TZID=Europe/Brussels:20270329T120000",
+        )
+    )
+    result = parse_ics(
+        data,
+        datetime(2027, 3, 1, tzinfo=UTC),
+        datetime(2027, 4, 30, tzinfo=UTC),
+        default_tz=BRUSSELS,
+    )
+    assert result.warnings == []

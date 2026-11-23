@@ -1,7 +1,7 @@
 """Worker jobs on a REAL PostgreSQL (iCal sync, re-plan scheduling, departure check, job runs)."""
 
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx2
@@ -316,3 +316,68 @@ def test_retention_purges_only_old_data(sessions: sessionmaker[Session]) -> None
     with sessions() as s:
         assert [n.dedupe_key for n in s.scalars(select(NotificationRow))] == ["unread"]
         assert [v.state for v in s.scalars(select(ScheduleVersion))] == ["active"]
+
+
+def series(start: str, end: str, count: int = 3, uid: str = "serie@u") -> bytes:
+    body = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Tempo tests//EN",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        "DTSTAMP:20261201T000000Z",
+        "SUMMARY:Physique",
+        "LOCATION:Auditoire A.1",
+        f"DTSTART;TZID=Europe/Brussels:{start}",
+        f"DTEND;TZID=Europe/Brussels:{end}",
+        f"RRULE:FREQ=WEEKLY;COUNT={count}",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(body).encode()
+
+
+def test_moved_series_is_reported_as_changed_not_removed_and_added(
+    sessions: sessionmaker[Session],
+) -> None:
+    ics_sync(sessions, series("20261207T100000", "20261207T120000"), NOW, TZ)
+    with sessions() as s:
+        ids = sorted(str(e.id) for e in s.scalars(select(FixedEventRow)))
+    moved = ics_sync(
+        sessions, series("20261207T110000", "20261207T130000"), NOW + timedelta(hours=1), TZ
+    )
+    assert moved == {"added": 0, "removed": 0, "changed": 3, "restored": 0}
+    with sessions() as s:
+        rows = list(s.scalars(select(FixedEventRow).order_by(FixedEventRow.start_at)))
+    assert sorted(str(r.id) for r in rows) == ids  # same rows, history kept
+    assert [r.start_at.astimezone(TZ).hour for r in rows] == [11, 11, 11]
+    assert all(r.deleted_at is None for r in rows)
+
+
+def test_single_event_turned_into_a_series_keeps_its_row(sessions: sessionmaker[Session]) -> None:
+    single = ics(("serie@u", "20261207T100000", "20261207T120000", "Auditoire A.1"))
+    ics_sync(sessions, single, NOW, TZ)
+    counts = ics_sync(
+        sessions, series("20261207T100000", "20261207T120000"), NOW + timedelta(hours=1), TZ
+    )
+    assert counts == {"added": 2, "removed": 0, "changed": 1, "restored": 0}
+
+
+def test_cancelled_single_occurrence_is_still_a_removal(sessions: sessionmaker[Session]) -> None:
+    ics_sync(sessions, FEED, NOW, TZ)
+    fewer = ics(
+        ("a@u", "20261207T100000", "20261207T120000", "Auditoire A.1"),
+        ("b@u", "20261208T100000", "20261208T120000", "Auditoire A.1"),
+    )
+    counts = ics_sync(sessions, fewer, NOW + timedelta(hours=1), TZ)
+    assert counts["removed"] == 1 and counts["changed"] == 0
+
+
+def test_dst_ambiguous_time_is_stored_as_the_first_instant(sessions: sessionmaker[Session]) -> None:
+    feed = ics(("fall@u", "20261025T023000", "20261025T033000", "Auditoire A.1"))
+    ics_sync(sessions, feed, datetime(2026, 10, 20, tzinfo=TZ), TZ)
+    with sessions() as s:
+        event = s.scalars(select(FixedEventRow).where(FixedEventRow.uid == "fall@u")).one()
+        warnings = [n.message for n in s.scalars(select(NotificationRow))]
+    assert event.start_at.astimezone(UTC) == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    assert any("ambiguous" in m for m in warnings)
