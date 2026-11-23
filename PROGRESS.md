@@ -7,18 +7,26 @@
   CI workflow `.github/workflows/backend.yml` written but **never executed** (not a git repo, no remote).
 - Milestone 2 (domain and sync): STARTED — `FixedEvent`, `StudyTask` (soft target by default), ICS expansion
   (`tempo.sync.ics.parse_ics`) and sync diff (`diff_events`). No persistence yet.
-- Deployment: none. No commits (directory is not a git repository).
+- Milestone 3 (scheduler): DONE — CP-SAT planner `tempo.scheduler.solver.solve` + independent validator
+  `tempo.scheduler.validate.validate_plan` (docs/SCHEDULER.md). Reviewed adversarially by agent `scheduler`;
+  10 findings fixed with regression tests.
+- Milestone 2b (persistence): IN PROGRESS, uncommitted — SQLAlchemy models, Alembic scaffolding, integration
+  tests against a local pgserver PostgreSQL 16 (D016). Initial migration and ICS repository not written yet.
+- Deployment: none. Local commits only: `43a9091` (phase 0 + M1 + ICS), M3 commit (see git log).
 
 ## Quality gates (last local run, backend/)
-- `uv run pytest -q --cov=tempo`: 49 passed, coverage 97 %.
+- M3 validation: `uv run pytest -q --ignore=tests/integration`: 89 passed, coverage 98 % (scheduler, domain,
+  sync, api, config); ruff + mypy strict pass on those packages; pip-audit: no known vulnerabilities.
 - `uv run ruff check .` / `ruff format --check .`: pass.
 - `uv run mypy src tests` (strict): pass.
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
-## Next milestone
-1. Milestone 3 core in pure Python: OR-Tools CP-SAT study-block placement (fixed events, availability,
-   90-min preference, subject alternation, soft vs hard targets, infeasibility report), with simulations.
-2. Persistence (SQLAlchemy + Alembic) once a PostgreSQL instance is available for integration tests.
+## Next actions (exact)
+1. Persistence: write initial Alembic revision in `backend/src/tempo/db/alembic/versions/`, implement
+   `tempo/db/ics_repository.py` (`get_or_create_source`, `apply_ics_sync`, `active_events`), make
+   `tests/integration/test_persistence.py` pass with `TEMPO_TEST_DATABASE_URL` from `scripts/dev_postgres.py`.
+2. Split repositories (temps.txt §4): create local public-ready repo for the HA integration (sibling dir).
+3. Travel constraints (M4) with a MOTIS client contract + mocks (no claim of real validation).
 
 ## Session log
 - Initial starter files and requirements authored.

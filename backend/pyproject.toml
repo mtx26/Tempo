@@ -4,11 +4,15 @@ version = "0.1.0"
 description = "Tempo private planning backend (Home Assistant is the only UI)"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "alembic>=1.20.1",
     "fastapi>=0.165",
     "icalendar>=7.3.2",
+    "ortools>=9.15",
+    "psycopg[binary]>=3.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "recurring-ical-events>=3.8.2",
+    "sqlalchemy>=2.0",
     "tzdata>=2026.6",
     "uvicorn>=0.34",
 ]

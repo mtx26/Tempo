@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -62,3 +63,15 @@ def test_study_task_rejects_negative_completed_minutes() -> None:
             completed_minutes=-1,
             target_date=date(2027, 1, 15),
         )
+
+
+def test_fixed_event_duration_is_elapsed_time_across_dst_change() -> None:
+    brussels = ZoneInfo("Europe/Brussels")
+    # 2026-10-25: clocks go back at 03:00 CEST -> 02:00 CET, so 01:00-04:00 lasts 4 hours.
+    event = FixedEvent(
+        uid="night",
+        start=datetime(2026, 10, 25, 1, tzinfo=brussels),
+        end=datetime(2026, 10, 25, 4, tzinfo=brussels),
+        summary="Nuit",
+    )
+    assert event.duration == timedelta(hours=4)

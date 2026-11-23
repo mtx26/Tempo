@@ -7,7 +7,7 @@ All datetimes must be timezone-aware to keep scheduling DST-safe.
 """
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
 
@@ -44,12 +44,13 @@ class FixedEvent:
     def __post_init__(self) -> None:
         _require_aware("start", self.start)
         _require_aware("end", self.end)
-        if self.end <= self.start:
+        if self.end.astimezone(UTC) <= self.start.astimezone(UTC):
             raise ValueError("end must be after start")
 
     @property
     def duration(self) -> timedelta:
-        return self.end - self.start
+        # Same-tzinfo subtraction ignores UTC offsets (wrong across DST): compare in UTC.
+        return self.end.astimezone(UTC) - self.start.astimezone(UTC)
 
     @property
     def key(self) -> tuple[str, str | None]:
