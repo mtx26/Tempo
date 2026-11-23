@@ -5,7 +5,8 @@ Private routing service for Tempo Core. **Development only**: nothing here is de
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Official MOTIS release binary, pinned by version **and SHA-256**, non-root user. |
-| `fetch_data.py` | Downloads OSM + Belgian GTFS into `data/<region>/` (git-ignored) with a manifest. |
+| `fetch_data.py` | Downloads OSM + Belgian GTFS into `data/<region>/` (git-ignored) with a manifest (dev). |
+| `scripts/supervisor.sh` | Production entrypoint: serves `/data/current`, rebuilds on new `/input/READY`, switches only on success (docs/TRANSPORT.md). |
 | `config/brussels.yml` | Small test region: STIB + SNCB GTFS, SNCB GTFS-RT, BBBike Brussels OSM. |
 | `config/belgium.yml` | Nationwide: STIB, SNCB, TEC, De Lijn GTFS + 6 GTFS-RT feeds through the Tempo relay. |
 

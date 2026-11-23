@@ -161,3 +161,23 @@ portals redirect or are gone. STIB still has **no GTFS-RT**: MOTIS cannot use ST
 - Quota: on-demand only, cached 15 min, capped at 20 requests/24 h anonymous (2 000 with the key
   secret `tempo_bmc_partner_key`; key acceptance on this host still unverified).
 - Fixtures: `backend/tests/fixtures/stib/*.json` (real snapshot extracts, CC BY 4.0).
+
+## Autonomous routing data (milestone 13) — `gtfs_update.py` + `routing/scripts/supervisor.sh`
+- **Refresh** (`routing-update` service, nightly): conditional download with the stored ETag —
+  verified 2026-11-23 that the portal answers `304` with an empty body when a feed is unchanged
+  (saves ~300 MB/day: TEC 97 MB, De Lijn 184 MB, STIB 14 MB, SNCB 7.5 MB) and that Geofabrik
+  publishes ETags (OSM 700 MB, refreshed weekly; URL moved to
+  `/europe/belgium/belgium-latest.osm.pbf`). Each GTFS is validated (zip integrity, required
+  files, calendar covering at least 7 more days, size not below 50 % of the previous copy);
+  rejected downloads leave the previous file in place. `READY` changes only when a file changed.
+- **Rebuild** (`routing` service entrypoint): imports the new version into `/data/build-<v>`,
+  switches the `current` symlink atomically only if the import succeeds, restarts MOTIS
+  (~1-2 min of routing outage, reported as "routing unavailable" and retried by the worker),
+  keeps the previous graph for rollback, never retries a failed version until a newer one comes,
+  and restarts MOTIS if it crashes.
+- **Verified for real** (2026-11-23, MOTIS v2.11.4, Brussels data, throwaway volumes): first import
+  + serve (health 200 after ~12 s), new version -> re-import + switch, corrupted STIB GTFS ->
+  import failed, previous graph kept serving (health 200), no retry loop, killed MOTIS restarted,
+  graceful stop.
+- **Bandwidth summary**: static feeds cost a few 304s/day when unchanged; realtime goes through the
+  relay at its plan (default 2 min TU / 10 min alerts with a key); STIB snapshots on demand only.

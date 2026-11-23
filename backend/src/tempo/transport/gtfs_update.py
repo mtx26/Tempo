@@ -1,0 +1,210 @@
+"""Automatic refresh of the routing inputs (milestone 13): Belgian GTFS + OpenStreetMap.
+
+Runs as a one-shot job (``python -m tempo.transport.gtfs_update /routing-input``, nightly in the
+stack) writing into the volume shared with the routing service:
+- conditional downloads with the stored ETag (``If-None-Match``): verified 2026-11-23 that the
+  Belgian Mobility portal answers ``304`` with an empty body for an unchanged feed, and that
+  Geofabrik publishes ETags — unchanged feeds cost no bandwidth;
+- every GTFS is validated before use (zip integrity, required files, calendar still covering the
+  coming week, size not collapsing vs the previous copy); an invalid download is discarded and
+  the previous file stays in place (reported, never used);
+- files are replaced atomically; ``READY`` is rewritten with a new version only when something
+  changed, which the routing supervisor (``routing/scripts/supervisor.sh``) turns into a MOTIS
+  re-import + switch-over, keeping the previous graph on failure.
+"""
+
+import csv
+import hashlib
+import io
+import json
+import logging
+import sys
+import zipfile
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import httpx2
+
+from tempo.transport.feeds import FEEDS, KEY_HEADER, FeedKind
+
+logger = logging.getLogger(__name__)
+
+OSM_URL = "https://download.geofabrik.de/europe/belgium/belgium-latest.osm.pbf"
+OSM_REFRESH = timedelta(days=7)
+REQUIRED_GTFS = ("agency.txt", "stops.txt", "routes.txt", "trips.txt", "stop_times.txt")
+MIN_SIZE_RATIO = 0.5
+MAX_DOWNLOAD = 2_000_000_000
+COVERAGE = timedelta(days=7)
+
+
+class InvalidGtfsError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class Source:
+    name: str
+    """File name in the input directory (e.g. ``tec.gtfs.zip``)."""
+    url: str
+    gtfs: bool
+    min_interval: timedelta = timedelta(0)
+
+
+def sources() -> list[Source]:
+    static = [
+        Source(f"{feed.operator.name.lower().replace('_', '')}.gtfs.zip", feed.url, True)
+        for feed in FEEDS
+        if feed.kind is FeedKind.STATIC
+    ]
+    return [*static, Source("osm.pbf", OSM_URL, False, OSM_REFRESH)]
+
+
+def validate_gtfs(data: bytes, today: date, previous_size: int | None) -> date | None:
+    """Raise ``InvalidGtfsError`` unless the feed is usable; returns its last service date."""
+    if previous_size and len(data) < MIN_SIZE_RATIO * previous_size:
+        raise InvalidGtfsError(f"size collapsed ({len(data)} vs {previous_size} bytes)")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        if archive.testzip() is not None:
+            raise InvalidGtfsError("corrupt zip member")
+    except zipfile.BadZipFile as exc:
+        raise InvalidGtfsError("not a zip file") from exc
+    names = set(archive.namelist())
+    missing = [n for n in REQUIRED_GTFS if n not in names]
+    if missing or not ({"calendar.txt", "calendar_dates.txt"} & names):
+        raise InvalidGtfsError(f"missing GTFS files: {missing or ['calendar*.txt']}")
+    last = _last_service_date(archive, names)
+    if last is not None and last < today + COVERAGE:
+        raise InvalidGtfsError(f"calendar ends on {last}, less than a week ahead")
+    return last
+
+
+def _last_service_date(archive: zipfile.ZipFile, names: set[str]) -> date | None:
+    ends: list[date] = []
+    for name, column in (("calendar.txt", "end_date"), ("calendar_dates.txt", "date")):
+        if name not in names:
+            continue
+        with archive.open(name) as handle:
+            for row in csv.DictReader(io.TextIOWrapper(handle, "utf-8-sig")):
+                value = (row.get(column) or "").strip()
+                if len(value) == 8 and value.isdigit():
+                    ends.append(date(int(value[:4]), int(value[4:6]), int(value[6:])))
+    return max(ends) if ends else None
+
+
+@dataclass(slots=True)
+class UpdateReport:
+    changed: list[str]
+    unchanged: list[str]
+    skipped: list[str]
+    failed: dict[str, str]
+    version: str | None
+
+
+def _load(path: Path) -> dict[str, Any]:
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return data
+    except (OSError, ValueError):
+        return {}
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    tmp = path.with_suffix(path.suffix + ".part")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def update_inputs(
+    folder: Path,
+    client: httpx2.Client,
+    *,
+    key: str | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    only: list[Source] | None = None,
+) -> UpdateReport:
+    folder.mkdir(parents=True, exist_ok=True)
+    state_path = folder / "update-state.json"
+    state = _load(state_path)
+    now = clock()
+    report = UpdateReport([], [], [], {}, None)
+    for source in only or sources():
+        entry = state.get(source.name, {})
+        last_check = entry.get("checked_at")
+        if last_check and now - datetime.fromisoformat(last_check) < source.min_interval:
+            report.skipped.append(source.name)
+            continue
+        headers = {"User-Agent": "tempo-routing-update"}
+        if entry.get("etag") and (folder / source.name).exists():
+            headers["If-None-Match"] = entry["etag"]
+        if key and source.gtfs:  # the portal key never leaves for Geofabrik
+            headers[KEY_HEADER] = key
+        try:
+            response = client.get(source.url, headers=headers, follow_redirects=True)
+        except httpx2.HTTPError as exc:
+            report.failed[source.name] = f"download failed: {type(exc).__name__}"
+            continue
+        if response.status_code == 304:
+            entry["checked_at"] = now.isoformat()
+            state[source.name] = entry
+            report.unchanged.append(source.name)
+            continue
+        if response.status_code != 200:
+            report.failed[source.name] = f"HTTP {response.status_code}"
+            continue
+        data = response.content
+        if len(data) > MAX_DOWNLOAD or not data:
+            report.failed[source.name] = "empty or oversized download"
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        if digest == entry.get("sha256") and (folder / source.name).exists():
+            entry.update(checked_at=now.isoformat(), etag=response.headers.get("etag"))
+            state[source.name] = entry
+            report.unchanged.append(source.name)
+            continue
+        if source.gtfs:
+            try:
+                last = validate_gtfs(data, now.date(), entry.get("bytes"))
+            except InvalidGtfsError as exc:
+                report.failed[source.name] = f"rejected: {exc}"
+                continue
+            entry["valid_until"] = None if last is None else last.isoformat()
+        _atomic_write(folder / source.name, data)
+        entry.update(
+            sha256=digest,
+            bytes=len(data),
+            etag=response.headers.get("etag"),
+            checked_at=now.isoformat(),
+            updated_at=now.isoformat(),
+            url=source.url,
+        )
+        state[source.name] = entry
+        report.changed.append(source.name)
+    if report.changed:
+        report.version = now.strftime("%Y%m%dT%H%M%SZ")
+        _atomic_write(folder / "READY", report.version.encode())
+    _atomic_write(state_path, json.dumps(state, indent=2).encode())
+    return report
+
+
+def main(argv: list[str]) -> int:  # pragma: no cover - process entry point
+    import os
+
+    logging.basicConfig(level=logging.INFO)
+    if len(argv) != 1:
+        print("usage: python -m tempo.transport.gtfs_update <input-folder>", file=sys.stderr)
+        return 2
+    key_file = Path("/run/secrets/tempo_bmc_partner_key")
+    key = key_file.read_text(encoding="utf-8").strip() if key_file.exists() else None
+    key = key or os.environ.get("TEMPO_BMC_PARTNER_KEY")
+    with httpx2.Client(timeout=600.0) as client:
+        report = update_inputs(Path(argv[0]), client, key=key)
+    print(json.dumps(report.__dict__, indent=2))
+    return 1 if report.failed and not (report.changed or report.unchanged) else 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main(sys.argv[1:]))

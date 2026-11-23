@@ -16,6 +16,8 @@ RUN apt-get update \
  && useradd --system --uid 10001 --home-dir /data motis \
  && mkdir -p /data && chown motis /data
 
+COPY --chmod=0555 scripts/supervisor.sh /opt/tempo/supervisor.sh
+
 USER motis
 WORKDIR /data
 EXPOSE 8080

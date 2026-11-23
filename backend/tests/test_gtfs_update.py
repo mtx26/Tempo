@@ -1,0 +1,134 @@
+"""Automatic routing-input refresh: conditional downloads, validation, atomic switch signal."""
+
+import io
+import json
+import zipfile
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+
+import httpx2
+import pytest
+
+from tempo.transport.feeds import KEY_HEADER
+from tempo.transport.gtfs_update import (
+    InvalidGtfsError,
+    Source,
+    update_inputs,
+    validate_gtfs,
+)
+
+NOW = datetime(2026, 11, 24, 2, tzinfo=UTC)
+
+
+def gtfs(end: str = "20270131", extra: dict[str, str] | None = None, pad: int = 0) -> bytes:
+    files = {
+        "agency.txt": "agency_id,agency_name\nA,Agency\n",
+        "stops.txt": "stop_id,stop_name\nS1,Stop\n",
+        "routes.txt": "route_id,agency_id\nR1,A\n",
+        "trips.txt": "route_id,service_id,trip_id\nR1,C1,T1\n",
+        "stop_times.txt": "trip_id,stop_id,stop_sequence\nT1,S1,1\n" + "x" * pad,
+        "calendar.txt": f"service_id,start_date,end_date\nC1,20261101,{end}\n",
+        **(extra or {}),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+def test_validation_rules() -> None:
+    assert validate_gtfs(gtfs(), NOW.date(), None) == date(2027, 1, 31)
+    with pytest.raises(InvalidGtfsError, match="zip"):
+        validate_gtfs(b"<html>", NOW.date(), None)
+    with pytest.raises(InvalidGtfsError, match="less than a week"):
+        validate_gtfs(gtfs(end="20261126"), NOW.date(), None)
+    with pytest.raises(InvalidGtfsError, match="collapsed"):
+        validate_gtfs(gtfs(), NOW.date(), 10_000_000)
+    incomplete = io.BytesIO()
+    with zipfile.ZipFile(incomplete, "w") as archive:
+        archive.writestr("stops.txt", "stop_id\n")
+    with pytest.raises(InvalidGtfsError, match="missing"):
+        validate_gtfs(incomplete.getvalue(), NOW.date(), None)
+
+
+class Portal:
+    def __init__(self) -> None:
+        self.files: dict[str, tuple[bytes, str]] = {
+            "/stib": (gtfs(), '"v1"'),
+            "/osm": (b"pbf", '"o1"'),
+        }
+        self.requests: list[httpx2.Request] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        body, etag = self.files[request.url.path]
+        if request.headers.get("if-none-match") == etag:
+            return httpx2.Response(304)
+        return httpx2.Response(200, content=body, headers={"etag": etag})
+
+
+SOURCES = [
+    Source("stib.gtfs.zip", "https://portal.example/stib", True),
+    Source("osm.pbf", "https://geofabrik.example/osm", False, timedelta(days=7)),
+]
+
+
+def run(folder: Path, portal: Portal, now: datetime, key: str | None = None) -> object:
+    client = httpx2.Client(transport=httpx2.MockTransport(portal))
+    return update_inputs(folder, client, key=key, clock=lambda: now, only=SOURCES)
+
+
+def test_first_run_downloads_validates_and_signals(tmp_path: Path) -> None:
+    portal = Portal()
+    report = run(tmp_path, portal, NOW, key="secret-key")
+    assert report.changed == ["stib.gtfs.zip", "osm.pbf"]  # type: ignore[attr-defined]
+    assert (tmp_path / "READY").read_text() == "20261124T020000Z"
+    state = json.loads((tmp_path / "update-state.json").read_text())
+    assert state["stib.gtfs.zip"]["valid_until"] == "2027-01-31"
+    stib, osm = portal.requests
+    assert stib.headers[KEY_HEADER] == "secret-key"
+    assert KEY_HEADER not in osm.headers  # the portal key never goes to Geofabrik
+
+
+def test_unchanged_feeds_cost_no_download_and_no_rebuild(tmp_path: Path) -> None:
+    portal = Portal()
+    run(tmp_path, portal, NOW)
+    ready = (tmp_path / "READY").read_text()
+    report = run(tmp_path, portal, NOW + timedelta(days=1))
+    assert report.unchanged == ["stib.gtfs.zip"] and report.skipped == ["osm.pbf"]  # type: ignore[attr-defined]
+    assert portal.requests[-1].headers["if-none-match"] == '"v1"'
+    assert (tmp_path / "READY").read_text() == ready
+    weekly = run(tmp_path, portal, NOW + timedelta(days=8))
+    assert "osm.pbf" in weekly.unchanged  # type: ignore[attr-defined]
+
+
+def test_invalid_update_keeps_the_previous_file(tmp_path: Path) -> None:
+    portal = Portal()
+    run(tmp_path, portal, NOW)
+    good = (tmp_path / "stib.gtfs.zip").read_bytes()
+    portal.files["/stib"] = (gtfs(end="20261125"), '"v2"')
+    report = run(tmp_path, portal, NOW + timedelta(days=1))
+    assert "stib.gtfs.zip" in report.failed  # type: ignore[attr-defined]
+    assert (tmp_path / "stib.gtfs.zip").read_bytes() == good
+    assert report.version is None  # type: ignore[attr-defined]
+
+
+def test_new_valid_version_replaces_and_signals(tmp_path: Path) -> None:
+    portal = Portal()
+    run(tmp_path, portal, NOW)
+    portal.files["/stib"] = (gtfs(end="20270228"), '"v3"')
+    report = run(tmp_path, portal, NOW + timedelta(days=1))
+    assert report.changed == ["stib.gtfs.zip"]  # type: ignore[attr-defined]
+    assert (tmp_path / "READY").read_text() == "20261125T020000Z"
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_server_errors_are_reported(tmp_path: Path) -> None:
+    def down(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(503)
+
+    client = httpx2.Client(transport=httpx2.MockTransport(down))
+    report = update_inputs(tmp_path, client, clock=lambda: NOW, only=SOURCES)
+    assert report.failed == {"stib.gtfs.zip": "HTTP 503", "osm.pbf": "HTTP 503"}
+    assert not (tmp_path / "READY").exists()

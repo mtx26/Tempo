@@ -17,6 +17,9 @@ RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
 RUN useradd --system --uid 10002 --no-create-home --shell /usr/sbin/nologin tempo
+# Mount points owned by the runtime user: Docker initialises empty named volumes with this
+# ownership (relay request log, routing inputs written by the updater).
+RUN mkdir -p /state /routing-input && chown tempo:tempo /state /routing-input
 COPY --from=build --chown=root:root /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER tempo

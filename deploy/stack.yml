@@ -110,13 +110,33 @@ services:
       replicas: 1  # the request log that enforces the portal quota is per process
       resources: {limits: {memory: 512M}}
 
+  routing-update:
+    <<: *hardening
+    image: *backend-image
+    # Nightly conditional refresh of GTFS (4 feeds) + weekly OSM, validated, atomic; publishes
+    # /routing-input/READY only when something changed (milestone 13, docs/TRANSPORT.md).
+    command:
+      - sh
+      - -c
+      - while true; do python -m tempo.transport.gtfs_update /routing-input || echo 'UPDATE FAILED'; sleep 86400; done
+    # Optional: secret tempo_bmc_partner_key (Standard tier) for the portal requests.
+    volumes: [routing-input:/routing-input]
+    networks: [egress]
+    deploy:
+      replicas: 1
+      resources: {limits: {memory: 1G}}
+
   routing:
     <<: *hardening
     image: ${TEMPO_REGISTRY}/tempo-routing:v2.11.4
-    command: ["server", "-d", "/data/belgium"]
-    # Volume filled beforehand by `motis import` with routing/config/belgium.yml
-    # (routing/README.md); importing again is needed when GTFS feeds are refreshed.
-    volumes: [routing-data:/data]
+    # Supervisor: serves /data/current, re-imports into a new graph when READY changes, switches
+    # only on success, keeps the previous graph (rollback) and restarts MOTIS if it crashes.
+    entrypoint: ["/opt/tempo/supervisor.sh"]
+    environment:
+      CHECK_SECONDS: "300"
+    configs:
+      - {source: motis_config, target: /config/config.yml, mode: 0444}
+    volumes: [routing-input:/input:ro, routing-data:/data]
     networks: [routing]
     deploy:
       replicas: 1
@@ -144,6 +164,7 @@ services:
 
 configs:
   init_roles: {file: ./db/init-roles.sh}
+  motis_config: {file: ../routing/config/belgium.yml}
   backup_sh: {file: ./backup/backup.sh}
   restore_drill_sh: {file: ./backup/restore_drill.sh}
 
@@ -160,6 +181,7 @@ volumes:
   relay-state: {}
   backups: {}
   routing-data: {}
+  routing-input: {}
 
 networks:
   backend: {driver: overlay, internal: true}
