@@ -21,12 +21,14 @@ Smoke test (local, `--read-only --tmpfs /tmp`): API `/health` 200, no `Server` h
 logs. Relay `/health` 200 in anonymous mode without calling the portal.
 
 Service requirements for the future stack:
-- `tempo-api`: secrets `tempo_api_token`, `tempo_database_url`; internal network shared with HA.
+- `tempo-api`: **replicas: 1** (in-memory auth limiter); secrets `tempo_api_token`,
+  `tempo_database_url`, optional `tempo_api_token_previous` during a rotation (D023: deploy new token
+  as `tempo_api_token` + old one as previous, update HA, then remove the previous secret).
 - `tempo-rt-relay`: **replicas: 1**; secret `tempo_relay_bmc_partner_key` (optional, Standard
   tier); `TEMPO_RELAY_STATE_FILE` on a small persistent volume; outbound HTTPS to
   `api-management-discovery-production.azure-api.net` only; reachable by `tempo-routing` only.
 - `tempo-routing`: data volume from `motis import`, config `routing/config/belgium.yml`.
 - Health checks: the image has no curl; use
   `python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"`.
-- Still open before deployment: 401 rate limiting and token rotation (two valid tokens), worker,
+- Done: 401 limiting and token rotation (D023). Still open before deployment: worker,
   migration job, DB roles, backups/restore drill, resource benchmark on the Swarm node.

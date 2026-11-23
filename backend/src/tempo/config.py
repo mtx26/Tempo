@@ -6,7 +6,7 @@ Secrets are typed ``SecretStr`` so they never appear in ``repr`` or logs.
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIN_TOKEN_LENGTH = 32
@@ -26,21 +26,43 @@ class Settings(BaseSettings):
     api_token: SecretStr = Field(min_length=MIN_TOKEN_LENGTH)
     """Shared service token used by the Home Assistant integration (Bearer auth)."""
 
+    api_token_previous: SecretStr | None = Field(default=None, min_length=MIN_TOKEN_LENGTH)
+    """Previous token, still accepted during a rotation (Docker secret
+    ``tempo_api_token_previous``). Remove it once Home Assistant uses the new token."""
+
     database_url: SecretStr | None = None
     """SQLAlchemy URL of PostgreSQL (e.g. from the Docker secret ``tempo_database_url``)."""
 
     timezone: str = "Europe/Brussels"
     """IANA timezone used to interpret local wall-clock planning rules."""
 
-    @field_validator("api_token")
+    @field_validator("api_token", "api_token_previous")
     @classmethod
-    def _non_trivial_token(cls, value: SecretStr) -> SecretStr:
+    def _non_trivial_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
         raw = value.get_secret_value()
         if any(char.isspace() for char in raw):
             raise ValueError("token must not contain whitespace")
         if len(set(raw)) < MIN_DISTINCT_TOKEN_CHARS:
             raise ValueError("token is too predictable; use secrets.token_urlsafe(32)")
         return value
+
+    @model_validator(mode="after")
+    def _distinct_tokens(self) -> "Settings":
+        previous = self.api_token_previous
+        if (
+            previous is not None
+            and previous.get_secret_value() == self.api_token.get_secret_value()
+        ):
+            raise ValueError("api_token_previous must differ from api_token")
+        return self
+
+    def accepted_tokens(self) -> tuple[bytes, ...]:
+        tokens = [self.api_token]
+        if self.api_token_previous is not None:
+            tokens.append(self.api_token_previous)
+        return tuple(t.get_secret_value().encode() for t in tokens)
 
     @field_validator("timezone")
     @classmethod

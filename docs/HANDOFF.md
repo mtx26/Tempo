@@ -66,8 +66,8 @@ from `routing/README.md`, otherwise `test_motis_live.py` fails (correct signal, 
 - `docker-compose`/dev stack (api + postgres + motis) — not written.
 - CI `.github/workflows/backend.yml` exists (with Postgres service + pip-audit) but has **never run**
   (no remote). It does not start MOTIS, so live MOTIS tests will be skipped in CI.
-- Server entrypoint `python -m tempo.api` written (`server_header=False`). Still open: 401 rate
-  limiting, two valid tokens for rotation (security review items).
+- Server entrypoint `python -m tempo.api` written (`server_header=False`); 401 limiting and token
+  rotation done (D023).
 
 ### M2 leftovers (domain and sync)
 - **Availability rules** (weekly windows configured in HA, tagged with a place) — no model/table/API yet.
@@ -156,7 +156,8 @@ from `routing/README.md`, otherwise `test_motis_live.py` fails (correct signal, 
 - Auto-mode classifier blocked commits until the user explicitly allowed them; the user later
   authorized local commits (CLAUDE.md "Autonomous development policy").
 
-## 6. Repository items NOT created by the development sessions (do not delete/commit blindly)
+## 6. Repository items NOT created by the development sessions
+Committed on the user's request on 2026-11-23 (commit `316e2a1`). Original note:
 Untracked in this repo: `docs/audits/claude-environment-audit.md`, `graphify-out/`, `.mcp.json`,
 `.claude/settings.json.graphify-bak`, `temp.txt`; modified: `.claude/settings.json`,
 `CLAUDE.md` (graphify section). These come from the user or other tools — ask before committing them.
