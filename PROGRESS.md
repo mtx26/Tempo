@@ -65,13 +65,16 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. M7 worker skeleton (no user decision needed): `python -m tempo.worker` with scheduled iCal fetch
-   (URL from secret, window + margin, D017), re-planning into `schedule_version`, departure
-   re-checks (`check_departure`) feeding HA notifications later; failed sync recorded in a separate
-   transaction.
-2. Needs the user: M6 HA integration (OK to install the HA test toolkit in `../tempo-homeassistant`,
-   keep/delete its untracked pyproject.toml/uv.lock), M5 training emails (authorized sender/thread),
-   LLM provider, Belgian Mobility Standard key, phone `device_tracker` id, iCal URL, places.
+1. Contract test `backend/tests/integration/test_ha_contract.py` (UNCOMMITTED, FAILING): the HA
+   client's `put_place("club", ...)` then `places()` returns only `home` (line ~93). Debug: compare
+   the client's PUT path/payload with `/v1/places/{id}` (aliases normalisation? 409 swallowed?).
+   Run: `TEMPO_TEST_HA_REPO=../../tempo-homeassistant TEMPO_TEST_DATABASE_URL=... uv run pytest
+   tests/integration/test_ha_contract.py`.
+2. M9: Swarm stack file `deploy/stack.yml` (not deployed) + runbook; M5b DOCX training plans once
+   the coach's sender address is provided (docs/TRAINING_EMAILS.md).
+3. Done this session: planning engine/service, full HA API, worker, M5a, AI interpret, security
+   review fixes (`3c9bc03`), DB roles + backup/restore drill, E2E with real MOTIS, HA integration
+   (`../tempo-homeassistant`, 68 tests on HA 2026.2.3 and 2026.10.4).
 Local services: PostgreSQL via `backend/scripts/dev_postgres.py` (if pgserver times out after an
 unclean stop, postgres may still come up on the printed port — check `.pgdata/log`); MOTIS
 `tempo-motis-brussels` (18080); nationwide volume `tempo-routing-belgium` (server
