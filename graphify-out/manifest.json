@@ -37,10 +37,10 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "backend/src/tempo/api/app.py": {
-    "mtime": 1795428025.6089537,
-    "seen": 1795453743.59324,
-    "ast_hash": "202b839e510c4a5afb3f21578fd6a2c4",
-    "semantic_hash": "202b839e510c4a5afb3f21578fd6a2c4"
+    "mtime": 1795462586.6401546,
+    "seen": 1795462925.113965,
+    "ast_hash": "5f24730bff1cdbab8076ce36065e1ebe",
+    "semantic_hash": ""
   },
   "backend/src/tempo/api/ha.py": {
     "mtime": 1795428041.9376462,
@@ -55,10 +55,10 @@
     "semantic_hash": "176239c04cbd70f9f6179e74c973e5f5"
   },
   "backend/src/tempo/config.py": {
-    "mtime": 1795428008.6358843,
-    "seen": 1795453743.5935907,
-    "ast_hash": "563c310cd311b728003a50c6cda774a9",
-    "semantic_hash": "563c310cd311b728003a50c6cda774a9"
+    "mtime": 1795462587.5667226,
+    "seen": 1795462925.113974,
+    "ast_hash": "954c89c2e403ca19ad3ed623e5cef5d5",
+    "semantic_hash": ""
   },
   "backend/src/tempo/db/__init__.py": {
     "mtime": 1795424949.2239485,
@@ -163,27 +163,27 @@
     "semantic_hash": "9503281033942cc2c16dc3b898307428"
   },
   "backend/src/tempo/transport/motis.py": {
-    "mtime": 1795461549.578245,
-    "seen": 1795461809.2351766,
-    "ast_hash": "41fd15943e8b2c03f41f5c08dc83bc89",
+    "mtime": 1795462194.427381,
+    "seen": 1795462925.1140153,
+    "ast_hash": "1339cdb42d185dedd4c0d7b6e5debdae",
     "semantic_hash": ""
   },
   "backend/src/tempo/transport/places.py": {
-    "mtime": 1795426833.8939705,
-    "seen": 1795453743.5958047,
-    "ast_hash": "4a6aff70e85bbbac606a679419e9e7d6",
-    "semantic_hash": "4a6aff70e85bbbac606a679419e9e7d6"
+    "mtime": 1795461828.8752303,
+    "seen": 1795462925.114017,
+    "ast_hash": "3f36703b8f0edbfb91dc7102d4543ad0",
+    "semantic_hash": ""
   },
   "backend/src/tempo/transport/routing.py": {
-    "mtime": 1795461398.7294903,
-    "seen": 1795461809.2351804,
-    "ast_hash": "c964eb9314e87d72f643aa6fc3662f6e",
+    "mtime": 1795462194.427381,
+    "seen": 1795462925.1140187,
+    "ast_hash": "a6dfd97a41205823cfd41bb57f293d7c",
     "semantic_hash": ""
   },
   "backend/src/tempo/transport/travel.py": {
-    "mtime": 1795461403.864008,
-    "seen": 1795461809.2351842,
-    "ast_hash": "88bd7dca4ab12d01c522d8b9aeb86019",
+    "mtime": 1795462218.004696,
+    "seen": 1795462925.1140215,
+    "ast_hash": "6a1ff62137056c5cd29f2b075d25e95d",
     "semantic_hash": ""
   },
   "backend/tests/__init__.py": {
@@ -297,9 +297,9 @@
     "semantic_hash": "22c265f02129c83516222b48775b1b55"
   },
   "routing/config/belgium.yml": {
-    "mtime": 1795461464.6412165,
-    "seen": 1795461809.2352345,
-    "ast_hash": "478260c165493110cf7ac9115f8446c5",
+    "mtime": 1795462285.9863439,
+    "seen": 1795462925.1140761,
+    "ast_hash": "c35891f3ad58043b2a099e2cc4478a32",
     "semantic_hash": ""
   },
   "routing/config/brussels.yml": {
@@ -309,10 +309,10 @@
     "semantic_hash": "f21ccd28e5e33d0fb277c269bc3924b3"
   },
   "routing/fetch_data.py": {
-    "mtime": 1795427538.4344947,
-    "seen": 1795453743.5981658,
-    "ast_hash": "1c103cb62590bad89fedbe5071ad2fc5",
-    "semantic_hash": "1c103cb62590bad89fedbe5071ad2fc5"
+    "mtime": 1795462233.2412233,
+    "seen": 1795462925.1140797,
+    "ast_hash": "82f440e08433c46c2ea019b8cb300457",
+    "semantic_hash": ""
   },
   ".mcp.json": {
     "mtime": 1795453993.810861,
@@ -327,15 +327,15 @@
     "semantic_hash": ""
   },
   "backend/src/tempo/transport/gtfsrt.py": {
-    "mtime": 1795461016.171055,
-    "seen": 1795461809.235172,
-    "ast_hash": "32fa9d6aab2f24110c2a6fcb55afa2c7",
+    "mtime": 1795462224.9873972,
+    "seen": 1795462925.1140118,
+    "ast_hash": "bd2333ac19f7d7f707e5964750a31ed7",
     "semantic_hash": ""
   },
   "backend/src/tempo/transport/rt_relay.py": {
-    "mtime": 1795461292.828705,
-    "seen": 1795461809.235182,
-    "ast_hash": "ae693df955b8a0b17e9c979e8ecd4650",
+    "mtime": 1795462175.2856624,
+    "seen": 1795462925.11402,
+    "ast_hash": "a20f9e18b9bc28a2c997812e4f9e8c9f",
     "semantic_hash": ""
   },
   "backend/tests/fixtures/motis_plan_v6_real_belgium_alerts.json": {
@@ -357,9 +357,9 @@
     "semantic_hash": ""
   },
   "backend/tests/test_alerts.py": {
-    "mtime": 1795461415.3397553,
-    "seen": 1795461809.2352083,
-    "ast_hash": "a8d4e86c050f9065bc46b979e3a2a576",
+    "mtime": 1795462271.0246723,
+    "seen": 1795462925.1140442,
+    "ast_hash": "6bf3abc5f08956b0f7a3a081e3432368",
     "semantic_hash": ""
   },
   "backend/tests/test_feeds.py": {
@@ -369,15 +369,15 @@
     "semantic_hash": ""
   },
   "backend/tests/test_gtfsrt.py": {
-    "mtime": 1795461205.2934723,
-    "seen": 1795461809.2352173,
-    "ast_hash": "ecf6387fd9d27b591ef21ca38590b2d9",
+    "mtime": 1795462247.8704667,
+    "seen": 1795462925.1140578,
+    "ast_hash": "720b20c2e8e4f3af92ac4274182e99c4",
     "semantic_hash": ""
   },
   "backend/tests/test_rt_relay.py": {
-    "mtime": 1795461305.7741911,
-    "seen": 1795461809.235223,
-    "ast_hash": "9e6f343dd61d067251342efda336ebfc",
+    "mtime": 1795462218.0056975,
+    "seen": 1795462925.1140628,
+    "ast_hash": "8b1f47d6307585036603124b42efdeff",
     "semantic_hash": ""
   },
   ".claude/agents/architect.md": {
@@ -465,9 +465,9 @@
     "semantic_hash": ""
   },
   "PROGRESS.md": {
-    "mtime": 1795461795.4891958,
-    "seen": 1795461809.2352612,
-    "ast_hash": "f42862c9bba7e168de1c324b50d98192",
+    "mtime": 1795462881.8320913,
+    "seen": 1795462925.1141064,
+    "ast_hash": "0e400c1d20866fb1b07a9d51b33d6517",
     "semantic_hash": ""
   },
   "README.md": {
@@ -489,15 +489,15 @@
     "semantic_hash": ""
   },
   "docs/DECISIONS.md": {
-    "mtime": 1795461549.5752363,
-    "seen": 1795461809.2352674,
-    "ast_hash": "941248436d007c1896a91a160e7a3cbe",
+    "mtime": 1795462670.1100411,
+    "seen": 1795462925.114113,
+    "ast_hash": "2a87be676f31da8839702e17ed83326c",
     "semantic_hash": ""
   },
   "docs/DEPLOYMENT.md": {
-    "mtime": 1795426716.9502022,
-    "seen": 1795461809.2352688,
-    "ast_hash": "87b33f30c2bd87c4a6578015c84c1a4f",
+    "mtime": 1795462881.829812,
+    "seen": 1795462925.1141145,
+    "ast_hash": "88e898fea82ab44e8a7788652c7a597c",
     "semantic_hash": ""
   },
   "docs/FEASIBILITY.md": {
@@ -507,9 +507,9 @@
     "semantic_hash": ""
   },
   "docs/HANDOFF.md": {
-    "mtime": 1795461795.4902132,
-    "seen": 1795461809.2352717,
-    "ast_hash": "9ec3876c0dab8c740d6b2f3db3580ab2",
+    "mtime": 1795462881.8330903,
+    "seen": 1795462925.1141179,
+    "ast_hash": "8cf8f2aa1f681553da97b2697f3c27d9",
     "semantic_hash": ""
   },
   "docs/INSTALLATION.md": {
@@ -525,9 +525,9 @@
     "semantic_hash": ""
   },
   "docs/ROADMAP.md": {
-    "mtime": 1795461549.578245,
-    "seen": 1795461809.2352781,
-    "ast_hash": "d683ee28f7b16456b0521145bd34cfad",
+    "mtime": 1795462881.8342302,
+    "seen": 1795462925.1141229,
+    "ast_hash": "6e83552b37d0b440f6d72716ae33ff1c",
     "semantic_hash": ""
   },
   "docs/SCHEDULER.md": {
@@ -537,9 +537,9 @@
     "semantic_hash": ""
   },
   "docs/TRANSPORT.md": {
-    "mtime": 1795461532.2276654,
-    "seen": 1795461809.2352812,
-    "ast_hash": "d48d5fd011d5c71e61994fd5096bcb91",
+    "mtime": 1795462285.9900334,
+    "seen": 1795462925.114126,
+    "ast_hash": "a8461749ee05fdb9c725aec1539df666",
     "semantic_hash": ""
   },
   "docs/audits/claude-environment-audit.md": {
@@ -558,6 +558,60 @@
     "mtime": 1795452020.5002835,
     "seen": 1795461809.2352855,
     "ast_hash": "b87f0e1185ebff5cda36f97b9297042c",
+    "semantic_hash": ""
+  },
+  "backend/src/tempo/api/__main__.py": {
+    "mtime": 1795462462.8088746,
+    "seen": 1795462925.1139617,
+    "ast_hash": "e595db5f1cd31ebc826700d8baf60a99",
+    "semantic_hash": ""
+  },
+  "backend/src/tempo/api/auth.py": {
+    "mtime": 1795462619.999162,
+    "seen": 1795462925.1139677,
+    "ast_hash": "a6c08d94b43a0885c37bfa190f87e1e5",
+    "semantic_hash": ""
+  },
+  "backend/src/tempo/db/__main__.py": {
+    "mtime": 1795462740.6719246,
+    "seen": 1795462925.113978,
+    "ast_hash": "aa6f797f187884857779efc573fe1e6e",
+    "semantic_hash": ""
+  },
+  "backend/src/tempo/transport/departure.py": {
+    "mtime": 1795462218.0056975,
+    "seen": 1795462925.114008,
+    "ast_hash": "e2b09ebf9a96d2768d43942cbc793a62",
+    "semantic_hash": ""
+  },
+  "backend/tests/test_auth.py": {
+    "mtime": 1795462609.1668036,
+    "seen": 1795462925.1140475,
+    "ast_hash": "04abe11731f74a099cfee6a81a3d7df9",
+    "semantic_hash": ""
+  },
+  "backend/tests/test_db_main.py": {
+    "mtime": 1795462887.4000428,
+    "seen": 1795462925.1140509,
+    "ast_hash": "be2f66ab99573e03faaa079d0e91d3a5",
+    "semantic_hash": ""
+  },
+  "backend/tests/test_departure.py": {
+    "mtime": 1795461883.15509,
+    "seen": 1795462925.1140525,
+    "ast_hash": "df97125aeeddcc7adfdab8e86e184173",
+    "semantic_hash": ""
+  },
+  "deploy/compose.dev.yml": {
+    "mtime": 1795462881.8288016,
+    "seen": 1795462925.114073,
+    "ast_hash": "a498ed1d05fb3a29291bcdf42f64edb8",
+    "semantic_hash": ""
+  },
+  "deploy/make_dev_secrets.py": {
+    "mtime": 1795462700.6340058,
+    "seen": 1795462925.1140747,
+    "ast_hash": "752b5ceee0c1114c993d26a151d4b262",
     "semantic_hash": ""
   }
 }

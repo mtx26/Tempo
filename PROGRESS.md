@@ -57,8 +57,13 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. M6 HA integration in `../tempo-homeassistant` (needs user OK for HA test toolkit); M5 training
-   sync; M7 worker/approvals; M9 deployment docs.
+1. M7 worker skeleton (no user decision needed): `python -m tempo.worker` with scheduled iCal fetch
+   (URL from secret, window + margin, D017), re-planning into `schedule_version`, departure
+   re-checks (`check_departure`) feeding HA notifications later; failed sync recorded in a separate
+   transaction.
+2. Needs the user: M6 HA integration (OK to install the HA test toolkit in `../tempo-homeassistant`,
+   keep/delete its untracked pyproject.toml/uv.lock), M5 training emails (authorized sender/thread),
+   LLM provider, Belgian Mobility Standard key, phone `device_tracker` id, iCal URL, places.
 Local services: PostgreSQL via `backend/scripts/dev_postgres.py` (if pgserver times out after an
 unclean stop, postgres may still come up on the printed port — check `.pgdata/log`); MOTIS
 `tempo-motis-brussels` (18080); nationwide volume `tempo-routing-belgium` (server
