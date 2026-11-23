@@ -32,3 +32,14 @@ Service requirements for the future stack:
   `python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"`.
 - Done: 401 limiting and token rotation (D023). Still open before deployment: worker,
   migration job, DB roles, backups/restore drill, resource benchmark on the Swarm node.
+
+## Local development stack (`deploy/compose.dev.yml`, tested 2026-11-23)
+`python deploy/make_dev_secrets.py` (git-ignored `deploy/secrets/`), then
+`docker compose -f deploy/compose.dev.yml up -d`: postgres 16 → one-shot `python -m tempo.db upgrade`
+(reads only the DB URL secret) → api (127.0.0.1:18000) ; rt-relay (internal `routing` network +
+egress, persistent request log) ; routing (127.0.0.1:18081).
+Verified: migration to head, task created and listed through the API with the token from the
+secret file, relay unreachable from the API, PostgreSQL not published, token absent from logs.
+Limitations: `front` network gives api/routing outbound Internet (dev only); the routing volume must
+be re-imported with `routing/config/belgium.yml` before use, otherwise MOTIS polls the portal
+directly; dev Postgres uses one role (the two-role model is still to do).

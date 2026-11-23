@@ -63,7 +63,7 @@ from `routing/README.md`, otherwise `test_motis_live.py` fails (correct signal, 
 
 ### M1 leftovers (backend foundation)
 - Docker image for the backend: DONE (`backend/Dockerfile`, API + relay; worker entry point later).
-- `docker-compose`/dev stack (api + postgres + motis) — not written.
+- Dev stack: DONE (`deploy/compose.dev.yml`, docs/DEPLOYMENT.md).
 - CI `.github/workflows/backend.yml` exists (with Postgres service + pip-audit) but has **never run**
   (no remote). It does not start MOTIS, so live MOTIS tests will be skipped in CI.
 - Server entrypoint `python -m tempo.api` written (`server_header=False`); 401 limiting and token

@@ -1,0 +1,91 @@
+# Tempo LOCAL development stack — NOT the production Swarm stack (that needs explicit approval).
+#
+#   docker build -t tempo-backend:dev backend && docker build -t tempo-routing:v2.11.4 routing
+#   python deploy/make_dev_secrets.py            # writes deploy/secrets/* (git-ignored)
+#   docker compose -f deploy/compose.dev.yml up -d
+#
+# Ports are published on 127.0.0.1 only. The relay and PostgreSQL have no published port.
+# The routing volume must exist (routing/README.md "Nationwide"). Re-import it with
+# routing/config/belgium.yml FIRST: a volume imported with an older config polls the portal
+# directly (anonymous quota). Dev limitation: the `front` network (needed for the 127.0.0.1 ports)
+# gives api and routing outbound Internet; the Swarm stack must not.
+name: tempo-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tempo
+      POSTGRES_USER: tempo
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tempo -d tempo"]
+      interval: 5s
+      retries: 20
+    networks: [backend]
+
+  migrate:
+    image: tempo-backend:dev
+    command: ["python", "-m", "tempo.db", "upgrade"]
+    secrets: [tempo_database_url]
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [backend]
+
+  api:
+    image: tempo-backend:dev
+    secrets: [tempo_api_token, tempo_database_url]
+    read_only: true
+    tmpfs: [/tmp]
+    ports: ["127.0.0.1:18000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+    networks: [backend, front]
+
+  rt-relay:
+    image: tempo-backend:dev
+    command: ["python", "-m", "tempo.transport.rt_relay"]
+    environment:
+      TEMPO_RELAY_STATE_FILE: /state/relay-state.json
+    # Standard key (optional): add the secret tempo_relay_bmc_partner_key here.
+    read_only: true
+    tmpfs: [/tmp]
+    volumes: [relay-state:/state]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 30s
+    networks:
+      routing:
+        aliases: [tempo-rt-relay]
+      egress: {}
+
+  routing:
+    image: tempo-routing:v2.11.4
+    command: ["server", "-d", "/data/belgium"]
+    volumes: [tempo-routing-belgium:/data]
+    ports: ["127.0.0.1:18081:8080"]
+    depends_on: [rt-relay]
+    networks: [routing, backend, front]
+
+secrets:
+  postgres_password: {file: ./secrets/postgres_password}
+  tempo_database_url: {file: ./secrets/tempo_database_url}
+  tempo_api_token: {file: ./secrets/tempo_api_token}
+
+volumes:
+  pgdata: {}
+  relay-state: {}
+  tempo-routing-belgium: {external: true}
+
+networks:
+  backend: {internal: true}
+  routing: {internal: true}
+  egress: {}
+  front: {}   # only for the 127.0.0.1 published ports of api and routing

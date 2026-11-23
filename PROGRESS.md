@@ -11,6 +11,8 @@
   by impact period (D021, D022); real +7 min live delay observed. Standard key not yet available.
 - **M1 image: DONE locally** — `backend/Dockerfile` (pinned digests, non-root, read-only FS OK),
   `python -m tempo.api` entry point (`server_header=False`); smoke-tested, see docs/DEPLOYMENT.md.
+- **M1 dev stack: DONE** — `deploy/compose.dev.yml` + `python -m tempo.db upgrade`; end-to-end
+  verified (docs/DEPLOYMENT.md). M1 is complete except running CI on a remote (none configured).
 - **API auth hardening: DONE** — token rotation + failed-auth lockout (D023); 287 tests pass with
   real PostgreSQL + MOTIS, coverage 98 %.
 - **M4d (departure re-check): DONE (library)** — `tempo.transport.departure.check_departure`: fresh
@@ -55,8 +57,7 @@
 - PostgreSQL / MOTIS integration tests: none yet (no Docker locally).
 
 ## Next actions (exact)
-1. M1 leftover: dev compose stack (api + postgres + relay + motis).
-2. M6 HA integration in `../tempo-homeassistant` (needs user OK for HA test toolkit); M5 training
+1. M6 HA integration in `../tempo-homeassistant` (needs user OK for HA test toolkit); M5 training
    sync; M7 worker/approvals; M9 deployment docs.
 Local services: PostgreSQL via `backend/scripts/dev_postgres.py` (if pgserver times out after an
 unclean stop, postgres may still come up on the printed port — check `.pgdata/log`); MOTIS
