@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "graphify": {
+      "type": "stdio",
+      "command": "C:\\Users\\mtx_2\\.local\\bin\\graphify-mcp.exe",
+      "args": [
+        "--graph",
+        "C:\\Users\\mtx_2\\Documents\\Code\\Tempo\\graphify-out\\graph.json"
+      ],
+      "env": {}
+    }
+  }
+}
