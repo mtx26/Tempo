@@ -1,0 +1,155 @@
+"""End-to-end planning pipeline on a realistic week (fake routing: 30 min between places)."""
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from tempo.domain.models import TargetKind
+from tempo.planning.engine import (
+    UNROUTED_TRAINING_TRAVEL,
+    Commitment,
+    CommitmentKind,
+    OutcomeStatus,
+    PlanningInput,
+    TrainingRequest,
+    run_planning,
+)
+from tempo.scheduler.model import Interval, PlannedBlock, StudyDemand, utc
+from tempo.transport.location import DeclaredStay
+from tempo.transport.places import Coordinates, Place
+from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
+from tempo.transport.travel import StudyWindow, TravelStatus
+
+TZ = ZoneInfo("Europe/Brussels")
+HOME = Place("home", "Kot", Coordinates(50.668, 4.612))
+CAMPUS = Place("campus", "Campus", Coordinates(50.85, 4.35))
+CLUB = Place("club", "Club", Coordinates(50.70, 4.60))
+MUM = Place("mum", "Maman", Coordinates(50.40, 4.40))
+TRIP = timedelta(minutes=30)
+
+
+def at(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 12, day, hour, minute, tzinfo=TZ)
+
+
+class FakeRouting:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    def plan(
+        self, origin: Coordinates, destination: Coordinates, time: datetime, *, arrive_by: bool
+    ) -> list[Journey]:
+        if self.fail:
+            raise RoutingUnavailableError("MOTIS down")
+        start = time - TRIP if arrive_by else time
+        leg = Leg("BUS", "a", "b", start, start + TRIP, start, start + TRIP, realtime=False)
+        return [Journey((leg,), start, start + TRIP, 0, "fake")]
+
+
+def week(**overrides: object) -> PlanningInput:
+    base: dict[str, object] = {
+        "now": at(7, 6),
+        "horizon_end": at(13, 23),
+        "timezone": TZ,
+        "home": HOME,
+        "commitments": [
+            Commitment(f"class-{d}", "Analyse", at(d, 10), at(d, 12), CommitmentKind.CLASS, CAMPUS)
+            for d in (7, 8, 9, 10, 11)
+        ]
+        + [Commitment("race", "10 km", at(12, 10), at(12, 11), CommitmentKind.RACE, CLUB)],
+        "trainings": [
+            TrainingRequest(
+                "t1",
+                "Fractionné",
+                timedelta(minutes=60),
+                at(8, 0),
+                at(9, 23),
+                place=CLUB,
+                preferred_start=at(8, 18),
+            )
+        ],
+        "availability": [StudyWindow(Interval(at(d, 8), at(d, 20)), HOME) for d in range(7, 14)],
+        "demands": [
+            StudyDemand("maths", "maths", 360, at(12, 23, 59)),
+            StudyDemand("physique", "physique", 270, at(13, 23, 59), TargetKind.HARD),
+        ],
+    }
+    base.update(overrides)
+    return PlanningInput(**base)  # type: ignore[arg-type]
+
+
+def overlaps(a: Interval, items: list[Interval]) -> bool:
+    return any(a.overlaps(i) for i in items)
+
+
+def test_realistic_week_is_complete_and_consistent() -> None:
+    outcome = run_planning(week(), FakeRouting())
+    assert outcome.status is OutcomeStatus.COMPLETE, outcome.issues
+    assert outcome.result is not None
+    training = outcome.trainings[0]
+    assert training.start == at(8, 18)
+    assert training.reserved == Interval(at(8, 17, 30), at(8, 19, 30))
+    travel = [Interval(b.start, b.end) for b in outcome.travel if b.end > b.start]
+    assert all(b.status is TravelStatus.ROUTED for b in outcome.travel)
+    # Every class day has an outbound trip arriving 10 min early, and a return.
+    for d in (7, 8, 9, 10, 11):
+        assert any(b.end == at(d, 10) and b.destination == CAMPUS for b in outcome.travel)
+        assert any(b.start == at(d, 12) and b.destination == HOME for b in outcome.travel)
+    busy = travel + [training.reserved] + [Interval(at(d, 10), at(d, 12)) for d in range(7, 12)]
+    for block in outcome.result.blocks:
+        assert not overlaps(block.interval, busy)
+    assert outcome.issues == []
+
+
+def test_unknown_location_blocks_time_and_is_reported() -> None:
+    odd = Commitment("x", "TP", at(9, 14), at(9, 16), CommitmentKind.CLASS, None, "Salle Z.99")
+    outcome = run_planning(week(commitments=[odd], trainings=[]), FakeRouting())
+    assert any("unknown location 'Salle Z.99'" in i for i in outcome.issues)
+    assert outcome.result is not None
+    assert not overlaps(Interval(at(9, 14), at(9, 16)), [b.interval for b in outcome.result.blocks])
+
+
+def test_routing_outage_blocks_gaps_and_reports_instead_of_inventing() -> None:
+    outcome = run_planning(week(), FakeRouting(fail=True))
+    assert outcome.status in (OutcomeStatus.COMPLETE, OutcomeStatus.PARTIAL)
+    assert any("routing unavailable" in i for i in outcome.issues)
+    assert {b.status for b in outcome.travel} == {TravelStatus.UNKNOWN}
+    training = outcome.trainings[0]
+    assert training.reserved.start == training.start - UNROUTED_TRAINING_TRAVEL
+
+
+def test_declared_stay_changes_the_day_base_without_automatic_switching() -> None:
+    stay = DeclaredStay(MUM, at(12, 0), at(13, 0))
+    outcome = run_planning(week(stays=[stay]), FakeRouting())
+    race_trips = [b for b in outcome.travel if b.destination == CLUB and b.end.day == 12]
+    assert race_trips and race_trips[0].origin == MUM
+    assert all(b.origin != MUM for b in outcome.travel if b.start < at(12, 0))
+
+
+def test_past_commitments_and_locked_blocks() -> None:
+    locked = PlannedBlock("maths", "maths", at(9, 14), at(9, 15, 30), locked=True)
+    outcome = run_planning(week(now=at(9, 13), locked_blocks=[locked]), FakeRouting())
+    assert outcome.result is not None
+    assert locked in outcome.result.blocks
+    assert all(utc(b.start) >= utc(at(9, 13)) for b in outcome.result.blocks)
+    assert all(b.end > at(9, 13) for b in outcome.travel)
+
+
+def test_training_without_slot_is_reported() -> None:
+    blocked = Commitment("exam", "Examen", at(8, 0), at(9, 23, 30), CommitmentKind.OTHER, None)
+    outcome = run_planning(week(commitments=[blocked]), FakeRouting())
+    assert outcome.unplaced_trainings == ["t1"]
+    assert any("no free slot" in i for i in outcome.issues)
+
+
+def test_impossible_hard_deadline_is_partial_not_invalid() -> None:
+    demands = [StudyDemand("huge", "huge", 6000, at(8, 23), TargetKind.HARD)]
+    outcome = run_planning(week(demands=demands), FakeRouting())
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert outcome.result is not None and outcome.result.hard_deadline_misses == ["huge"]
+
+
+def test_long_gap_means_going_home_between_commitments() -> None:
+    outcome = run_planning(week(), FakeRouting())
+    day8 = sorted((b for b in outcome.travel if b.start.day == 8), key=lambda b: b.start)
+    legs = [(b.origin.id, b.destination.id) for b in day8]
+    assert legs == [("home", "campus"), ("campus", "home"), ("home", "club"), ("club", "home")]
