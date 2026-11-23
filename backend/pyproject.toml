@@ -5,6 +5,7 @@ description = "Tempo private planning backend (Home Assistant is the only UI)"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "alembic>=1.20.1",
+    "anthropic>=2.13.0",
     "fastapi>=0.165",
     "gtfs-realtime-bindings>=2.0",
     "httpx2>=2.16",

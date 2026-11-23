@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from tempo.ai.llm import Interpreter
 from tempo.db.ics_repository import apply_ics_sync, get_or_create_source
 from tempo.db.models import JobRunRow, PhonePositionRow
 from tempo.planning.service import (
@@ -36,6 +37,7 @@ from tempo.planning.service import (
     set_setting,
 )
 from tempo.sync.ics import IcsParseError, parse_ics
+from tempo.sync.training_mail import MailSource, import_messages
 from tempo.transport.departure import DepartureStatus, check_departure
 from tempo.transport.location import LocatedEvent, PhonePosition
 from tempo.transport.places import Coordinates, Place
@@ -363,3 +365,23 @@ def _departure_message(state: dict[str, Any]) -> str:
         parts.append(state["reason"])
     parts += state["warnings"]
     return " — ".join(parts) or "Vérifiez votre trajet."
+
+
+# --- training e-mails ---
+
+MAIL_LOOKBACK = timedelta(days=14)
+
+
+def training_mail_job(
+    sessions: Sessions,
+    source: MailSource,
+    now: datetime,
+    tz: ZoneInfo,
+    interpreter: Interpreter | None,
+) -> dict[str, int]:
+    today = now.astimezone(tz).date()
+    messages = source.fetch(today - MAIL_LOOKBACK)
+    with sessions() as session:
+        stats = import_messages(session, messages, tz=tz, today=today, interpreter=interpreter)
+        session.commit()
+        return stats

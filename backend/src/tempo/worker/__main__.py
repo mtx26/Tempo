@@ -17,9 +17,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from tempo.ai.llm import Interpreter, build_interpreter
+from tempo.sync.training_mail import ImapSource, MailSource
 from tempo.transport.motis import MotisClient
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
-from tempo.worker.jobs import departure_job, fetch_ics, ics_sync, replan_job, run_job
+from tempo.worker.jobs import (
+    departure_job,
+    fetch_ics,
+    ics_sync,
+    replan_job,
+    run_job,
+    training_mail_job,
+)
 
 logger = logging.getLogger("tempo.worker")
 SECRETS_DIR = Path("/run/secrets")
@@ -40,6 +49,15 @@ class WorkerSettings(BaseSettings):
     motis_url: str | None = None
     timezone: str = "Europe/Brussels"
     ics_interval_minutes: int = 30
+    anthropic_api_key: SecretStr | None = None
+    training_imap_host: str | None = None
+    training_imap_user: str | None = None
+    training_imap_password: SecretStr | None = None
+    """Docker secret ``tempo_training_imap_password`` (prefer an app-specific password)."""
+    training_imap_mailbox: str = "INBOX"
+    training_allowed_sender: str | None = None
+    """The ONLY sender whose e-mails are read (exact address)."""
+    training_interval_minutes: int = 30
     departure_interval_minutes: int = 2
 
 
@@ -59,6 +77,8 @@ def tick(
     now: datetime,
     due_ics: bool,
     due_departure: bool,
+    mail: MailSource | None = None,
+    interpreter: Interpreter | None = None,
 ) -> None:
     """One scheduling round; each job records its own outcome in ``job_run``."""
     ics_url = settings.ics_url
@@ -68,6 +88,32 @@ def tick(
     run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz))
     if due_departure:
         run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now))
+    if mail is not None and due_ics:
+        run_job(
+            sessions,
+            "training_mail",
+            lambda: training_mail_job(sessions, mail, now, tz, interpreter),
+        )
+
+
+def mail_source(settings: WorkerSettings) -> MailSource | None:
+    required = (
+        settings.training_imap_host,
+        settings.training_imap_user,
+        settings.training_imap_password,
+        settings.training_allowed_sender,
+    )
+    if any(value is None for value in required):
+        logger.warning("training e-mail import disabled (IMAP host/user/password/sender not set)")
+        return None
+    assert settings.training_imap_password is not None  # noqa: S101 - narrowed above
+    return ImapSource(
+        settings.training_imap_host or "",
+        settings.training_imap_user or "",
+        settings.training_imap_password.get_secret_value(),
+        settings.training_allowed_sender or "",
+        mailbox=settings.training_imap_mailbox,
+    )
 
 
 def main() -> None:  # pragma: no cover - process loop, jobs are tested individually
@@ -79,6 +125,8 @@ def main() -> None:  # pragma: no cover - process loop, jobs are tested individu
     routing: RoutingProvider = (
         MotisClient(settings.motis_url, timeout_seconds=30) if settings.motis_url else NoRouting()  # type: ignore[assignment]
     )
+    interpreter = build_interpreter(settings.anthropic_api_key)
+    mail = mail_source(settings)
     if settings.ics_url is None:
         logger.warning("TEMPO_ICS_URL not set: university timetable sync disabled")
     stop = threading.Event()
@@ -92,7 +140,18 @@ def main() -> None:  # pragma: no cover - process loop, jobs are tested individu
             due_departure = now - last_departure >= timedelta(
                 minutes=settings.departure_interval_minutes
             )
-            tick(sessions, http, routing, settings, tz, now, due_ics, due_departure)
+            tick(
+                sessions,
+                http,
+                routing,
+                settings,
+                tz,
+                now,
+                due_ics,
+                due_departure,
+                mail,
+                interpreter,
+            )
             last_ics = now if due_ics else last_ics
             last_departure = now if due_departure else last_departure
             stop.wait(TICK_SECONDS)

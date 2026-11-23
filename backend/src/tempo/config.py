@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     database_url: SecretStr | None = None
     """SQLAlchemy URL of PostgreSQL (e.g. from the Docker secret ``tempo_database_url``)."""
 
+    anthropic_api_key: SecretStr | None = None
+    """Optional (Docker secret ``tempo_anthropic_api_key``): enables AI interpretation of text
+    the deterministic parser does not understand. Tempo works fully without it."""
+
     timezone: str = "Europe/Brussels"
     """IANA timezone used to interpret local wall-clock planning rules."""
 

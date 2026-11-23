@@ -11,8 +11,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from tempo import __version__
+from tempo.ai.llm import build_interpreter
 from tempo.api.auth import FailureLimiter, token_matches
 from tempo.api.ha import router as ha_router
+from tempo.api.interpret import router as interpret_router
 from tempo.api.planning import router as planning_router
 from tempo.config import Settings
 
@@ -39,6 +41,7 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url=None,
     )
     app.state.timezone = ZoneInfo(settings.timezone)
+    app.state.interpreter = build_interpreter(settings.anthropic_api_key)
 
     limiter = FailureLimiter()
     app.state.auth_limiter = limiter
@@ -75,4 +78,5 @@ def create_app(settings: Settings) -> FastAPI:
 
     app.include_router(ha_router, dependencies=[Depends(require_token)])
     app.include_router(planning_router, dependencies=[Depends(require_token)])
+    app.include_router(interpret_router, dependencies=[Depends(require_token)])
     return app
