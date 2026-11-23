@@ -4,6 +4,14 @@
 > full list of what is NOT done, pending user decisions and known traps. Some status lines below are stale.
 
 ## Status (2026-11-23)
+- **Full application backend: DONE locally** (session 3) — planning engine (fixed iCal, flexible
+  trainings with travel, fixed races, day outings, mandatory travel, travel-aware study windows,
+  CP-SAT + validator, re-planning stability), DB service (versions, proposals, notifications),
+  complete HA API (/v1/schedule, /v1/summary, places, availability, settings, activities, blocks,
+  proposals, notifications, replan, interpret), worker (iCal sync, re-plan, departure checks,
+  training e-mails), M5 narrow IMAP import (verified on a real local IMAP server), optional Claude
+  interpreter (never required). 366 tests pass (real PostgreSQL 16, real MOTIS Brussels, real
+  GreenMail IMAP), coverage 95 %. HA integration being built in `../tempo-homeassistant`.
 - **M4c (Belgian realtime feeds): DONE locally** — nationwide MOTIS benchmark finished (import 3 min 29 s,
   1.8 GB, server 0.7–0.9 GB RAM, median query 100–130 ms); 10 Belgian feeds verified by real requests
   and registered (`tempo.transport.feeds`); GTFS-RT relay (`tempo.transport.rt_relay`: key secret,

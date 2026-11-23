@@ -5,6 +5,15 @@ Written 2026-11-23 for a future model/session. **This file is authoritative over
 
 ---
 
+## 0. Session 3 summary (2026-11-23, latest)
+Commits after `cca3329`: `99a1c24` schema 0003 + stability + trainings, `a05006e`/`501b8d1`
+planning engine + service, `52400a4` HA API, `db78fb0` worker, `4bf6b74` M5 + interpret/LLM.
+Run everything: PostgreSQL (`dev_postgres.py`), MOTIS Brussels (18080), GreenMail for IMAP
+(`docker run -d --name tempo-greenmail -e GREENMAIL_OPTS="-Dgreenmail.setup.test.all
+-Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled" -p 127.0.0.1:3025:3025
+-p 127.0.0.1:3993:3993 greenmail/standalone:2.1.2`), then
+`TEMPO_TEST_IMAP=127.0.0.1 TEMPO_TEST_DATABASE_URL=... TEMPO_TEST_MOTIS_URL=... uv run pytest`.
+
 ## 1. What exists and is verified (local commits, nothing pushed or deployed)
 
 | Commit | Content | Verified how |
