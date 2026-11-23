@@ -147,3 +147,5 @@ class PlanResult:
     conflicts: list[str] = field(default_factory=list)
     """Source conflicts to surface for approval (e.g. a class moved onto a locked block)."""
     solver_status: str = ""
+    objective: float | None = None
+    """CP-SAT objective of the returned plan (lower is better); None without a solution."""

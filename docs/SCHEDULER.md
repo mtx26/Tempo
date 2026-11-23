@@ -54,3 +54,22 @@ even when targets lie beyond the horizon (a regression caught by tests during th
   penalty for moving previously proposed blocks to avoid churn).
 - Travel time between locations is not modelled yet (milestone 4 adds travel as busy intervals
   and location-aware availability).
+
+## Milestone 12 — performance (2026-11-23, dev PC, 8 workers, 10 s limit, median of 3 runs)
+`uv run python benchmarks/scheduler_bench.py` (deterministic cases: weekday classes, 08:00-21:00
+availability, soft + hard targets).
+
+| Case | Before | + proven lower bound | + greedy warm start (current) |
+|---|---|---|---|
+| 2 weeks, 4 subjects | 0.12 s OPTIMAL | 0.14 s | 0.11 s OPTIMAL |
+| 4 weeks, 6 subjects | 10.07 s FEASIBLE (not proven) | 1.56 s proven | **0.39 s proven** |
+| 8 weeks, 8 subjects | 10.16 s FEASIBLE (not proven) | 4.47 s proven | **1.00 s proven** |
+| 8 weeks, 8 subjects, mornings only | 10.26 s FEASIBLE | — | 10.33 s, same objective |
+
+- **Lower bound** (`objective_lower_bound`): effort not divisible by the preferred length costs at
+  least one short block or a small overshoot; all other penalties are >= 0, so a plan reaching
+  the bound is optimal (`solver_status = OPTIMAL_BY_BOUND`) and the search stops.
+- **Warm start** (`_Builder.warm_start`): greedy day-by-day placement by urgency given as CP-SAT
+  hints; never constraining (tests check the objective is never worse than without hints).
+- **Midnight**: same-subject blocks on both sides of midnight are penalised like same-day
+  adjacent blocks (only pairs that can come within the minimum gap of midnight).

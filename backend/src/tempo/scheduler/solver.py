@@ -33,6 +33,7 @@ from tempo.scheduler.model import (
     PlanningProblem,
     PlanResult,
     PlanStatus,
+    Preferences,
     StudyDemand,
     utc,
 )
@@ -56,6 +57,10 @@ class _Block:
     start: cp_model.LinearExpr
     end: cp_model.IntVar
     effective: cp_model.IntVar
+    slot: cp_model.IntVar
+    size: cp_model.IntVar
+    earliest_start: int = 0
+    latest_end: int = 0
 
 
 class _Clock:
@@ -144,6 +149,8 @@ class _Builder:
         self.penalties: list[cp_model.LinearExprT] = []
         self.unplanned: dict[str, cp_model.IntVar] = {}
         self.to_plan: dict[str, int] = {}
+        self.day_free: dict[int, list[Span]] = {}
+        self.days: list[Span] = []
 
     def _fixed_spans(self) -> tuple[list[Span], list[Span]]:
         """Return (free study time, blocked time) inside the horizon."""
@@ -221,7 +228,18 @@ class _Builder:
                 model.add_implication(present, previous.present)
                 model.add(start >= previous.end).only_enforce_if(present)
                 self._penalise_adjacency(previous, start, end, present, tag, ordered=True)
-            current = _Block(demand, day_index, present, start, end, effective)
+            current = _Block(
+                demand,
+                day_index,
+                present,
+                start,
+                end,
+                effective,
+                slot,
+                size_slots,
+                domain[0][0] * g,
+                domain[-1][1] * g + prefs.max_block_minutes,
+            )
             self.blocks.append(current)
             previous = current
 
@@ -252,6 +270,7 @@ class _Builder:
         g = prefs.granularity_minutes
         free, blocked = self._fixed_spans()
         days = _local_days(self.problem, self.clock)
+        self.days = days
         self.intervals = [
             model.new_fixed_size_interval_var(s, e - s, f"blocked_{i}")
             for i, (s, e) in enumerate(blocked)
@@ -284,6 +303,7 @@ class _Builder:
                     if demand.target_kind is TargetKind.HARD and d_start >= target:
                         continue
                     day_free = _subtract(free, [(-(10**9), d_start), (d_end, 10**9)])
+                    self.day_free[index] = day_free
                     self._add_family(demand, index, day_free, late_bound)
             effective = [b.effective for b in self.blocks if b.demand is demand]
             unplanned = model.new_int_var(0, need, f"unplanned_{demand.task_id}")
@@ -321,12 +341,84 @@ class _Builder:
             # A block that cannot be kept (task done, day past...) costs nothing: it is a
             # constant and does not influence the choice.
 
+    def warm_start(self) -> int:
+        """Greedy initial solution given to CP-SAT as hints (milestone 12).
+
+        Day by day, tasks by urgency (hard first, earliest target): place preferred-length
+        blocks at the earliest free time that keeps the same-subject gap, the daily cap and
+        the per-subject block limit. Hints only guide the search; the model still decides.
+        Returns the number of hinted blocks."""
+        prefs, g = self.prefs, self.prefs.granularity_minutes
+        remaining = dict(self.to_plan)
+        placed: list[Span] = []
+        families: dict[tuple[str, int], list[_Block]] = {}
+        for block in self.blocks:
+            families.setdefault((block.demand.task_id, block.day), []).append(block)
+        chosen: dict[int, tuple[int, int]] = {}
+        locked_by_day = self._locked_minutes_by_day(self.days)
+        order = sorted(
+            self.problem.demands,
+            key=lambda d: (d.target_kind is not TargetKind.HARD, utc(d.target)),
+        )
+        for day in sorted(self.day_free):
+            used = locked_by_day.get(day, 0)
+            last_end: dict[str, int] = {}
+            per_subject: dict[str, int] = {}
+            for demand in order:
+                family = families.get((demand.task_id, day), [])
+                target = self.clock.floor(demand.target)
+                for block in family:
+                    need = remaining.get(demand.task_id, 0)
+                    if need <= 0 or per_subject.get(demand.subject, 0) >= (
+                        prefs.max_blocks_per_subject_per_day
+                    ):
+                        break
+                    length = max(prefs.min_block_minutes, min(prefs.preferred_block_minutes, need))
+                    length = math.ceil(length / g) * g
+                    if used + length > prefs.max_daily_study_minutes:
+                        break
+                    earliest = last_end.get(demand.subject, -(10**9)) + (
+                        prefs.min_gap_same_subject_minutes
+                    )
+                    spot = _first_fit(self.day_free[day], placed, max(earliest, 0), length, g)
+                    if spot is None or (
+                        demand.target_kind is TargetKind.HARD and spot + length > target
+                    ):
+                        break
+                    chosen[id(block)] = (spot // g, length // g)
+                    placed.append((spot, spot + length))
+                    used += length
+                    remaining[demand.task_id] = need - length
+                    last_end[demand.subject] = spot + length
+                    per_subject[demand.subject] = per_subject.get(demand.subject, 0) + 1
+        for block in self.blocks:
+            hint = chosen.get(id(block))
+            self.model.add_hint(block.present, 1 if hint else 0)
+            if hint:
+                self.model.add_hint(block.slot, hint[0])
+                self.model.add_hint(block.size, hint[1])
+        return len(chosen)
+
+    def _add_midnight_adjacency(self, by_day: dict[int, list[_Block]], days: list[Span]) -> None:
+        """Same-subject blocks on both sides of midnight are adjacent too: penalise them like
+        blocks of the same day (only pairs that can actually come close to midnight)."""
+        gap = self.prefs.min_gap_same_subject_minutes
+        for day_index in range(len(days) - 1):
+            midnight = days[day_index][1]
+            late = [b for b in by_day.get(day_index, []) if b.latest_end >= midnight - gap]
+            early = [b for b in by_day.get(day_index + 1, []) if b.earliest_start <= midnight + gap]
+            for a in late:
+                for b in early:
+                    if a.demand.subject == b.demand.subject:
+                        self._penalise_adjacency(a, b.start, b.end, b.present, "mid", ordered=False)
+
     def _add_daily_constraints(self, days: list[Span]) -> None:
         prefs, model = self.prefs, self.model
         locked_by_day = self._locked_minutes_by_day(days)
         by_day: dict[int, list[_Block]] = {}
         for block in self.blocks:
             by_day.setdefault(block.day, []).append(block)
+        self._add_midnight_adjacency(by_day, days)
         for day_index, day_blocks in by_day.items():
             cap = max(0, prefs.max_daily_study_minutes - locked_by_day.get(day_index, 0))
             model.add(sum(b.effective for b in day_blocks) <= cap)
@@ -341,19 +433,68 @@ class _Builder:
                         self._penalise_adjacency(a, b.start, b.end, b.present, "x", ordered=False)
 
 
+def _first_fit(
+    free: list[Span], placed: list[Span], earliest: int, length: int, g: int
+) -> int | None:
+    """Earliest grid start >= ``earliest`` where ``length`` fits in ``free`` minus ``placed``."""
+    for start, end in _subtract(free, sorted(_merge(placed))):
+        candidate = max(math.ceil(start / g) * g, math.ceil(earliest / g) * g)
+        if candidate + length <= end:
+            return candidate
+    return None
+
+
+def objective_lower_bound(to_plan: dict[str, int], prefs: Preferences) -> int:
+    """Cost no plan can avoid: effort that is not a multiple of the preferred length needs
+    either one shorter block (``SHORT_BLOCK_PENALTY``) or a small overshoot
+    (``OVERSHOOT_PENALTY_PER_MINUTE`` per extra minute, at most ``min_block`` minutes).
+    Every other penalty is >= 0, so a plan reaching this value is optimal."""
+    bound = 0
+    for need in to_plan.values():
+        rest = need % prefs.preferred_block_minutes
+        if rest == 0:
+            continue
+        extra = prefs.preferred_block_minutes - rest
+        overshoot = (
+            OVERSHOOT_PENALTY_PER_MINUTE * extra if extra <= prefs.min_block_minutes else None
+        )
+        bound += SHORT_BLOCK_PENALTY if overshoot is None else min(SHORT_BLOCK_PENALTY, overshoot)
+    return bound
+
+
+class _StopAtBound(cp_model.CpSolverSolutionCallback):
+    """Stops the search as soon as a solution reaches the proven lower bound."""
+
+    def __init__(self, bound: int) -> None:
+        super().__init__()
+        self.bound = bound
+        self.reached = False
+
+    def on_solution_callback(self) -> None:
+        if self.objective_value <= self.bound:
+            self.reached = True
+            self.stop_search()
+
+
 def solve(
     problem: PlanningProblem,
     *,
     time_limit_seconds: float = 10.0,
     workers: int = 8,
+    warm_start: bool = True,
 ) -> PlanResult:
     builder = _Builder(problem)
     builder.build()
+    if warm_start:
+        builder.warm_start()
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_seconds
     solver.parameters.num_workers = workers
-    status = solver.solve(builder.model)
+    stopper = _StopAtBound(objective_lower_bound(builder.to_plan, problem.preferences))
+    status = solver.solve(builder.model, stopper)
     status_name = solver.status_name(status)
+    if stopper.reached and status == cp_model.FEASIBLE:
+        status_name = "OPTIMAL_BY_BOUND"  # proven by objective_lower_bound
     conflicts = busy_conflicts(problem)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -396,4 +537,5 @@ def solve(
         hard_deadline_misses=misses,
         conflicts=conflicts,
         solver_status=status_name,
+        objective=solver.objective_value,
     )
