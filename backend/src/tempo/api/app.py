@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -12,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from tempo import __version__
 from tempo.api.auth import FailureLimiter, token_matches
 from tempo.api.ha import router as ha_router
+from tempo.api.planning import router as planning_router
 from tempo.config import Settings
 
 _bearer = HTTPBearer(auto_error=False)
@@ -36,6 +38,7 @@ def create_app(settings: Settings) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+    app.state.timezone = ZoneInfo(settings.timezone)
 
     limiter = FailureLimiter()
     app.state.auth_limiter = limiter
@@ -71,4 +74,5 @@ def create_app(settings: Settings) -> FastAPI:
         return {"version": __version__, "timezone": settings.timezone}
 
     app.include_router(ha_router, dependencies=[Depends(require_token)])
+    app.include_router(planning_router, dependencies=[Depends(require_token)])
     return app
