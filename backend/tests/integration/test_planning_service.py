@@ -208,3 +208,47 @@ def test_past_undone_blocks_are_missed_notified_and_replanned(session: Session) 
     remaining = task.effort_minutes - task.completed_minutes
     assert sum((b.end_at - b.start_at).total_seconds() // 60 for b in fresh) == remaining
     assert all(b.start_at >= later for b in fresh)
+
+
+def test_superseded_versions_never_produce_false_missed_sessions(session: Session) -> None:
+    seed(session)
+    replan(session, FakeRouting(), NOW, TZ, reason="a")
+    replan(session, FakeRouting(), NOW + timedelta(minutes=5), TZ, reason="b")
+    third = replan(session, FakeRouting(), NOW + timedelta(minutes=10), TZ, reason="c")
+    blocks = list(
+        session.scalars(select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == third.id))
+    )
+    later = min(b.end_at for b in blocks) + timedelta(minutes=1)
+    fourth = replan(session, FakeRouting(), later, TZ, reason="d")
+    past_in_active = sum(1 for b in blocks if b.end_at <= later)
+    assert fourth.summary["missed_blocks"] == past_in_active == 1
+    notes = [n for n in session.scalars(select(NotificationRow)) if n.kind == "missed_block"]
+    assert len(notes) == 1
+
+
+def test_session_under_way_is_kept_as_is(session: Session) -> None:
+    seed(session)
+    first = replan(session, FakeRouting(), NOW, TZ, reason="first")
+    block = min(
+        session.scalars(select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == first.id)),
+        key=lambda b: b.start_at,
+    )
+    during = block.start_at + timedelta(minutes=10)
+    second = replan(session, FakeRouting(), during, TZ, reason="during")
+    kept = list(
+        session.scalars(
+            select(StudyBlockRow).where(
+                StudyBlockRow.schedule_version_id == second.id,
+                StudyBlockRow.start_at == block.start_at,
+            )
+        )
+    )
+    assert len(kept) == 1 and kept[0].end_at == block.end_at and not kept[0].locked
+    assert second.summary["missed_blocks"] == 0
+    total = sum(
+        (b.end_at - b.start_at).total_seconds() // 60
+        for b in session.scalars(
+            select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == second.id)
+        )
+    )
+    assert total == 300  # effort neither lost nor duplicated

@@ -14,12 +14,12 @@ Persistence rules:
 
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import ColumnElement, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -416,11 +416,18 @@ def mark_missed_blocks(session: Session, now: datetime) -> int:
 
     Their effort was never added to ``completed_minutes``, so the re-plan places it again
     automatically; the user is told once per block."""
+    # Only blocks of the CURRENT plan (or locked ones): superseded versions keep their rows for
+    # history, but those positions were replaced and must never be reported as missed.
+    active = active_version(session)
+    current: ColumnElement[bool] = StudyBlockRow.locked.is_(True)
+    if active is not None:
+        current = or_(current, StudyBlockRow.schedule_version_id == active.id)
     rows = list(
         session.scalars(
             select(StudyBlockRow).where(
                 StudyBlockRow.state == "planned",
                 StudyBlockRow.end_at <= now,
+                current,
             )
         )
     )
@@ -439,11 +446,41 @@ def mark_missed_blocks(session: Session, now: datetime) -> int:
     return len(rows)
 
 
+def _underway_blocks(session: Session, now: datetime, loaded: LoadedInput) -> list[PlannedBlock]:
+    active = active_version(session)
+    if active is None:
+        return []
+    subjects = {d.task_id: d.subject for d in loaded.data.demands}
+    rows = session.scalars(
+        select(StudyBlockRow).where(
+            StudyBlockRow.schedule_version_id == active.id,
+            StudyBlockRow.locked.is_(False),
+            StudyBlockRow.state == "planned",
+            StudyBlockRow.start_at <= now,
+            StudyBlockRow.end_at > now,
+        )
+    )
+    return [
+        PlannedBlock(str(r.task_id), subjects[str(r.task_id)], r.start_at, r.end_at, locked=True)
+        for r in rows
+        if str(r.task_id) in subjects
+    ]
+
+
 def replan(
     session: Session, routing: RoutingProvider, now: datetime, tz: ZoneInfo, *, reason: str
 ) -> ScheduleVersion:
     missed = mark_missed_blocks(session, now)
     loaded = build_input(session, now, tz)
+    underway = _underway_blocks(session, now, loaded)
+    if underway:
+        # A session already under way is never moved (requirements): fixed for this re-plan,
+        # then carried as-is into the new version.
+        loaded = LoadedInput(
+            replace(loaded.data, locked_blocks=[*loaded.data.locked_blocks, *underway]),
+            loaded.task_ids,
+        )
+    carried = {(b.task_id, utc(b.start)) for b in underway}
     outcome = run_planning(loaded.data, routing)
     result = outcome.result
     summary: dict[str, Any] = {
@@ -479,7 +516,7 @@ def replan(
 
     if usable and result is not None:
         for block in result.blocks:
-            if block.locked:
+            if block.locked and (block.task_id, utc(block.start)) not in carried:
                 continue
             session.add(
                 StudyBlockRow(
