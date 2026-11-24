@@ -128,3 +128,15 @@ def test_key_header_and_errors() -> None:
 
     with pytest.raises(StibUnavailableError, match="JSON"):
         StibRealtime(http_client=client(garbage)).snapshot()
+
+
+def test_unexpected_payload_shapes_never_break_the_caller() -> None:
+    def weird(request: httpx2.Request) -> httpx2.Response:
+        if "Waiting" in request.url.path:
+            return httpx2.Response(
+                200, json={"results": [1, "x", {"pointid": "0501", "passingtimes": "{not json"}]}
+            )
+        return httpx2.Response(200, json={"results": [{"content": [["x"]], "priority": [1]}]})
+
+    with pytest.raises(StibUnavailableError, match="unexpected"):
+        StibRealtime(http_client=client(weird)).snapshot()

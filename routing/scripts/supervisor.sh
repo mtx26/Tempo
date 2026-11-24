@@ -20,7 +20,14 @@ log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor: $*"; }
 
 read_file() { [ -f "$1" ] && cat "$1" || echo ""; }
 
-valid_version() { echo "$1" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$'; }
+# Strict single-token check (a multi-line READY must never reach a path such as rm -rf).
+valid_version() {
+  [ "${#1}" -eq 16 ] || return 1
+  case "$1" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 prune() {
   current_target="$(readlink "$DATA/current" 2>/dev/null || echo "")"
@@ -33,6 +40,8 @@ prune() {
     log "pruning old graph $name"
     rm -rf -- "$DATA/$name"
   done
+  # keep the 5 most recent import logs
+  ls -1t "$DATA"/import-*.log 2>/dev/null | tail -n +6 | while read -r old_log; do rm -f -- "$old_log"; done
 }
 
 build() {

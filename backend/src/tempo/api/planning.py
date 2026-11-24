@@ -374,8 +374,9 @@ def patch_activity(
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
     if changes.get("locked") and row.kind == "training" and row.planned_start_at is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "training not placed yet: nothing to lock")
-    if changes.get("status") == "active" and row.duration_minutes is None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "confirm the duration first")
+    if changes.get("status") == "active" and row.status == "to_confirm":
+        # Duration (and race start) must go through /confirm: never activated by a PATCH.
+        raise HTTPException(status.HTTP_409_CONFLICT, "use /confirm for activities to confirm")
     for key, value in changes.items():
         setattr(row, key, value)
     if changes:

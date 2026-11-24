@@ -4,9 +4,10 @@
 # tempo_app is the runtime role (api + worker): DML only, granted by
 # `python -m tempo.db grant-runtime tempo_app` after every migration.
 set -eu
-app_password="$(cat /run/secrets/tempo_app_db_password)"
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-  -v app_password="$app_password" <<'SQL'
+# The password is read by psql itself (\set with a backtick command), so it never appears in a
+# process argument list.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+\set app_password `cat /run/secrets/tempo_app_db_password`
 CREATE ROLE tempo_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE;
 REVOKE ALL ON DATABASE tempo FROM PUBLIC;
 GRANT CONNECT ON DATABASE tempo TO tempo_app;

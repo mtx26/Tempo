@@ -82,3 +82,11 @@ def test_zip_bomb_and_size_guards() -> None:
         parse_plan_docx(buffer.getvalue(), TODAY)
     with pytest.raises(PlanFormatError, match="2 MB"):
         parse_plan_docx(b"x" * 2_000_001, TODAY)
+
+
+def test_impossible_dates_and_oversized_tables_are_unreadable_not_crashes() -> None:
+    with pytest.raises(PlanFormatError):
+        parse_plan_docx(plan_docx(title="Semaine du 31 au 35/13/2026"), TODAY)
+    big = {f"Ligne {i}": [""] * 7 for i in range(70)}
+    with pytest.raises(PlanFormatError, match="rows"):
+        parse_plan_docx(plan_docx(week=big), TODAY)

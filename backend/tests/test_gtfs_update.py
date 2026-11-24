@@ -69,7 +69,7 @@ class Portal:
 
 
 SOURCES = [
-    Source("stib.gtfs.zip", "https://portal.example/stib", True),
+    Source("stib.gtfs.zip", "https://api-management-discovery-production.azure-api.net/stib", True),
     Source("osm.pbf", "https://geofabrik.example/osm", False, timedelta(days=7)),
 ]
 
@@ -132,3 +132,26 @@ def test_server_errors_are_reported(tmp_path: Path) -> None:
     report = update_inputs(tmp_path, client, clock=lambda: NOW, only=SOURCES)
     assert report.failed == {"stib.gtfs.zip": "HTTP 503", "osm.pbf": "HTTP 503"}
     assert not (tmp_path / "READY").exists()
+
+
+def test_key_is_never_forwarded_to_a_redirect_target_and_http_is_refused(tmp_path: Path) -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.host == "api-management-discovery-production.azure-api.net":
+            return httpx2.Response(302, headers={"location": "https://blob.thirdparty.example/f"})
+        return httpx2.Response(200, content=gtfs(), headers={"etag": '"b"'})
+
+    client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    report = update_inputs(tmp_path, client, key="secret-key", clock=lambda: NOW, only=SOURCES[:1])
+    assert report.changed == ["stib.gtfs.zip"]
+    assert seen[0].headers[KEY_HEADER] == "secret-key"
+    assert KEY_HEADER not in seen[1].headers  # third-party host: key stripped
+
+    def downgrade(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(301, headers={"location": "http://plain.example/f"})
+
+    client = httpx2.Client(transport=httpx2.MockTransport(downgrade))
+    report = update_inputs(tmp_path / "x", client, key="k", clock=lambda: NOW, only=SOURCES[:1])
+    assert report.failed == {"stib.gtfs.zip": "refusing non-https URL"}

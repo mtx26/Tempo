@@ -22,11 +22,16 @@ import unicodedata
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from typing import Any
 
 from docx import Document
 from docx.table import Table
 
 MAX_DOCX_BYTES = 2_000_000
+MAX_TABLES = 10
+MAX_ROWS = 60
+MAX_COLUMNS = 20
+MAX_PARAGRAPHS = 500
 MAX_UNCOMPRESSED = 20_000_000
 WEEKDAYS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
 REST_WORDS = ("repos", "off", "rien")
@@ -114,11 +119,11 @@ def _week(texts: list[str], today: date) -> tuple[date, date]:
     raise PlanFormatError("no 'Semaine du ... au ...' range found")
 
 
-def _weekday_columns(table: Table) -> tuple[int, dict[int, int]] | None:
-    for row_index, row in enumerate(table.rows):
+def _weekday_columns(grid: list[list[str]]) -> tuple[int, dict[int, int]] | None:
+    for row_index, row in enumerate(grid):
         columns: dict[int, int] = {}
-        for column_index, cell in enumerate(row.cells):
-            name = _plain(cell.text).strip()
+        for column_index, cell in enumerate(row):
+            name = _plain(cell).strip()
             if name in WEEKDAYS:
                 columns[column_index] = WEEKDAYS.index(name)
         if len(columns) >= 5:
@@ -127,25 +132,46 @@ def _weekday_columns(table: Table) -> tuple[int, dict[int, int]] | None:
 
 
 def parse_plan_docx(data: bytes, today: date) -> WeeklyPlan:
+    """Parse a coach plan; ANY malformed content raises ``PlanFormatError`` (reported to the
+    user as unreadable, never a crash that would silently drop the e-mail)."""
     _check_archive(data)
     try:
         document = Document(io.BytesIO(data))
     except Exception as exc:  # python-docx raises several types for corrupt files
         raise PlanFormatError("unreadable .docx") from exc
-    texts = [p.text for p in document.paragraphs]
-    for table in document.tables:
-        texts += [cell.text for row in table.rows for cell in row.cells]
+    try:
+        return _parse_document(document, today)
+    except PlanFormatError:
+        raise
+    except (ValueError, IndexError, KeyError, AttributeError, TypeError) as exc:
+        raise PlanFormatError(f"unexpected plan layout ({type(exc).__name__})") from exc
+
+
+def _rows(table: Table) -> list[list[str]]:
+    """Cell texts per row, computed once per row (``row.cells`` is costly), size-capped."""
+    rows = table.rows
+    if len(rows) > MAX_ROWS:
+        raise PlanFormatError(f"table has more than {MAX_ROWS} rows")
+    return [[cell.text for cell in row.cells][:MAX_COLUMNS] for row in rows]
+
+
+def _parse_document(document: Any, today: date) -> WeeklyPlan:
+    tables = list(document.tables)[:MAX_TABLES]
+    grids = [_rows(table) for table in tables]
+    texts = [p.text for p in document.paragraphs[:MAX_PARAGRAPHS]]
+    for grid in grids:
+        texts += [cell for row in grid for cell in row]
     monday, sunday = _week(texts, today)
-    for table in document.tables:
-        found = _weekday_columns(table)
+    for grid in grids:
+        found = _weekday_columns(grid)
         if found is None:
             continue
         header_row, columns = found
         cells: dict[int, list[tuple[str, str]]] = {d: [] for d in range(7)}
-        for row in table.rows[header_row + 1 :]:
-            label = row.cells[0].text.strip()
+        for row in grid[header_row + 1 :]:
+            label = row[0].strip() if row else ""
             for column_index, weekday in columns.items():
-                value = row.cells[column_index].text.strip()
+                value = row[column_index].strip() if column_index < len(row) else ""
                 if value:
                     cells[weekday].append((label, value))
         plan = WeeklyPlan(monday, sunday)

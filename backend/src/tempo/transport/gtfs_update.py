@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import httpx2
 
@@ -62,12 +63,13 @@ def sources() -> list[Source]:
     return [*static, Source("osm.pbf", OSM_URL, False, OSM_REFRESH)]
 
 
-def validate_gtfs(data: bytes, today: date, previous_size: int | None) -> date | None:
+def validate_gtfs(data: bytes | Path, today: date, previous_size: int | None) -> date | None:
     """Raise ``InvalidGtfsError`` unless the feed is usable; returns its last service date."""
-    if previous_size and len(data) < MIN_SIZE_RATIO * previous_size:
-        raise InvalidGtfsError(f"size collapsed ({len(data)} vs {previous_size} bytes)")
+    size = data.stat().st_size if isinstance(data, Path) else len(data)
+    if previous_size and size < MIN_SIZE_RATIO * previous_size:
+        raise InvalidGtfsError(f"size collapsed ({size} vs {previous_size} bytes)")
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
+        archive = zipfile.ZipFile(data if isinstance(data, Path) else io.BytesIO(data))
         if archive.testzip() is not None:
             raise InvalidGtfsError("corrupt zip member")
     except zipfile.BadZipFile as exc:
@@ -118,6 +120,57 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp.replace(path)
 
 
+PORTAL_HOSTS = frozenset(
+    {"api-management-discovery-production.azure-api.net", "api.belgianmobility.io"}
+)
+MAX_REDIRECTS = 5
+REDIRECTS = frozenset({301, 302, 303, 307, 308})
+
+
+@dataclass(slots=True)
+class _Download:
+    status: int
+    etag: str | None = None
+    size: int = 0
+    sha256: str = ""
+    error: str | None = None
+
+
+def _download(
+    client: httpx2.Client, url: str, headers: dict[str, str], key: str | None, target: Path
+) -> _Download:
+    """Stream ``url`` into ``target`` with a size cap. Redirects are followed manually: every hop
+    must stay https, and the portal key is sent ONLY to the portal hosts (httpx keeps custom
+    headers across hosts, which would leak it to a third-party redirect target)."""
+    for _ in range(MAX_REDIRECTS + 1):
+        parts = urlsplit(url)
+        if parts.scheme != "https":
+            return _Download(0, error="refusing non-https URL")
+        hop = dict(headers)
+        if key and parts.hostname in PORTAL_HOSTS:
+            hop[KEY_HEADER] = key
+        try:
+            with client.stream("GET", url, headers=hop, follow_redirects=False) as response:
+                if response.status_code in REDIRECTS and "location" in response.headers:
+                    url = urljoin(url, response.headers["location"])
+                    continue
+                if response.status_code != 200:
+                    return _Download(response.status_code)
+                digest = hashlib.sha256()
+                size = 0
+                with target.open("wb") as out:
+                    for chunk in response.iter_bytes():
+                        size += len(chunk)
+                        if size > MAX_DOWNLOAD:
+                            return _Download(200, error="oversized download")
+                        digest.update(chunk)
+                        out.write(chunk)
+                return _Download(200, response.headers.get("etag"), size, digest.hexdigest())
+        except httpx2.HTTPError as exc:
+            return _Download(0, error=f"download failed: {type(exc).__name__}")
+    return _Download(0, error="too many redirects")
+
+
 def update_inputs(
     folder: Path,
     client: httpx2.Client,
@@ -140,49 +193,45 @@ def update_inputs(
         headers = {"User-Agent": "tempo-routing-update"}
         if entry.get("etag") and (folder / source.name).exists():
             headers["If-None-Match"] = entry["etag"]
-        if key and source.gtfs:  # the portal key never leaves for Geofabrik
-            headers[KEY_HEADER] = key
+        part = folder / (source.name + ".part")
+        result = _download(client, source.url, headers, key if source.gtfs else None, part)
         try:
-            response = client.get(source.url, headers=headers, follow_redirects=True)
-        except httpx2.HTTPError as exc:
-            report.failed[source.name] = f"download failed: {type(exc).__name__}"
-            continue
-        if response.status_code == 304:
-            entry["checked_at"] = now.isoformat()
-            state[source.name] = entry
-            report.unchanged.append(source.name)
-            continue
-        if response.status_code != 200:
-            report.failed[source.name] = f"HTTP {response.status_code}"
-            continue
-        data = response.content
-        if len(data) > MAX_DOWNLOAD or not data:
-            report.failed[source.name] = "empty or oversized download"
-            continue
-        digest = hashlib.sha256(data).hexdigest()
-        if digest == entry.get("sha256") and (folder / source.name).exists():
-            entry.update(checked_at=now.isoformat(), etag=response.headers.get("etag"))
-            state[source.name] = entry
-            report.unchanged.append(source.name)
-            continue
-        if source.gtfs:
-            try:
-                last = validate_gtfs(data, now.date(), entry.get("bytes"))
-            except InvalidGtfsError as exc:
-                report.failed[source.name] = f"rejected: {exc}"
+            if result.status == 304:
+                entry["checked_at"] = now.isoformat()
+                state[source.name] = entry
+                report.unchanged.append(source.name)
                 continue
-            entry["valid_until"] = None if last is None else last.isoformat()
-        _atomic_write(folder / source.name, data)
-        entry.update(
-            sha256=digest,
-            bytes=len(data),
-            etag=response.headers.get("etag"),
-            checked_at=now.isoformat(),
-            updated_at=now.isoformat(),
-            url=source.url,
-        )
-        state[source.name] = entry
-        report.changed.append(source.name)
+            if result.error or result.status != 200:
+                report.failed[source.name] = result.error or f"HTTP {result.status}"
+                continue
+            if result.size == 0:
+                report.failed[source.name] = "empty download"
+                continue
+            if result.sha256 == entry.get("sha256") and (folder / source.name).exists():
+                entry.update(checked_at=now.isoformat(), etag=result.etag)
+                state[source.name] = entry
+                report.unchanged.append(source.name)
+                continue
+            if source.gtfs:
+                try:
+                    last = validate_gtfs(part, now.date(), entry.get("bytes"))
+                except InvalidGtfsError as exc:
+                    report.failed[source.name] = f"rejected: {exc}"
+                    continue
+                entry["valid_until"] = None if last is None else last.isoformat()
+            part.replace(folder / source.name)
+            entry.update(
+                sha256=result.sha256,
+                bytes=result.size,
+                etag=result.etag,
+                checked_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                url=source.url,
+            )
+            state[source.name] = entry
+            report.changed.append(source.name)
+        finally:
+            part.unlink(missing_ok=True)
     if report.changed:
         report.version = now.strftime("%Y%m%dT%H%M%SZ")
         _atomic_write(folder / "READY", report.version.encode())

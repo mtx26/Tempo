@@ -87,10 +87,14 @@ def _lang(texts: Any, language: str = "fr") -> str:
 def parse_waiting_times(body: dict[str, Any]) -> dict[tuple[str, str], list[Passage]]:
     passages: dict[tuple[str, str], list[Passage]] = {}
     for item in body.get("results", []):
+        if not isinstance(item, dict):
+            continue
         point = point_id(str(item.get("pointid", "")))
         if point is None:
             continue
         for raw in _json_field(item.get("passingtimes")) or []:
+            if not isinstance(raw, dict):
+                continue
             try:
                 expected = datetime.fromisoformat(raw["expectedArrivalTime"])
             except (KeyError, TypeError, ValueError):
@@ -115,6 +119,8 @@ def parse_waiting_times(body: dict[str, Any]) -> dict[tuple[str, str], list[Pass
 def parse_travellers_information(body: dict[str, Any]) -> list[StibMessage]:
     messages: list[StibMessage] = []
     for item in body.get("results", []):
+        if not isinstance(item, dict):
+            continue
         content = _json_field(item.get("content")) or []
         texts = [_lang(t) for block in content for t in block.get("text", [])]
         if not texts:
@@ -125,7 +131,7 @@ def parse_travellers_information(body: dict[str, Any]) -> list[StibMessage]:
         )
         try:
             priority = int(item.get("priority") or 0)
-        except ValueError:
+        except (TypeError, ValueError):
             priority = 0
         messages.append(StibMessage(" ".join(texts), lines, points, priority))
     return messages
@@ -176,10 +182,14 @@ class StibRealtime:
         fresh = self._fetched_at is not None and now - self._fetched_at < self._cache_for
         if self._snapshot is not None and fresh:
             return self._snapshot
-        snapshot = StibSnapshot(
-            parse_waiting_times(self._get(WAITING_TIMES, now)),
-            parse_travellers_information(self._get(TRAVELLERS_INFORMATION, now)),
-        )
+        waiting, information = self._get(WAITING_TIMES, now), self._get(TRAVELLERS_INFORMATION, now)
+        try:
+            snapshot = StibSnapshot(
+                parse_waiting_times(waiting), parse_travellers_information(information)
+            )
+        except (ValueError, TypeError, AttributeError, KeyError) as exc:
+            # Third-party payload of an unexpected shape: never break the departure check.
+            raise StibUnavailableError(f"unexpected STIB payload ({type(exc).__name__})") from exc
         self._snapshot, self._fetched_at = snapshot, now
         return snapshot
 

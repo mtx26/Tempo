@@ -94,8 +94,9 @@ def answer(session: Session, question: Question, now: datetime, tz: ZoneInfo) ->
         trip = data.get("next_departure")
         if check.get("leave_at"):
             return (
-                f"Départ conseillé à {_hhmm(check['leave_at'], tz)} pour {check['event_title']}"
-                f" (état : {check['status']})."
+                f"Départ conseillé à {_hhmm(check['leave_at'], tz)} pour "
+                f"{check.get('event_title', 'votre prochain engagement')}"
+                f" (état : {check.get('status', 'inconnu')})."
             )
         if trip:
             departure = trip.get("departure") or trip["start"]
