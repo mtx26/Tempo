@@ -160,7 +160,8 @@ def test_replan_scheduling(sessions: sessionmaker[Session]) -> None:
     # Not configured: the user is told, and the job does not loop every tick.
     assert replan_job(sessions, FakeRouting(), NOW, TZ) == "first plan"
     with sessions() as s:
-        assert any(n.kind == "setup" for n in s.scalars(select(NotificationRow)))
+        setup = next(n for n in s.scalars(select(NotificationRow)) if n.kind == "setup")
+        assert "conversation" in setup.message and "service" not in setup.message
     assert replan_job(sessions, FakeRouting(), NOW + timedelta(minutes=1), TZ) is None
     configure(sessions)
     later = NOW + timedelta(minutes=20)

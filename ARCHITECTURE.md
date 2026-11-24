@@ -201,7 +201,8 @@ Contrat (implémenté) :
   le planning, demande une replanification (`replan_requested`) ; l'assistant appelle
   `plan_now` pour obtenir le résultat réel.
 - `POST /v1/operations/{name}` accepte un en-tête `Idempotency-Key` (réponse rejouée à
-  l'identique). Le journal de travail est idempotent par clé.
+  l'identique pendant 2 jours, puis purgée par le worker). Le journal de travail est
+  idempotent par clé.
 - Contexte LLM : prompt système stable, 12 derniers tours de la conversation (6 h), date et
   fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
   shell, Docker ou secret.
@@ -684,11 +685,11 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B12 Conflits | Partiel | Manque de temps, reliquat, échéance stricte manquée, panne de routage, version invalide rejetée ; alternatives simulées automatiquement (`propose_alternatives`, rien publié). **Écart** : pas de calcul de noyau incompatible minimal (le diagnostic est par tâche). |
 | B13 Validation | Vérifié | Proposition périmée rejetée ; replanifications concurrentes sérialisées (3 fils). |
 | B14 Notifications | Vérifié | Rappel relatif qui suit sa cible, sans doublon, annulé avec la cible ; plusieurs rappels de départ. |
-| B15 Autonomie | Partiel | Jobs testés individuellement, sans LLM. **Fonctionnement prolongé (soak) non mesuré.** |
+| B15 Autonomie | Vérifié | Jobs testés individuellement, sans LLM ; endurance : la vraie fonction `tick` du worker sur 7 jours simulés (1 008 cycles de 10 min, PostgreSQL réel) avec un cours déplacé par l'iCal, une panne de routage de 4 h et du travail déclaré chaque soir : tous les jobs sains à la fin, rappels émis une seule fois par échéance, replanification au moins nocturne, aucune séance sur un cours, croissance bornée, cycle p95 0,03 s / max 0,4 s (`test_soak.py`). Pas encore mesuré en temps réel sur le serveur. |
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
 | B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
 
-Dernière exécution locale (24/11/2026) : backend 490 tests réussis (PostgreSQL 16 réel, MOTIS
+Dernière exécution locale (24/11/2026) : backend 491 tests réussis (PostgreSQL 16 réel, MOTIS
 Bruxelles réel, contrat avec le vrai client HA), 13 ignorés avec leur raison (MOTIS national,
 portail Belgian Mobility et IMAP réel non lancés dans cette session), couverture 91 %, Ruff et
 mypy strict propres ; intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres.

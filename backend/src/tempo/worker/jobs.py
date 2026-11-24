@@ -275,8 +275,8 @@ def replan_job(
                 session,
                 "setup",
                 "Tempo n'est pas encore configuré",
-                f"{exc}. Configurez votre domicile dans Home Assistant (service tempo.set_place "
-                "puis réglage du domicile).",
+                f"{exc}. Donnez à Tempo les coordonnées de votre domicile dans la conversation, "
+                "ou reprenez la zone « Maison » dans les options de l'intégration.",
                 "setup:home",
             )
         session.commit()
