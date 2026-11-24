@@ -17,6 +17,9 @@ from tempo.scheduler.model import (
     utc,
 )
 
+EXTRA_BLOCKS_PER_SUBJECT = 2
+"""Mirror of ``solver.EXTRA_BLOCKS_PER_SUBJECT`` (validator stays independent of the solver)."""
+
 
 def _minutes(block: PlannedBlock) -> int:
     return int(block.duration.total_seconds() // 60)
@@ -106,7 +109,8 @@ def validate_plan(problem: PlanningProblem, result: PlanResult) -> list[str]:
         if daily_new[day] and total > prefs.max_daily_study_minutes:
             violations.append(f"{day}: {total} min of study exceeds the daily cap")
     for (subject, day), count in per_subject_day.items():
-        if count > prefs.max_blocks_per_subject_per_day:
+        # The preferred count is soft (solver penalty); only the absolute bound is a violation.
+        if count > prefs.max_blocks_per_subject_per_day + EXTRA_BLOCKS_PER_SUBJECT:
             violations.append(f"{day}: {count} blocks of {subject} exceed the daily maximum")
     return violations
 

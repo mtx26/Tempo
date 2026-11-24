@@ -52,3 +52,26 @@ def test_single_subject_still_uses_both_windows_when_needed() -> None:
     result = solve(p, time_limit_seconds=10)
     assert validate_plan(p, result) == []
     assert sum((b.end - b.start for b in result.blocks), timedelta(0)) == timedelta(minutes=180)
+
+
+def test_per_subject_daily_count_is_soft_when_feasibility_needs_it() -> None:
+    from tempo.domain.models import TargetKind
+
+    p = problem(
+        [demand("examen", 360, target_day=1, kind=TargetKind.HARD)],
+        [Interval(at(1, 8), at(1, 20))],
+        days=(1, 2),
+    )
+    result = solve(p, time_limit_seconds=10)
+    assert validate_plan(p, result) == []
+    assert result.unplanned_minutes == {} and result.hard_deadline_misses == []
+    assert len([b for b in result.blocks if b.start.day == 1]) == 4  # beyond the preferred 2
+
+
+def test_preferred_count_is_kept_when_there_is_room() -> None:
+    p = problem([demand("maths", 360)], [Interval(at(d, 8), at(d, 20)) for d in range(1, 8)])
+    result = solve(p, time_limit_seconds=10)
+    per_day: dict[int, int] = {}
+    for block in result.blocks:
+        per_day[block.start.day] = per_day.get(block.start.day, 0) + 1
+    assert max(per_day.values()) <= 2

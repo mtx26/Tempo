@@ -252,3 +252,32 @@ def test_session_under_way_is_kept_as_is(session: Session) -> None:
         )
     )
     assert total == 300  # effort neither lost nor duplicated
+
+
+def test_far_hard_deadline_is_spread_not_declared_impossible(session: Session) -> None:
+    from tempo.domain.models import TargetKind
+
+    seed(session)  # horizon_days = 6 from 2026-12-07
+    far = StudyTaskRow(
+        subject="mémoire",
+        effort_minutes=3600,
+        target_date=date(2027, 3, 7),
+        target_kind=TargetKind.HARD,
+    )
+    session.add(far)
+    session.flush()
+    version = replan(session, FakeRouting(), NOW, TZ, reason="far")
+    assert version.summary["hard_deadline_misses"] == []
+    assert not any(n.kind == "deadline" for n in session.scalars(select(NotificationRow)))
+    share = version.summary["spread"][str(far.id)]
+    assert share == 285  # 3600 min x 7 horizon days (7-13 Dec) / 91 days -> 276.9, up to 285
+    planned = sum(
+        (b.end_at - b.start_at).total_seconds() // 60
+        for b in session.scalars(
+            select(StudyBlockRow).where(
+                StudyBlockRow.schedule_version_id == version.id, StudyBlockRow.task_id == far.id
+            )
+        )
+    )
+    # A small overshoot (<= one minimum block) is allowed instead of a block shorter than 30 min.
+    assert share <= planned <= share + 30

@@ -13,8 +13,9 @@ Persistence rules:
 """
 
 import hashlib
+import math
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,7 +38,7 @@ from tempo.db.models import (
     StudyBlockRow,
     StudyTaskRow,
 )
-from tempo.domain.models import EventStatus
+from tempo.domain.models import EventStatus, TargetKind
 from tempo.planning.engine import (
     Commitment,
     CommitmentKind,
@@ -162,6 +163,18 @@ def _availability(
 class LoadedInput:
     data: PlanningInput
     task_ids: dict[str, uuid.UUID]
+    spread: dict[str, int] = field(default_factory=dict)
+    """Tasks whose target is beyond the horizon -> minutes planned in this horizon."""
+
+
+SHARE_GRANULARITY = 15
+
+
+def _proportional_share(remaining: int, today: date, last_day: date, target: date) -> int:
+    window = (last_day - today).days + 1
+    total = (target - today).days + 1
+    share = math.ceil(remaining * window / total / SHARE_GRANULARITY) * SHARE_GRANULARITY
+    return min(remaining, max(share, SHARE_GRANULARITY))
 
 
 def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
@@ -253,20 +266,26 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
 
     task_ids: dict[str, uuid.UUID] = {}
     demands: list[StudyDemand] = []
+    spread: dict[str, int] = {}
+    today = now.astimezone(tz).date()
+    last_day = (horizon_end - timedelta(minutes=1)).astimezone(tz).date()
     for task in session.scalars(select(StudyTaskRow).where(StudyTaskRow.archived.is_(False))):
         remaining = max(0, task.effort_minutes - task.completed_minutes)
         if remaining == 0:
             continue
         task_ids[str(task.id)] = task.id
-        demands.append(
-            StudyDemand(
-                str(task.id),
-                task.subject,
-                remaining,
-                _end_of_day(task.target_date, tz),
-                task.target_kind,
-            )
+        target, target_kind, minutes = (
+            _end_of_day(task.target_date, tz),
+            task.target_kind,
+            remaining,
         )
+        if task.target_date > last_day:
+            # Target beyond the planning horizon: plan only the proportional share now (spread
+            # the work until the target); the real deadline is checked once it is in range.
+            minutes = _proportional_share(remaining, today, last_day, task.target_date)
+            target, target_kind = _end_of_day(last_day, tz), TargetKind.SOFT
+            spread[str(task.id)] = minutes
+        demands.append(StudyDemand(str(task.id), task.subject, minutes, target, target_kind))
     subjects = {d.task_id: d.subject for d in demands}
 
     locked = [
@@ -317,7 +336,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         preferences=Preferences(**prefs),
         buffer=buffer,
     )
-    return LoadedInput(data, task_ids)
+    return LoadedInput(data, task_ids, spread)
 
 
 MAX_RECOVERY_DAYS = 2
@@ -485,6 +504,7 @@ def replan(
     result = outcome.result
     summary: dict[str, Any] = {
         "missed_blocks": missed,
+        "spread": loaded.spread,
         "reason": reason,
         "planned_at": now.isoformat(),
         "horizon_end": loaded.data.horizon_end.isoformat(),

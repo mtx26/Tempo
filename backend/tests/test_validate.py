@@ -139,7 +139,9 @@ def test_off_grid_block_is_detected() -> None:
     assert any("grid" in v for v in violations)
 
 
-def test_too_many_blocks_of_one_subject_per_day_is_detected() -> None:
-    blocks = [block(at(8), at(8, 30)), block(at(9), at(9, 30)), block(at(10), at(10, 30))]
-    violations = validate_plan(make_problem(), plan(*blocks))
+def test_extra_blocks_of_one_subject_are_soft_up_to_the_absolute_bound() -> None:
+    three = [block(at(8), at(8, 30)), block(at(9), at(9, 30)), block(at(10), at(10, 30))]
+    assert not any("blocks of" in v for v in validate_plan(make_problem(), plan(*three)))
+    five = [*three, block(at(11), at(11, 30)), block(at(12), at(12, 30))]
+    violations = validate_plan(make_problem(), plan(*five))
     assert any("blocks of" in v for v in violations)

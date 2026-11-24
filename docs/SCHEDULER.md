@@ -73,3 +73,8 @@ availability, soft + hard targets).
   hints; never constraining (tests check the objective is never worse than without hints).
 - **Midnight**: same-subject blocks on both sides of midnight are penalised like same-day
   adjacent blocks (only pairs that can come within the minimum gap of midnight).
+
+## Requirement fixes (2026-11-24, D026)
+- Long-term targets beyond the horizon: proportional share only (no false impossibility).
+- `max_blocks_per_subject_per_day` is soft: second pass for tasks with unplanned effort only.
+- Missed sessions: active-plan blocks only; a session under way is never moved.

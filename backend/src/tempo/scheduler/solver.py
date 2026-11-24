@@ -11,7 +11,8 @@ Model:
 - NoOverlap over study intervals and the union of busy, locked and unavailable time;
 - per task: planned + unplanned - overshoot == effort still to plan (remaining minus locked);
 - per local day: new study + locked study <= daily cap;
-- per subject and day: at most ``max_blocks_per_subject_per_day`` blocks; consecutive blocks
+- per subject and day: ``max_blocks_per_subject_per_day`` blocks preferred (soft: up to
+  ``EXTRA_BLOCKS_PER_SUBJECT`` more, each penalised, only when needed); consecutive blocks
   of the same subject (any task) closer than the minimum gap are penalised;
 - hard targets: no block ends after the deadline; soft targets: lateness is penalised.
 
@@ -43,6 +44,9 @@ ADJACENCY_PENALTY = 120
 SHORT_BLOCK_PENALTY = 30
 OVERSHOOT_PENALTY_PER_MINUTE = 2
 STABILITY_PENALTY = 200
+EXTRA_BLOCKS_PER_SUBJECT = 2
+EXTRA_BLOCK_PENALTY = 400
+"""Cost of each block beyond the preferred per-subject daily count (a soft preference)."""
 """Cost of moving (or dropping) a previously proposed block: above the adjacency and
 short-block penalties, far below unplanned effort; ~200 minutes of soft lateness."""
 
@@ -133,8 +137,10 @@ def _start_domain(free: list[Span], g: int, min_block: int) -> list[list[int]]:
 
 
 class _Builder:
-    def __init__(self, problem: PlanningProblem) -> None:
+    def __init__(self, problem: PlanningProblem, extended: frozenset[str] = frozenset()) -> None:
         self.problem = problem
+        self.extended = extended
+        """Tasks allowed to exceed the preferred per-subject daily count (second pass only)."""
         self.prefs = problem.preferences
         tz = problem.timezone
         first_day = problem.horizon.start.astimezone(tz).date()
@@ -186,7 +192,10 @@ class _Builder:
         target = self.clock.floor(demand.target)
         domain = _start_domain(free, g, prefs.min_block_minutes)
         capacity = sum(e - s for s, e in free)
-        count = min(prefs.max_blocks_per_subject_per_day, capacity // prefs.min_block_minutes)
+        extra = EXTRA_BLOCKS_PER_SUBJECT if demand.task_id in self.extended else 0
+        count = min(
+            prefs.max_blocks_per_subject_per_day + extra, capacity // prefs.min_block_minutes
+        )
         if not domain or count == 0:
             return
         previous: _Block | None = None
@@ -427,7 +436,12 @@ class _Builder:
                 by_subject.setdefault(block.demand.subject, []).append(block)
             for subject_blocks in by_subject.values():
                 limit = prefs.max_blocks_per_subject_per_day
-                model.add(sum(b.present for b in subject_blocks) <= limit)
+                if any(b.demand.task_id in self.extended for b in subject_blocks):
+                    extra = model.new_int_var(0, EXTRA_BLOCKS_PER_SUBJECT, f"extra_{day_index}")
+                    model.add(sum(b.present for b in subject_blocks) <= limit + extra)
+                    self.penalties.append(EXTRA_BLOCK_PENALTY * extra)
+                else:
+                    model.add(sum(b.present for b in subject_blocks) <= limit)
                 for a, b in itertools.combinations(subject_blocks, 2):
                     if a.demand is not b.demand:
                         self._penalise_adjacency(a, b.start, b.end, b.present, "x", ordered=False)
@@ -483,7 +497,30 @@ def solve(
     workers: int = 8,
     warm_start: bool = True,
 ) -> PlanResult:
-    builder = _Builder(problem)
+    first = _solve_once(problem, time_limit_seconds, workers, warm_start, frozenset())
+    short = frozenset(first.unplanned_minutes)
+    if first.status is PlanStatus.NO_SOLUTION or not short:
+        return first
+    # The per-subject daily count is a soft preference: when effort could not be placed,
+    # retry letting ONLY those tasks exceed it (penalised). Keep the better plan.
+    second = _solve_once(problem, time_limit_seconds, workers, warm_start, short)
+    if second.status is PlanStatus.NO_SOLUTION:
+        return first
+    return (
+        second
+        if sum(second.unplanned_minutes.values()) < sum(first.unplanned_minutes.values())
+        else first
+    )
+
+
+def _solve_once(
+    problem: PlanningProblem,
+    time_limit_seconds: float,
+    workers: int,
+    warm_start: bool,
+    extended: frozenset[str],
+) -> PlanResult:
+    builder = _Builder(problem, extended)
     builder.build()
     if warm_start:
         builder.warm_start()
