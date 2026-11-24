@@ -21,6 +21,8 @@ from tempo.db.models import (
     WorkLogRow,
 )
 from tempo.planning.service import active_version, propose, replan
+from tempo.transport.places import Coordinates
+from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
 from tests.integration.test_planning_service import NOW, TZ, at, seed
 from tests.test_engine import FakeRouting
 
@@ -581,3 +583,156 @@ def test_read_operations_answer(session: Session) -> None:
         session, "get_schedule", start="2026-12-07T00:00", end="2027-06-01T00:00"
     )
     _ = (date, timedelta)
+
+
+class PagedTimetable:
+    """MOTIS-like provider: a departure every 15 min, at most 3 journeys per answer; the
+    09:45 departure is the only fast one (20 min instead of 50)."""
+
+    def __init__(self, fail_after: int | None = None) -> None:
+        self.calls: list[tuple[datetime, bool]] = []
+        self.fail_after = fail_after
+
+    def _journey(self, start: datetime) -> Journey:
+        trip = timedelta(minutes=20 if start.astimezone(TZ).strftime("%H:%M") == "09:45" else 50)
+        leg = Leg("BUS", "a", "b", start, start + trip, start, start + trip, realtime=False)
+        return Journey((leg,), start, start + trip, 0, "fake")
+
+    def plan(
+        self, origin: Coordinates, destination: Coordinates, time: datetime, *, arrive_by: bool
+    ) -> list[Journey]:
+        if self.fail_after is not None and len(self.calls) >= self.fail_after:
+            raise RoutingUnavailableError("MOTIS down")
+        self.calls.append((time, arrive_by))
+        base = at(8, 6)
+        slots = [self._journey(base + timedelta(minutes=15 * i)) for i in range(60)]
+        if arrive_by:
+            return [j for j in slots if j.arrival <= time][-3:]
+        return [j for j in slots if j.departure >= time][:3]
+
+
+def test_journey_search_explores_several_pages_of_the_range(session: Session) -> None:
+    """B09: the best journey of a range is found even when it is not on the first page."""
+    seed(session)
+    provider = PagedTimetable()
+    found = run_operation(
+        OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=provider),
+        "search_journey",
+        {
+            "origin_place_id": "home",
+            "destination_place_id": "campus",
+            "depart_after": "2026-12-08T09:00",
+            "arrive_before": "2026-12-08T12:00",
+        },
+    )["result"]
+    assert found["status"] == "ok"
+    assert datetime.fromisoformat(found["best"]["departure"]) == at(8, 9, 45)
+    assert found["best"]["duration_minutes"] == 20
+    assert found["pages"] >= 2
+    assert all(datetime.fromisoformat(j["arrival"]) <= at(8, 12) for j in found["alternatives"])
+
+
+def test_journey_search_only_arrival_explores_earlier_pages(session: Session) -> None:
+    seed(session)
+    provider = PagedTimetable()
+    found = run_operation(
+        OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=provider),
+        "search_journey",
+        {
+            "origin_place_id": "home",
+            "destination_place_id": "campus",
+            "arrive_before": "2026-12-08T12:00",
+        },
+    )["result"]
+    assert found["status"] == "ok"
+    assert found["best"]["duration_minutes"] == 20
+    assert all(arrive_by for _, arrive_by in provider.calls)
+
+
+def test_journey_search_keeps_explored_pages_when_a_later_page_fails(session: Session) -> None:
+    seed(session)
+    provider = PagedTimetable(fail_after=1)
+    found = run_operation(
+        OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=provider),
+        "search_journey",
+        {
+            "origin_place_id": "home",
+            "destination_place_id": "campus",
+            "depart_after": "2026-12-08T09:00",
+            "arrive_before": "2026-12-08T12:00",
+        },
+    )["result"]
+    assert found["status"] == "ok"
+    assert found["exploration_incomplete"] is True
+    assert found["best"]["duration_minutes"] == 50
+
+
+def test_category_windows_restrict_trainings_through_the_conversation(session: Session) -> None:
+    """B07: 'my trainings only in the morning, 7-9' constrains placement; removable."""
+    seed(session)
+    windows = [{"weekday": d, "start": "07:00", "end": "09:00"} for d in (1, 2)]
+    ok(session, "set_category_windows", kind="training", windows=windows)
+    rules = ok(session, "get_rules")
+    assert rules["category_windows"]["training"] == windows
+    ok(session, "plan_now")
+    training = session.scalars(select(ActivityRow).where(ActivityRow.kind == "training")).one()
+    start = training.planned_start_at.astimezone(TZ)  # type: ignore[union-attr]
+    assert (
+        start.weekday() in (1, 2)
+        and start.hour >= 7
+        and start + timedelta(hours=1) <= (start.replace(hour=9, minute=0))
+    )
+    ok(session, "set_category_windows", kind="training", windows=[])
+    assert "training" not in ok(session, "get_rules")["category_windows"]
+    ok(session, "plan_now")  # local mode: stability keeps the morning slot (B11)
+    session.refresh(training)
+    assert training.planned_start_at is not None
+    ok(session, "plan_now", mode="global")  # explicit reorganisation: preferred slot again
+    session.refresh(training)
+    assert training.planned_start_at == at(8, 18)
+
+
+def test_category_windows_reject_unknown_category_and_bad_hours(session: Session) -> None:
+    assert "arguments invalides" in err(session, "set_category_windows", kind="race", windows=[])
+    assert "fin avant début" in err(
+        session,
+        "set_category_windows",
+        kind="training",
+        windows=[{"weekday": 0, "start": "10:00", "end": "09:00"}],
+    )
+
+
+def test_impossible_strict_deadline_gets_simulated_alternatives(session: Session) -> None:
+    """B12: deterministic alternatives are simulated (nothing published, nothing changed)."""
+    seed(session)
+    task = ok(
+        session,
+        "create_task",
+        title="Chimie",
+        estimated_minutes=3000,
+        target_date="2026-12-08",
+        hard_deadline=True,
+    )["task"]
+    ok(session, "plan_now")
+    published = active_version(session)
+    found = ok(session, "propose_alternatives")
+    assert found["status"] == "alternatives"
+    chimie = next(t for t in found["tasks"] if t["task_id"] == task["id"])
+    kinds = {a["kind"]: a for a in chimie["alternatives"]}
+    assert kinds["postpone_deadline"]["resolves"] is True
+    assert kinds["postpone_deadline"]["new_target_date"] > "2026-12-08"
+    soft = kinds["make_deadline_soft"]
+    assert soft["strict_miss"] is False
+    assert soft["unplanned_minutes"] < chimie["unplanned_minutes"]
+    reduce = kinds["reduce_volume"]
+    assert 0 < reduce["plannable_minutes"] < 3000
+    assert active_version(session) == published
+    row = session.get(StudyTaskRow, __import__("uuid").UUID(task["id"]))
+    assert row is not None and row.target_date == date(2026, 12, 8)
+    assert row.target_kind.value == "hard"
+
+
+def test_alternatives_when_everything_fits(session: Session) -> None:
+    seed(session)
+    ok(session, "plan_now")
+    assert ok(session, "propose_alternatives")["status"] == "nothing_to_resolve"

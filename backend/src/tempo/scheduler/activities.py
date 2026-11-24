@@ -46,6 +46,8 @@ class FlexibleActivity:
     sequence_index: int = 0
     min_days_after_previous: int = 0
     """Calendar days required after the previous session of the group (recovery)."""
+    allowed: tuple[Interval, ...] | None = None
+    """Category windows (B07): when set, the session must lie inside one of them (hard)."""
 
     def __post_init__(self) -> None:
         if self.duration <= timedelta(0):
@@ -76,6 +78,28 @@ class ActivityPlan:
 
 def _minutes(origin: datetime, value: datetime) -> float:
     return (utc(value) - utc(origin)).total_seconds() / 60
+
+
+def _forbidden(
+    origin: datetime, allowed: tuple[Interval, ...], start: int, end: int
+) -> list[tuple[int, int]]:
+    """Complement of the allowed windows inside ``[start, end]`` (minutes from origin)."""
+    spans = sorted(
+        (math.ceil(_minutes(origin, w.start)), math.floor(_minutes(origin, w.end))) for w in allowed
+    )
+    gaps: list[tuple[int, int]] = []
+    cursor = start
+    for w_start, w_end in spans:
+        if w_end <= w_start:
+            continue
+        if w_start > cursor:
+            gaps.append((cursor, min(w_start, end)))
+        cursor = max(cursor, w_end)
+        if cursor >= end:
+            break
+    if cursor < end:
+        gaps.append((cursor, end))
+    return [(a, b) for a, b in gaps if b > a]
 
 
 def plan_activities(
@@ -150,6 +174,14 @@ def plan_activities(
                     n_start, n_end - n_start, f"night_{index}_{night_index}"
                 )
                 model.add_no_overlap([session, night])
+        if item.allowed is not None:
+            for gap_index, (g_start, g_end) in enumerate(
+                _forbidden(origin, item.allowed, window_start, window_end)
+            ):
+                outside = model.new_fixed_size_interval_var(
+                    g_start, g_end - g_start, f"outside_{index}_{gap_index}"
+                )
+                model.add_no_overlap([session, outside])
         penalties.append(MISSING_PENALTY * (1 - present))
         presents[index], session_ends[index] = present, start + duration
         if item.preferred_day is not None or item.sequence_group is not None:

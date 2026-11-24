@@ -27,6 +27,7 @@ from tempo.db.models import (
     AuditEntry,
     AvailabilityExceptionRow,
     AvailabilityRow,
+    CategoryWindowRow,
     FixedEventRow,
     JobRunRow,
     NotificationRow,
@@ -333,7 +334,8 @@ def _minutes_text(value: int) -> str:
 
 @operation(
     "get_rules",
-    "Availability rules (weekly windows by place), dated exceptions, planned locations "
+    "Availability rules (weekly windows by place), category windows of flexible activities, "
+    "dated exceptions, planned locations "
     "(where the user will be), study preferences and reminder settings.",
     NoInput,
     mutates=False,
@@ -369,6 +371,7 @@ def get_rules(ctx: OpContext, _: NoInput) -> dict[str, Any]:
             }
             for e in exceptions
         ],
+        "category_windows": _category_windows(ctx.session),
         "planned_locations": get_setting(ctx.session, "stays", []) or [],
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
         "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
@@ -1223,6 +1226,68 @@ def set_weekly_availability(ctx: OpContext, body: WeeklyIn) -> dict[str, Any]:
     return {"windows": len(body.windows)}
 
 
+class CategoryWindowIn(Strict):
+    weekday: int = Field(ge=0, le=6, description="0 = Monday")
+    start: str = Field(pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(pattern=r"^(\d{2}:\d{2}|24:00)$")
+
+
+class CategoryWindowsIn(Strict):
+    kind: Literal["training", "personal", "task"] = Field(
+        description="Category of flexible activities (task = located task session)"
+    )
+    windows: list[CategoryWindowIn] = Field(
+        max_length=100, description="Full list; empty = remove the restriction"
+    )
+
+
+def _category_windows(session: Session) -> dict[str, list[dict[str, Any]]]:
+    rows = session.scalars(
+        select(CategoryWindowRow).order_by(
+            CategoryWindowRow.kind, CategoryWindowRow.weekday, CategoryWindowRow.start_minute
+        )
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        out.setdefault(row.kind, []).append(
+            {
+                "weekday": row.weekday,
+                "start": _minutes_text(row.start_minute),
+                "end": _minutes_text(row.end_minute),
+            }
+        )
+    return out
+
+
+@operation(
+    "set_category_windows",
+    "Replace the weekly windows in which flexible activities of one category may be placed "
+    "(e.g. trainings only 07:00-09:00 on weekdays). Hard rule: a session that does not fit "
+    "stays unplaced and is reported. Empty list = no restriction. Read get_rules first.",
+    CategoryWindowsIn,
+    mutates=True,
+    replan=True,
+)
+def set_category_windows(ctx: OpContext, body: CategoryWindowsIn) -> dict[str, Any]:
+    rows = []
+    for window in body.windows:
+        start, end = _minute(window.start), _minute(window.end)
+        if end <= start:
+            raise OpError("fin avant début")
+        rows.append(
+            CategoryWindowRow(
+                kind=body.kind, weekday=window.weekday, start_minute=start, end_minute=end
+            )
+        )
+    for old in ctx.session.scalars(
+        select(CategoryWindowRow).where(CategoryWindowRow.kind == body.kind)
+    ):
+        ctx.session.delete(old)
+    ctx.session.flush()
+    ctx.session.add_all(rows)
+    return {"kind": body.kind, "windows": len(rows)}
+
+
 def _minute(text: str) -> int:
     hours, minutes = text.split(":")
     value = int(hours) * 60 + int(minutes)
@@ -1499,6 +1564,121 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
     return result
 
 
+POSTPONE_STEPS_DAYS = (2, 7, 14, 28)
+MAX_ALTERNATIVE_TASKS = 3
+
+
+def _simulate(ctx: OpContext, change: Callable[[StudyTaskRow], None], task_id: str) -> Any:
+    """Apply ``change`` to the task, re-plan, and roll everything back (nothing published)."""
+    assert ctx.routing is not None  # noqa: S101 - checked by the caller
+    savepoint = ctx.session.begin_nested()
+    try:
+        row = ctx.session.get(StudyTaskRow, uuid.UUID(task_id))
+        assert row is not None  # noqa: S101 - listed from the active plan
+        change(row)
+        ctx.session.flush()
+        version = replan(ctx.session, ctx.routing, ctx.now, ctx.tz, reason="simulation")
+        plan = dict(version.summary)
+    finally:
+        savepoint.rollback()
+    unplanned = int(plan.get("unplanned_minutes", {}).get(task_id, 0))
+    return {
+        "valid": version.state == "active",
+        "unplanned_minutes": unplanned,
+        "late_minutes": int(plan.get("late_minutes", {}).get(task_id, 0)),
+        "strict_miss": task_id in plan.get("hard_deadline_misses", []),
+        "resolves": version.state == "active"
+        and unplanned == 0
+        and task_id not in plan.get("hard_deadline_misses", []),
+    }
+
+
+@operation(
+    "propose_alternatives",
+    "When the active plan is partial (remainder or missed strict deadline), SIMULATE "
+    "deterministic alternatives per affected task: postpone the deadline (smallest tried "
+    "postponement that resolves), make a strict deadline soft, or reduce the volume to what "
+    "fits. Nothing is published or changed; apply one only after the user agrees.",
+    NoInput,
+    mutates=False,
+)
+def propose_alternatives(ctx: OpContext, _: NoInput) -> dict[str, Any]:
+    version = active_version(ctx.session)
+    if version is None:
+        return {"status": "no_plan", "detail": "aucun planning publié : lancez plan_now"}
+    plan = dict(version.summary)
+    unplanned: dict[str, int] = plan.get("unplanned_minutes", {}) or {}
+    misses: list[str] = plan.get("hard_deadline_misses", []) or []
+    affected = [t for t in dict.fromkeys([*misses, *unplanned]) if misses.count(t) or unplanned[t]]
+    if not affected:
+        return {"status": "nothing_to_resolve", "detail": "tout le travail est planifié"}
+    if ctx.routing is None:
+        return {"status": "unavailable", "detail": "routage indisponible : simulation impossible"}
+    tasks: list[dict[str, Any]] = []
+    for task_id in affected[:MAX_ALTERNATIVE_TASKS]:
+        row = ctx.session.get(StudyTaskRow, uuid.UUID(task_id))
+        if row is None:
+            continue
+        alternatives: list[dict[str, Any]] = []
+        missing = int(unplanned.get(task_id, 0))
+        remaining = remaining_minutes(row) or 0
+        if missing and remaining > missing:
+            alternatives.append(
+                {
+                    "kind": "reduce_volume",
+                    "plannable_minutes": remaining - missing,
+                    "resolves": True,
+                    "detail": "ne garder que le volume qui tient dans l'horizon actuel",
+                }
+            )
+        try:
+            if row.target_date is not None:
+                original = row.target_date
+                for days in POSTPONE_STEPS_DAYS:
+                    new_date = original + timedelta(days=days)
+
+                    def postpone(task: StudyTaskRow, when: date = new_date) -> None:
+                        task.target_date = when
+
+                    outcome = _simulate(ctx, postpone, task_id)
+                    if outcome["resolves"] or days == POSTPONE_STEPS_DAYS[-1]:
+                        alternatives.append(
+                            {
+                                "kind": "postpone_deadline",
+                                "new_target_date": new_date.isoformat(),
+                                **outcome,
+                            }
+                        )
+                        break
+            if row.target_kind == TargetKind.HARD:
+
+                def soften(task: StudyTaskRow) -> None:
+                    task.target_kind = TargetKind.SOFT
+
+                alternatives.append(
+                    {"kind": "make_deadline_soft", **_simulate(ctx, soften, task_id)}
+                )
+        except RoutingUnavailableError as exc:
+            return {"status": "error", "detail": f"routage indisponible : {exc}"}
+        except PlanningNotConfiguredError as exc:
+            raise OpError(f"planification impossible : {exc}") from exc
+        tasks.append(
+            {
+                "task_id": task_id,
+                "title": row.subject,
+                "unplanned_minutes": missing,
+                "strict_miss": task_id in misses,
+                "alternatives": alternatives,
+            }
+        )
+    return {
+        "status": "alternatives",
+        "tasks": tasks,
+        "note": "simulations seulement : rien n'est appliqué sans accord explicite "
+        "(update_task puis plan_now)",
+    }
+
+
 class JourneyIn(Strict):
     origin_place_id: str | None = Field(default=None, description="Known place; or use_gps")
     use_gps: bool = Field(
@@ -1532,6 +1712,66 @@ def _journey_out(journey: Journey) -> dict[str, Any]:
             for leg in journey.legs
         ],
     }
+
+
+MAX_JOURNEY_PAGES = 5
+OPEN_SEARCH_SPAN = timedelta(hours=2)
+"""Exploration span after the only lower bound (or before the only upper bound)."""
+
+
+def _explore_journeys(
+    routing: RoutingProvider,
+    origin: Coordinates,
+    target: Coordinates,
+    lower: datetime | None,
+    upper: datetime | None,
+) -> tuple[list[Journey], int, bool]:
+    """Page through the provider's answers (a MOTIS answer holds only a few itineraries).
+
+    With a lower bound, pages move forward from it (up to the upper bound, or
+    ``OPEN_SEARCH_SPAN``); with only an upper bound, arrive-by pages move backward. At most
+    ``MAX_JOURNEY_PAGES`` requests. A failure on the first page propagates; a later failure
+    keeps what was explored and is reported as an incomplete exploration."""
+    found: dict[tuple[Any, ...], Journey] = {}
+    pages = 0
+    forward = lower is not None
+    if forward:
+        assert lower is not None  # noqa: S101 - narrowing
+        cursor = lower
+        stop = upper if upper is not None else lower + OPEN_SEARCH_SPAN
+    else:
+        assert upper is not None  # noqa: S101 - one bound is required by the caller
+        cursor = upper
+        stop = upper - OPEN_SEARCH_SPAN
+    while pages < MAX_JOURNEY_PAGES and (cursor < stop if forward else cursor > stop):
+        try:
+            page = routing.plan(origin, target, cursor, arrive_by=not forward)
+        except RoutingUnavailableError:
+            if pages == 0:
+                raise
+            return list(found.values()), pages, True
+        pages += 1
+        new = 0
+        for journey in page:
+            key = (
+                journey.departure,
+                journey.arrival,
+                tuple((leg.mode, leg.line, leg.start) for leg in journey.legs),
+            )
+            if key not in found:
+                found[key] = journey
+                new += 1
+        if forward:
+            later = [j.departure for j in page if j.departure >= cursor]
+            if not new or not later:
+                break
+            cursor = max(later) + timedelta(minutes=1)
+        else:
+            earlier = [j.arrival for j in page if j.arrival <= cursor]
+            if not new or not earlier:
+                break
+            cursor = min(earlier) - timedelta(minutes=1)
+    return list(found.values()), pages, False
 
 
 @operation(
@@ -1568,11 +1808,7 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
         raise OpError("plage horaire vide")
     target = Coordinates(destination.latitude, destination.longitude)
     try:
-        if upper is not None:
-            found = ctx.routing.plan(origin, target, upper, arrive_by=True)
-        else:
-            assert lower is not None  # noqa: S101 - one bound is required above
-            found = ctx.routing.plan(origin, target, lower, arrive_by=False)
+        found, pages, incomplete = _explore_journeys(ctx.routing, origin, target, lower, upper)
     except RoutingUnavailableError as exc:
         return {"status": "error", "detail": f"routage indisponible : {exc}"}
     candidates = [
@@ -1584,7 +1820,10 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
         return {
             "status": "no_candidate",
             "explored": len(found),
-            "detail": "aucun trajet dans la plage explorée",
+            "pages": pages,
+            "exploration_incomplete": incomplete,
+            "detail": "aucun trajet dans la plage explorée"
+            + (" (exploration interrompue par une panne de routage)" if incomplete else ""),
         }
     keys: dict[str, Callable[[Journey], Any]] = {
         "shortest": lambda j: (j.duration, j.arrival, j.departure),
@@ -1598,7 +1837,10 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
         "best": _journey_out(ranked[0]),
         "alternatives": [_journey_out(j) for j in ranked[1:4]],
         "explored": len(found),
-        "note": "meilleur parmi les candidats effectivement explorés",
+        "pages": pages,
+        "exploration_incomplete": incomplete,
+        "note": "meilleur parmi les candidats effectivement explorés"
+        + (" (exploration interrompue par une panne de routage)" if incomplete else ""),
     }
 
 

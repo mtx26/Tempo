@@ -132,3 +132,22 @@ def test_impossible_recovery_is_reported_not_violated() -> None:
     days, missing = placed_days(blocked)
     assert len(missing) == 1
     assert_order_and_recovery(days)
+
+
+def test_category_windows_restrict_the_session() -> None:
+    """B07: 'trainings only in the evening' is a hard rule; the preference cannot break it."""
+    evenings = tuple(Interval(at(d, 18), at(d, 21)) for d in (1, 2, 3))
+    placed = plan_activities([run(preferred_start=at(2, 8), allowed=evenings)], [], TZ).placed[0]
+    assert any(w.start <= placed.start and placed.end <= w.end for w in evenings)
+
+
+def test_category_windows_without_room_leave_the_session_unplaced() -> None:
+    evenings = tuple(Interval(at(d, 18), at(d, 21)) for d in (1, 2, 3))
+    busy = [Interval(at(d, 17), at(d, 22)) for d in (1, 2, 3)]
+    plan = plan_activities([run(allowed=evenings)], busy, TZ)
+    assert plan.unplaced == ["run"]
+
+
+def test_empty_category_windows_mean_never() -> None:
+    plan = plan_activities([run(allowed=())], [], TZ)
+    assert plan.unplaced == ["run"]

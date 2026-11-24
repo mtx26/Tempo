@@ -237,6 +237,27 @@ class AvailabilityRow(Base):
     place_id: Mapped[str] = mapped_column(ForeignKey("place.id", ondelete="CASCADE"))
 
 
+class CategoryWindowRow(Base):
+    """Weekly window in which flexible activities of one category may be placed (B07).
+
+    A category with at least one window is restricted to its windows (hard rule); a category
+    without windows is only bounded by the daily activity hours."""
+
+    __tablename__ = "category_window"
+    __table_args__ = (
+        CheckConstraint("kind IN ('training', 'personal', 'task')", name="kind"),
+        CheckConstraint("weekday BETWEEN 0 AND 6", name="weekday_range"),
+        CheckConstraint("end_minute > start_minute", name="positive_duration"),
+        CheckConstraint("start_minute >= 0 AND end_minute <= 1440", name="minute_range"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(10))
+    weekday: Mapped[int]
+    """0 = Monday."""
+    start_minute: Mapped[int]
+    end_minute: Mapped[int]
+
+
 def _default_scheduling(context: Any) -> str:
     return "fixed" if context.get_current_parameters().get("kind") == "race" else "flexible"
 

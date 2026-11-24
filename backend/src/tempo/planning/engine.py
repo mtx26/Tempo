@@ -86,6 +86,8 @@ class TrainingRequest:
     sequence_group: str | None = None
     sequence_index: int = 0
     min_days_after_previous: int = 0
+    allowed: tuple[Interval, ...] | None = None
+    """Category windows (B07): the session must lie inside one of them."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,11 +209,20 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 sequence_group=request.sequence_group,
                 sequence_index=request.sequence_index,
                 min_days_after_previous=request.min_days_after_previous,
+                allowed=request.allowed,
             )
         )
     activity_plan = plan_activities(flexible, fixed_busy, tz)
     for missing in activity_plan.unplaced:
-        issues.append(f"training '{by_id[missing].title}': no free slot in its window")
+        rule = " and its category windows" if by_id[missing].allowed is not None else ""
+        issues.append(f"training '{by_id[missing].title}': no free slot in its window{rule}")
+    # Independent check of the hard category windows (never trust the solver alone).
+    category_violations = [
+        f"activity '{by_id[p.activity_id].title}' placed outside its category windows"
+        for p in activity_plan.placed
+        if (allowed := by_id[p.activity_id].allowed) is not None
+        and not any(utc(w.start) <= utc(p.start) and utc(p.end) <= utc(w.end) for w in allowed)
+    ]
 
     # 3-4. day-by-day mandatory travel
     located: list[LocatedEvent] = [
@@ -274,7 +285,9 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         issues=issues,
         warnings=warnings,
     )
-    if result.status is not PlanStatus.NO_SOLUTION:
+    if category_violations:
+        outcome.status, outcome.violations = OutcomeStatus.INVALID, category_violations
+    elif result.status is not PlanStatus.NO_SOLUTION:
         violations = validate_plan(problem, result)
         if violations:
             outcome.status, outcome.violations = OutcomeStatus.INVALID, violations

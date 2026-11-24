@@ -212,9 +212,9 @@ Contrat (implémenté) :
 | Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
 | Événements | `create_event` (fixe/flexible, journée entière occupée/informative, plusieurs jours, RRULE, distanciel), `update_event` (portée occurrence / suivantes / série), `cancel_event`, `set_lock`, `report_activity`, `confirm_activity` |
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
-| Lieux et règles | `upsert_place`, `delete_place`, `update_settings`, `set_weekly_availability`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location` |
+| Lieux et règles | `upsert_place`, `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location` |
 | Rappels et validation | `create_reminder`, `cancel_reminder`, `decide_proposal`, `acknowledge_notification` |
-| Planning et transport | `plan_now` (local / global, simulation `dry_run`), `search_journey` |
+| Planning et transport | `plan_now` (local / global, simulation `dry_run`), `propose_alternatives`, `search_journey` |
 
 ## 5. Modèle métier
 
@@ -481,8 +481,11 @@ Faits vérifiés le 23/11/2026 par requêtes réelles :
 
 Contrat de recherche (`search_journey`) : origine (lieu connu ou GPS fiable), destination, au
 moins une borne (arrivée avant, départ après, ou les deux = plage), objectif (durée minimale
-par défaut, arrivée au plus tôt, départ au plus tard), départage déterministe. Statuts : `ok`
-(meilleur + alternatives, « meilleur parmi les candidats explorés »), `no_candidate`,
+par défaut, arrivée au plus tôt, départ au plus tard), départage déterministe. La recherche pagine : plusieurs requêtes
+successives (au plus 5) couvrent la plage, ou 2 h avant l'arrivée limite / après le départ
+minimal. Statuts : `ok`
+(meilleur + alternatives, « meilleur parmi les candidats explorés », `exploration_incomplete`
+si une page suivante a échoué), `no_candidate`,
 `origin_unknown`, `unavailable`, `error` (panne, jamais présentée comme impossibilité).
 Trajets du planning : aller avec marge (10 min par défaut) avant l'engagement, retour sans
 marge ; dernier départ réalisable puis moins de correspondances ; aucun trajet ⇒
@@ -542,8 +545,13 @@ flowchart TD
 
 Exemple vérifié par test : « 50 h de chimie avant demain, stricte » ⇒ statut `partial`,
 minutes non planifiées par tâche, échéance stricte signalée comme manquée, jamais comme
-réussie. Les alternatives (élargir une disponibilité, reporter une échéance, …) sont simulées
-par l'assistant via `dry_run` puis proposées à l'utilisateur.
+réussie. `propose_alternatives` simule ensuite, sans rien publier ni modifier, des alternatives
+déterministes par tâche touchée (au plus 3) : reporter l'échéance (plus petit report essayé
+parmi +2, +7, +14, +28 jours qui résout), rendre souple une échéance stricte, réduire le volume
+à ce qui tient. Chaque alternative donne le résultat réel de sa simulation (reliquat, retard,
+échéance stricte manquée). Élargir une disponibilité reste une simulation `dry_run` de
+l'assistant (les heures à ouvrir sont un choix de l'utilisateur). Rien n'est appliqué sans
+accord.
 
 ## 9. Validation, propositions et concurrence
 
@@ -666,12 +674,12 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures. **Flux iCal réel de l'université non testé** (URL non fournie). |
 | B05 Études | Vérifié | 15 h, blocs de 90 min, souple/stricte, correction sans double comptage. |
 | B06 Sport | Partiel | DOCX, mise à jour sans doublon, durée inconnue, protections testés (fixtures + vrai serveur IMAP local). **Adresse réelle du coach et boîte réelle non configurées.** |
-| B07 Règles | Partiel | Fenêtres hebdomadaires + exceptions datées + préférences. **Écart** : pas de fenêtres par catégorie d'activité (les fenêtres s'appliquent au travail d'étude/tâches). |
+| B07 Règles | Vérifié | Fenêtres hebdomadaires d'étude + exceptions datées + préférences ; fenêtres par catégorie d'activité flexible (`set_category_windows` : entraînement, personnel, tâche située), contrainte dure dans CP-SAT et revérifiée par le moteur (`test_activities.py`, `test_operations.py`). |
 | B08 Lieux | Vérifié | GPS frais/périmé/imprécis, lieu prévu sans altérer le GPS, origine inconnue ⇒ question. |
-| B09 Transport | Partiel | `search_journey` vérifié sur un **vrai MOTIS** (région de Bruxelles) : arrivée avant, départ après, plage, aucun candidat (`test_motis_live.py`) ; panne et origine inconnue testées avec MOTIS simulé ; client MOTIS vérifié aussi sur le graphe national. **Écart** : une seule requête par recherche (pas de pagination MOTIS `nextPageCursor`), donc « meilleur parmi les candidats explorés ». |
+| B09 Transport | Vérifié | `search_journey` vérifié sur un **vrai MOTIS** (région de Bruxelles) : arrivée avant, départ après, plage, aucun candidat (`test_motis_live.py`) ; panne et origine inconnue testées avec MOTIS simulé ; client MOTIS vérifié aussi sur le graphe national. Exploration paginée (jusqu'à 5 requêtes, vers l'avant depuis le départ minimal ou vers l'arrière depuis l'arrivée limite, 2 h sans seconde borne ; une panne après la première page garde les candidats déjà explorés et le signale) testée avec un fournisseur paginé simulé et exécutée sur le vrai MOTIS. Le résultat reste « meilleur parmi les candidats explorés ». |
 | B10 Planning mixte | Vérifié | Cours, étude, entraînements, compétition, activités personnelles, trajets ; validateur indépendant. |
 | B11 Stabilité | Vérifié | Ajout en créneau libre sans déplacement ; conflit local avec changements minimaux ; mode global sur demande. Poids bornés, pas d'optimisation lexicographique stricte. |
-| B12 Conflits | Partiel | Manque de temps, reliquat, échéance stricte manquée, panne de routage, version invalide rejetée. **Écart** : les alternatives ne sont pas générées automatiquement (l'assistant simule avec `dry_run`) ; pas de calcul de noyau incompatible. |
+| B12 Conflits | Partiel | Manque de temps, reliquat, échéance stricte manquée, panne de routage, version invalide rejetée ; alternatives simulées automatiquement (`propose_alternatives`, rien publié). **Écart** : pas de calcul de noyau incompatible minimal (le diagnostic est par tâche). |
 | B13 Validation | Vérifié | Proposition périmée rejetée ; replanifications concurrentes sérialisées (3 fils). |
 | B14 Notifications | Vérifié | Rappel relatif qui suit sa cible, sans doublon, annulé avec la cible ; plusieurs rappels de départ. |
 | B15 Autonomie | Partiel | Jobs testés individuellement, sans LLM. **Fonctionnement prolongé (soak) non mesuré.** |

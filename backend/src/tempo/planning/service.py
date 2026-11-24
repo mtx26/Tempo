@@ -29,6 +29,7 @@ from tempo.db.models import (
     AuditEntry,
     AvailabilityExceptionRow,
     AvailabilityRow,
+    CategoryWindowRow,
     FixedEventRow,
     NotificationRow,
     PlaceAliasRow,
@@ -282,6 +283,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         )
     )
     activity_rows = list(activities)
+    category_rows = list(session.scalars(select(CategoryWindowRow)))
     activities_by_group: dict[str, list[ActivityRow]] = {}
     for act in activity_rows:
         if act.sequence_group is not None:
@@ -328,6 +330,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
                     act.sequence_group,
                     act.sequence_index or 0,
                     _recovery_days(act, activities_by_group),
+                    _category_allowed(category_rows, act, tz),
                 )
             )
 
@@ -412,6 +415,26 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         buffer=buffer,
     )
     return LoadedInput(data, task_ids, spread)
+
+
+def _category_allowed(
+    rows: list[CategoryWindowRow], act: ActivityRow, tz: ZoneInfo
+) -> tuple[Interval, ...] | None:
+    """Category windows covering the activity's window (B07), or None if unrestricted."""
+    mine = [r for r in rows if r.kind == act.kind]
+    if not mine:
+        return None
+    allowed: list[Interval] = []
+    day = act.earliest_start_at.astimezone(tz).date()
+    last = act.latest_end_at.astimezone(tz).date()
+    while day <= last:
+        for row in mine:
+            if row.weekday == day.weekday():
+                begin, finish = _wall_clock(day, row.start_minute, row.end_minute, tz)
+                if utc(finish) > utc(begin):
+                    allowed.append(Interval(begin, finish))
+        day += timedelta(days=1)
+    return tuple(allowed)
 
 
 MAX_RECOVERY_DAYS = 2
