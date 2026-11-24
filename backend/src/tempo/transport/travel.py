@@ -134,10 +134,10 @@ def _journey_warnings(plan: TravelPlan, journey: Journey, label: str) -> None:
         late = max(leg.delay, leg.arrival_delay)
         if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
             minutes = int(late.total_seconds() // 60)
-            _warn(plan, f"live delay +{minutes} min on {leg.line or leg.mode} ({label})")
+            _warn(plan, f"retard en temps réel +{minutes} min sur {leg.line or leg.mode} ({label})")
     for alert in journey.timed_disruptions:
         if alert.severe:
-            _warn(plan, f"disruption notice {alert.effect}: {alert.header} ({label})")
+            _warn(plan, f"perturbation {alert.effect} : {alert.header} ({label})")
     agencies = sorted(
         {leg.agency or leg.mode for leg in journey.legs for a in leg.alerts if not a.impact_periods}
     )

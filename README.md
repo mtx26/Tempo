@@ -134,7 +134,7 @@ Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou de
 | `TEMPO_TIMEZONE` | api, worker | `Europe/Brussels` par défaut. |
 | `tempo_ics_url` (secret) | worker | URL iCal de l'université (contient souvent un jeton personnel). |
 | `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`, `TEMPO_TRAINING_ALLOWED_SENDER`, secret `tempo_training_imap_password` | worker | Import du programme du coach : seule l'adresse exacte autorisée est lue (DMARC/DKIM exigés par défaut). Désactivé tant que tout n'est pas défini. |
-| `tempo_relay_bmc_partner_key` / `tempo_bmc_partner_key` (secrets, facultatifs) | relais / worker | Clé Belgian Mobility Standard (temps réel TEC et De Lijn, quota STIB). Sans clé : SNCB seulement, toutes les 30 min. |
+| `tempo_relay_bmc_partner_key` / `tempo_bmc_partner_key` (secrets, facultatifs) | relais / mise à jour des données | Clé Belgian Mobility Standard (temps réel TEC et De Lijn, quota du portail). Sans clé : SNCB seulement, toutes les 30 min. |
 
 Côté Home Assistant (intégration) : URL interne du backend, jeton, `device_tracker` du
 téléphone, service `notify` facultatif, puis option *Utiliser la zone domicile comme domicile

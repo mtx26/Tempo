@@ -66,14 +66,17 @@ def _warnings(journey: Journey) -> list[str]:
         late = max(leg.delay, leg.arrival_delay)
         if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
             minutes = int(late.total_seconds() // 60)
-            found.append(f"live delay +{minutes} min on {leg.line or leg.mode}")
+            found.append(f"retard en temps réel +{minutes} min sur {leg.line or leg.mode}")
     found.extend(
-        f"disruption notice {alert.effect}: {alert.header}"
+        f"perturbation {alert.effect} : {alert.header}"
         for alert in journey.timed_disruptions
         if alert.severe
     )
     if journey.static_transit_legs:
-        found.append("some legs use the static timetable only (no live data)")
+        found.append(
+            "horaire théorique pour une partie du trajet : pas de temps réel, ponctualité "
+            "non confirmée"
+        )
     return found
 
 

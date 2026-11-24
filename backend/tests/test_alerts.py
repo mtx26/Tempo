@@ -135,8 +135,7 @@ def test_alerts_break_ties_but_never_exclude_a_journey() -> None:
     assert only_disrupted.blocks[0].journey is disrupted
     assert not only_disrupted.issues
     assert only_disrupted.warnings == [
-        "disruption notice NO_SERVICE: Ligne interrompue "
-        "(Kot -> Campus (2026-12-01T08:50:00+00:00))"
+        "perturbation NO_SERVICE : Ligne interrompue (Kot -> Campus (2026-12-01T08:50:00+00:00))"
     ]
 
 
@@ -161,7 +160,9 @@ def test_live_delay_is_reported_and_travel_uses_live_times() -> None:
     plan = plan_day_travel([lecture()], Fixed([late]), start_place=HOME)
     block = plan.blocks[0]
     assert block.start == DAY.replace(hour=8, minute=7)
-    assert plan.warnings == ["live delay +7 min on E69 (Kot -> Campus (2026-12-01T08:50:00+00:00))"]
+    assert plan.warnings == [
+        "retard en temps réel +7 min sur E69 (Kot -> Campus (2026-12-01T08:50:00+00:00))"
+    ]
 
 
 def test_live_delay_that_breaks_the_buffer_makes_the_journey_infeasible() -> None:
@@ -175,7 +176,7 @@ def test_return_trip_warnings() -> None:
     back = journey(11, 5, alerts=(NO_SERVICE,))
     plan = plan_day_travel([lecture()], Fixed([back]), start_place=CAMPUS, end_place=HOME)
     assert plan.blocks[0].journey is back
-    assert plan.warnings and plan.warnings[0].startswith("disruption notice NO_SERVICE")
+    assert plan.warnings and plan.warnings[0].startswith("perturbation NO_SERVICE")
 
 
 def test_untimed_severe_notices_are_summarised_once_per_plan() -> None:
@@ -225,7 +226,9 @@ def test_arrival_delay_is_reported() -> None:
     late_arrival = Journey((leg,), start, start + timedelta(minutes=46), 0, "test")
     assert late_arrival.max_delay == timedelta(minutes=6)
     plan = plan_day_travel([lecture()], Fixed([late_arrival]), start_place=HOME)
-    assert plan.warnings == ["live delay +6 min on E69 (Kot -> Campus (2026-12-01T08:50:00+00:00))"]
+    assert plan.warnings == [
+        "retard en temps réel +6 min sur E69 (Kot -> Campus (2026-12-01T08:50:00+00:00))"
+    ]
 
 
 def test_untimed_notices_do_not_bias_the_choice() -> None:

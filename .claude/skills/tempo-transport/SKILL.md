@@ -1,6 +1,6 @@
 ---
 name: tempo-transport
-description: Verify MOTIS and Belgian feed integration, real-time and STIB caveats, arrival-by, phone GPS, future event-chain origin, walking, transfers, safety buffers, alerts.
+description: Verify MOTIS and Belgian feed integration, real-time caveats (STIB: static GTFS only), arrival-by, phone GPS, future event-chain origin, walking, transfers, safety buffers, alerts.
 ---
 # tempo-transport
 
@@ -8,7 +8,7 @@ description: Verify MOTIS and Belgian feed integration, real-time and STIB cavea
 
 ## Workflow
 1. Read `CLAUDE.md` and the relevant sections of `ARCHITECTURE.md` (and `README.md` for operations).
-2. Verify MOTIS and Belgian feed integration, real-time and STIB caveats, arrival-by, phone GPS, future event-chain origin, walking, transfers, safety buffers, alerts.
+2. Verify MOTIS and Belgian feed integration, real-time caveats (STIB: static GTFS only), arrival-by, phone GPS, future event-chain origin, walking, transfers, safety buffers, alerts.
 3. Identify hard constraints, security boundaries and testable acceptance criteria.
 4. Perform safe local changes only; request approval for production/destructive operations.
 5. Run and report relevant tests, lint, type checks and integration checks (or explicitly say why unavailable).

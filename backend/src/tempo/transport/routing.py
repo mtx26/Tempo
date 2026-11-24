@@ -78,8 +78,6 @@ class Leg:
     line: str | None = None
     agency: str | None = None
     distance_m: float | None = None
-    origin_stop_id: str | None = None
-    """MOTIS stop id of the boarding stop (e.g. ``stib_0470F``) for realtime lookups."""
     alerts: tuple[ServiceAlert, ...] = ()
 
     def __post_init__(self) -> None:
@@ -135,7 +133,7 @@ class Journey:
 
     @property
     def static_transit_legs(self) -> tuple[Leg, ...]:
-        """Transit legs without live data (e.g. STIB): label them "static timetable only"."""
+        """Transit legs without live data: static timetable only, never "on time"."""
         return tuple(leg for leg in self.legs if leg.is_transit and not leg.realtime)
 
     @property

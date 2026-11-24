@@ -156,7 +156,7 @@ supplémentaire.
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
 | `planning/` | Chargement des entrées, moteur (`engine.py`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), vues. |
 | `scheduler/` | CP-SAT : étude (`solver.py`), activités flexibles (`activities.py`), validateur indépendant (`validate.py`). |
-| `transport/` | Lieux, position, client MOTIS, trajets obligatoires, contrôle de départ, relais GTFS-RT, flux belges, STIB temps réel, mise à jour GTFS. |
+| `transport/` | Lieux, position, client MOTIS, trajets obligatoires, contrôle de départ, relais GTFS-RT, flux belges, mise à jour GTFS. |
 | `sync/` | iCal (`ics.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
 | `worker/` | Boucle de jobs durables (`job_run`) : iCal, séries, replanification, rappels, contrôle de départ, e-mails, rétention. |
 | `../tempo-homeassistant` | Intégration HACS `custom_components/tempo` (dépôt séparé). |
@@ -462,16 +462,16 @@ flowchart LR
  RT[TripUpdates et Alerts TEC, SNCB, De Lijn] --> R[Relais interne tempo-rt-relay]
  R --> M
  M <-->|/api/v6/plan| C[Client Tempo]
- S[STIB WaitingTimes à la demande] --> C
 ```
 
 Faits vérifiés le 23/11/2026 par requêtes réelles :
 - Belgian Mobility Open Data : 4 GTFS statiques + TripUpdates et Alerts pour TEC, SNCB et
   De Lijn, hôte `api-management-discovery-production.azure-api.net/api/gtfs/feed/<op>/...`
   (`?format=protobuf` obligatoire pour le temps réel). L'hôte documenté
-  `opendata-discovery-gtfs-realtime...` n'avait pas d'enregistrement DNS. STIB : statique
-  seulement en GTFS ; temps réel STIB via `api/datasets/stibmivb/rt/WaitingTimes` (à la
-  demande, cache 15 min, plafonné).
+  `opendata-discovery-gtfs-realtime...` n'avait pas d'enregistrement DNS. STIB : GTFS statique
+  seulement. MOTIS est la seule source d'itinéraires : les trajets STIB (et tout exploitant
+  sans temps réel) suivent l'horaire théorique et sont annoncés comme tels (« horaire
+  théorique, ponctualité non confirmée »), jamais comme à l'heure.
 - Quotas indicatifs : anonyme 100/jour ; clé Standard (en-tête `bmc-partner-key`) 12 000/jour.
   Acceptation de la clé sur cet hôte **non vérifiée** (pas de clé).
 - Relais (`transport/rt_relay.py`, une seule réplique) : détient la clé, plafonne à 80 % du

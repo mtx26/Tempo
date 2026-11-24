@@ -148,7 +148,10 @@ def test_warnings_report_delay_and_timed_disruption() -> None:
     )
     journey = trip(NOW.replace(hour=7, minute=50), delay=4, alerts=[alert])
     advice = check_departure(LECTURE, fresh(), Provider([journey]), now=NOW)
-    assert advice.warnings == ["live delay +4 min on IC", "disruption notice DETOUR: Travaux"]
+    assert advice.warnings == [
+        "retard en temps réel +4 min sur IC",
+        "perturbation DETOUR : Travaux",
+    ]
 
 
 def test_naive_now_is_refused() -> None:
