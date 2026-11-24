@@ -5,7 +5,59 @@ Written 2026-11-23 for a future model/session. **This file is authoritative over
 
 ---
 
-## 0. Session 3 summary (2026-11-23, latest)
+## 00. Session 4 — stopped by the user on 2026-11-24: WHAT REMAINS TO DO (read first)
+
+Tempo is **NOT finished**. Nothing pushed, published or deployed. Last commit `406b964`.
+
+### A. Uncommitted work to verify then commit (stopped before the final test run)
+- **Backend** (`git status`): protected-activity conflicts (`planning/service.py`
+  `_activity_conflicts`, handler `unlock_activity`), coach changes on protected sessions as
+  `coach_plan_change` proposals (`sync/coach_import.py`, handler in `api/interpret.py`), race
+  keywords narrowed (`sync/coach_plan.py`), configurable departure reminders
+  (`worker/jobs.py` `_reminder`, setting `reminder_minutes`), conversational actions
+  approve/reject/"c'est fait" (`ai/actions.py`, `api/interpret.py`), tests
+  `tests/integration/test_review_gaps.py` (4 passed) + `test_coach_plan.py`.
+  To do: `uv run mypy src tests`, full suite with PostgreSQL + MOTIS + HA contract, then commit.
+- **HA integration** (`../tempo-homeassistant`, many modified files + `tests/test_settings.py`):
+  review fixes in progress by an agent that was STOPPED mid-way (settings services
+  set_home/set_settings/add_stay/clear_stays, approval confirmation + no double approval,
+  admin-only dashboard services, Markdown escaping, generic conversation errors, notification
+  action checks). State unknown: run the WSL suite (`~/.venvs/tempo-ha`), ruff, mypy; finish
+  or revert the incomplete parts, then commit.
+
+### B. Open roadmap work (milestones 9-16, docs/ROADMAP.md)
+1. **Real Home Assistant validation** (task #4): HA 2026.10.4 container + dev stack
+   (`deploy/compose.dev.yml`, image already pulled): onboarding via REST, config flow, entities,
+   services, conversation agent, dashboard, position push. Never done yet.
+2. **Resilience / prolonged operation / isolated Swarm** (task #5): DB, MOTIS and portal
+   outages + recovery, soak run, `deploy/stack.yml` deployed in an isolated local Swarm (dind)
+   with backup, restore, update and rollback. Only `docker stack config` + component tests done.
+3. **Documentation consolidation** (task #6): fix every obsolete/contradictory statement found
+   by the architecture review (TRAINING_EMAILS.md says M5b not implemented; ARCHITECTURE.md /
+   DECISIONS D013 "STIB no realtime"; ROADMAP M5 DONE+TODO and no status for 9-16;
+   HANDOFF §3 says M7/M8 not started; PROGRESS.md stale lines; SCHEDULER.md lines 5 and 48-56;
+   DEPLOYMENT.md "deploy/ is intentionally empty"); French user guide; setup notification in
+   `worker/jobs.py` must name the HA services that set the home place.
+4. Remaining review gaps not addressed: study block ids change at each re-plan (HA actions on
+   an old id), return trips not re-checked near departure, no automatic re-plan on live delay,
+   recovery constraints only within one coach week, STIB request counter not persisted.
+5. Security hardening still open: notify_bridge action ids not bound to the user (HA),
+   STIB quota counter in memory, `tempo-routing` image not pinned by digest in the stack.
+
+### C. Needs the user (cannot be done autonomously)
+- GitHub repositories (none exist; creating them = visibility decision) before any push/CI.
+- Coach's exact sender e-mail address + IMAP access + one anonymised real `.docx` plan.
+- Belgian Mobility Standard key (secret `tempo_bmc_partner_key` / `tempo_relay_bmc_partner_key`).
+- University iCal URL, phone `device_tracker`, places/aliases, availability, recovery rules.
+- Optional Anthropic API key; licence for `tempo-homeassistant`; production deployment approval.
+
+### D. Local environment notes
+- Test PostgreSQL: `dev_postgres.py` times out after an unclean stop but comes up on the printed
+  port (2026-11-24: 63715). Docker Desktop must be started manually after a reboot.
+- Dev stack containers `tempo-dev-*` may still be running (`docker compose -f
+  deploy/compose.dev.yml down` to stop; its routing volume uses an old config polling SNCB).
+
+## 0. Session 3 summary (2026-11-23)
 State: NOT finished (roadmap milestones 9-16 open); nothing pushed, published or deployed. No GitHub
 remote exists yet for either repository (push authorised only to existing repos). Remaining work needs
 the user: deployment approval + secrets (docs/DEPLOYMENT.md "Swarm deployment"), Belgian

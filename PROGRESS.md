@@ -1,5 +1,8 @@
 # Progress
 
+> **2026-11-24: session stopped by the user. Tempo is NOT finished. The list of what remains
+> (uncommitted work, open milestones, user actions) is in `docs/HANDOFF.md` section 00.**
+
 > **Read `docs/HANDOFF.md` first**: authoritative state as of 2026-11-23 (commit `d89ba6e`), interrupted work,
 > full list of what is NOT done, pending user decisions and known traps. Some status lines below are stale.
 
