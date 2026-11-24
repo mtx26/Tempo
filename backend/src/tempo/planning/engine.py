@@ -1,7 +1,7 @@
 """Deterministic planning pipeline: fixed events -> trainings -> travel -> study.
 
 Pure function over plain inputs (no database, no clock), so it can be tested exhaustively and
-re-run by the worker. Rules (ARCHITECTURE.md, ARCHITECTURE.md, ARCHITECTURE.md):
+re-run by the worker. Rules (ARCHITECTURE.md §7-8):
 
 1. University events, races and locked trainings are fixed. An event whose location text is
    not a known place/alias still blocks its time but gets no travel: reported, never guessed.
@@ -11,8 +11,9 @@ re-run by the worker. Rules (ARCHITECTURE.md, ARCHITECTURE.md, ARCHITECTURE.md):
 3. Each local day starts and ends at the day's base place: a declared stay covering local noon,
    otherwise home. There is no automatic switching between family homes.
 4. Mandatory travel between located commitments is routed (``transport.travel``); impossible
-   or unknown journeys block the gap and are reported. A day is split into outings: when two
-   commitments are more than ``RETURN_HOME_GAP`` apart the user returns to the base between them.
+   or unknown journeys block the gap and are reported. A day is split into outings: the user
+   goes back to the base between two commitments only when at least ``MIN_TIME_AT_BASE``
+   remains there after both real journeys; otherwise the journey goes directly.
 5. Study availability windows (with their place) are reduced by travel to/from commitments.
 6. CP-SAT places study; the independent validator must accept the plan, otherwise nothing is
    proposed (``status = invalid``).
@@ -37,7 +38,7 @@ from tempo.scheduler.model import (
 )
 from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import validate_plan
-from tempo.transport.itinerary import CachedRouting, TripQuery, find_trips
+from tempo.transport.itinerary import CachedRouting, Objective, TripQuery, find_trips
 from tempo.transport.location import DeclaredStay, LocatedEvent, day_base
 from tempo.transport.places import Place
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
@@ -51,7 +52,7 @@ from tempo.transport.travel import (
 )
 
 UNROUTED_TRAINING_TRAVEL = timedelta(minutes=90)
-RETURN_HOME_GAP = timedelta(hours=3)
+MIN_TIME_AT_BASE = timedelta(hours=1)
 """Between two commitments further apart than this, the user goes back to the day's base."""
 
 
@@ -196,11 +197,57 @@ def _activity_travel(
     )
 
 
-def _outings(events: list[LocatedEvent]) -> list[list[LocatedEvent]]:
+def _worth_going_back(
+    previous: LocatedEvent,
+    following: LocatedEvent,
+    base: Place | None,
+    routing: RoutingProvider,
+    buffer: timedelta,
+) -> bool:
+    """Go back to the base between two commitments only when, after both real journeys, at
+    least ``MIN_TIME_AT_BASE`` remains there; otherwise travel directly between them."""
+    if base is None or base in (previous.place, following.place):
+        return False
+    deadline = following.start - buffer
+    if utc(deadline) - utc(previous.end) < MIN_TIME_AT_BASE:
+        return False
+    try:
+        back = find_trips(
+            routing,
+            TripQuery(
+                previous.place.coordinates,
+                base.coordinates,
+                depart_after=previous.end,
+                arrive_before=deadline,
+                objective=Objective.EARLIEST_ARRIVAL,
+            ),
+        ).best
+        there = find_trips(
+            routing,
+            TripQuery(
+                base.coordinates,
+                following.place.coordinates,
+                depart_after=previous.end,
+                arrive_before=deadline,
+                objective=Objective.LATEST_DEPARTURE,
+            ),
+        ).best
+    except RoutingUnavailableError:
+        return False  # direct trip: the outage is reported when it is routed
+    return (
+        back is not None
+        and there is not None
+        and utc(there.departure) - utc(back.arrival) >= MIN_TIME_AT_BASE
+    )
+
+
+def _outings(
+    events: list[LocatedEvent], base: Place | None, routing: RoutingProvider, buffer: timedelta
+) -> list[list[LocatedEvent]]:
     ordered = sorted(events, key=lambda e: utc(e.start))
     outings: list[list[LocatedEvent]] = [[ordered[0]]]
     for event in ordered[1:]:
-        if utc(event.start) - utc(outings[-1][-1].end) > RETURN_HOME_GAP:
+        if _worth_going_back(outings[-1][-1], event, base, routing, buffer):
             outings.append([event])
         else:
             outings[-1].append(event)
@@ -284,7 +331,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 f"planned locations overlap on {day.isoformat()}: travel origin unknown "
                 "(say where you will be)"
             )
-        outings = _outings(events)
+        outings = _outings(events, base, routing, data.buffer)
         for index, outing in enumerate(outings):
             first_start = min(utc(e.start) for e in outing)
             # Already under way: the departure check (worker) handles the current trip.

@@ -62,13 +62,21 @@ from tempo.planning.service import (
     active_version,
     audit,
     get_setting,
+    place_directory,
     replan,
     set_setting,
 )
 from tempo.planning.views import schedule_items, summary
 from tempo.scheduler.model import Preferences
 from tempo.transport.itinerary import Objective, TripQuery, find_trips
-from tempo.transport.location import PhonePosition, PositionStatus, assess_position
+from tempo.transport.location import (
+    AmbiguousLocationError,
+    DeclaredStay,
+    PhonePosition,
+    PositionStatus,
+    assess_position,
+    planned_place,
+)
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
 
@@ -350,6 +358,68 @@ def get_position(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "reliable_now": status is PositionStatus.FRESH,
         "status": status.value,
     }
+
+
+class LocationIn(Strict):
+    at: datetime | None = Field(default=None, description="Instant (default: now)")
+
+
+NOW_TOLERANCE = timedelta(minutes=15)
+
+
+@operation(
+    "get_location",
+    "Where the user is or will be at an instant, from facts only: real phone GPS (now), the "
+    "journey or located activity planned then, else the day's base (planned location, else "
+    "home). Says which source was used; ambiguity is reported, never guessed.",
+    LocationIn,
+    mutates=False,
+)
+def get_location(ctx: OpContext, body: LocationIn) -> dict[str, Any]:
+    at = ctx.now if body.at is None else _local(body.at, ctx.tz)
+    out: dict[str, Any] = {"at": at.isoformat()}
+    if abs(at - ctx.now) <= NOW_TOLERANCE:
+        out["gps"] = get_position(ctx, NoInput())
+    names = {p.id: p.name for p in ctx.session.scalars(select(PlaceRow))}
+    items = schedule_items(ctx.session, at, at + timedelta(minutes=1))
+    trip = next((i for i in items if i["type"] == "travel"), None)
+    located = next((i for i in items if i["type"] != "travel" and i.get("place_id")), None)
+    if out.get("gps", {}).get("reliable_now"):
+        out.update(source="gps", detail="position réelle du téléphone")
+    elif trip is not None:
+        out.update(
+            source="travel",
+            origin=trip["origin"],
+            destination=trip["destination"],
+            detail=trip["title"],
+        )
+        return out
+    elif located is not None:
+        out.update(source="schedule", place_id=located["place_id"], detail=located["title"])
+        out["place_name"] = names.get(located["place_id"])
+        return out
+    if out.get("source") == "gps":
+        return out
+    directory = place_directory(ctx.session)
+    home_id = get_setting(ctx.session, "home_place_id")
+    home = directory.get(home_id) if home_id else None
+    stays = [
+        DeclaredStay(place, datetime.fromisoformat(s["start"]), datetime.fromisoformat(s["end"]))
+        for s in get_setting(ctx.session, "stays", []) or []
+        if (place := directory.get(s["place_id"])) is not None
+    ]
+    try:
+        planned = planned_place(at, stays)
+    except AmbiguousLocationError:
+        out.update(source="unknown", detail="plusieurs lieux prévus se chevauchent : demandez")
+        return out
+    if planned is not None:
+        out.update(source="planned_location", place_id=planned.id, place_name=planned.name)
+    elif home is not None:
+        out.update(source="home", place_id=home.id, place_name=home.name)
+    else:
+        out.update(source="unknown", detail="domicile non configuré")
+    return out
 
 
 def _minutes_text(value: int) -> str:
@@ -1767,14 +1837,25 @@ def propose_alternatives(ctx: OpContext, _: NoInput) -> dict[str, Any]:
     }
 
 
+ENDPOINT = (
+    "place:<id> (known place), activity:<id> (its place; its times give the default bounds), "
+    "event:<id> (university class), or gps (current phone position, immediate trips only)"
+)
+
+
 class JourneyIn(Strict):
-    origin_place_id: str | None = Field(default=None, description="Known place; or use_gps")
-    use_gps: bool = Field(
-        default=False, description="Origin = current phone position (immediate trip)"
+    origin: str = Field(min_length=3, max_length=100, description=ENDPOINT)
+    destination: str = Field(min_length=3, max_length=100, description=ENDPOINT)
+    depart_after: datetime | None = Field(
+        default=None, description="Default: end of the origin activity, if any"
     )
-    destination_place_id: str
-    depart_after: datetime | None = None
-    arrive_before: datetime | None = None
+    arrive_before: datetime | None = Field(
+        default=None, description="Default: start of the destination activity, if any"
+    )
+    window_minutes: int = Field(
+        default=120, ge=15, le=1440, description="Search window around a single bound"
+    )
+    max_alternatives: int = Field(default=3, ge=0, le=10)
     objective: Literal["shortest", "earliest_arrival", "latest_departure"] = "shortest"
     max_transfers: int | None = Field(default=None, ge=0, le=10)
     max_walk_minutes: int | None = Field(default=None, ge=0, le=180, description="Walking total")
@@ -1812,48 +1893,101 @@ def _journey_out(journey: Journey) -> dict[str, Any]:
 
 @operation(
     "search_journey",
-    "Public-transport itinerary via MOTIS: arrive before, depart after, or both (a range); "
-    "objective, criteria (max transfers, max walking) and optionally the way back. "
+    "Public-transport itinerary via MOTIS between any places, activities, classes or the "
+    "current position: arrive before, depart after, or both (a range; defaults from the "
+    "activities' times); objective, criteria (max transfers, max walking), window, number of "
+    "alternatives, and optionally the way back. "
     "Distinguishes results, no candidate, and routing outage. Never invents a journey.",
     JourneyIn,
     mutates=False,
 )
 def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
-    if body.depart_after is None and body.arrive_before is None:
-        raise OpError("indiquez au moins un départ minimal ou une arrivée maximale")
-    destination = ctx.session.get(PlaceRow, body.destination_place_id)
-    if destination is None:
-        raise OpError("destination inconnue")
-    if body.use_gps:
-        position = get_position(ctx, NoInput())
-        if not position.get("reliable_now"):
-            return {
-                "status": "origin_unknown",
-                "detail": "GPS absent, périmé ou imprécis : demandez le point de départ",
-            }
-        origin = Coordinates(position["latitude"], position["longitude"])
-    else:
-        place = ctx.session.get(PlaceRow, body.origin_place_id) if body.origin_place_id else None
-        if place is None:
-            return {"status": "origin_unknown", "detail": "point de départ inconnu : demandez-le"}
-        origin = Coordinates(place.latitude, place.longitude)
     if ctx.routing is None:
         return {"status": "unavailable", "detail": "aucun moteur de routage configuré"}
-    target = Coordinates(destination.latitude, destination.longitude)
+    origin = _endpoint(ctx, body.origin)
+    destination = _endpoint(ctx, body.destination)
+    for end in (origin, destination):
+        if isinstance(end, str):
+            return {
+                "status": "origin_unknown" if end.startswith("gps") else "place_unknown",
+                "detail": end,
+            }
+    assert not isinstance(origin, str) and not isinstance(destination, str)  # noqa: S101
+    depart_after = body.depart_after or origin.end
+    arrive_before = body.arrive_before or destination.start
+    if depart_after is None and arrive_before is None:
+        raise OpError("indiquez au moins un départ minimal ou une arrivée maximale")
     result = _search(
-        ctx.routing, origin, target, body, body.depart_after, body.arrive_before, ctx.tz
+        ctx.routing,
+        origin.coordinates,
+        destination.coordinates,
+        body,
+        depart_after,
+        arrive_before,
+        ctx.tz,
     )
+    result["from"], result["to"] = origin.name, destination.name
     if body.return_depart_after is not None or body.return_arrive_before is not None:
         result["return"] = _search(
             ctx.routing,
-            target,
-            origin,
+            destination.coordinates,
+            origin.coordinates,
             body,
             body.return_depart_after,
             body.return_arrive_before,
             ctx.tz,
         )
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class _Endpoint:
+    name: str
+    coordinates: Coordinates
+    start: datetime | None = None
+    end: datetime | None = None
+
+
+def _endpoint(ctx: OpContext, ref: str) -> "_Endpoint | str":
+    """Resolve a journey endpoint, or explain (as a string) why it cannot be used."""
+    kind, _, key = ref.partition(":")
+    if kind == "gps":
+        position = get_position(ctx, NoInput())
+        if not position.get("reliable_now"):
+            return "gps: position absente, périmée ou imprécise : demandez le point de départ"
+        return _Endpoint(
+            "position actuelle", Coordinates(position["latitude"], position["longitude"])
+        )
+    if kind == "place":
+        place = ctx.session.get(PlaceRow, key)
+        if place is None:
+            return f"lieu inconnu : {key} (demandez ses coordonnées, jamais devinées)"
+        return _Endpoint(place.name, Coordinates(place.latitude, place.longitude))
+    if kind == "activity":
+        row = ctx.session.get(ActivityRow, _uuid(key, "activity"))
+        if row is None:
+            raise OpError("activité introuvable")
+        place = (
+            None if row.place_id is None or row.remote else ctx.session.get(PlaceRow, row.place_id)
+        )
+        if place is None:
+            return f"« {row.title} » n'a pas de lieu : demandez où elle a lieu"
+        start = row.earliest_start_at if row.scheduling == "fixed" else row.planned_start_at
+        end = (
+            None
+            if start is None or row.duration_minutes is None
+            else (start + timedelta(minutes=row.duration_minutes))
+        )
+        return _Endpoint(place.name, Coordinates(place.latitude, place.longitude), start, end)
+    if kind == "event":
+        event = ctx.session.get(FixedEventRow, _uuid(key, "event"))
+        if event is None:
+            raise OpError("cours introuvable")
+        resolved = place_directory(ctx.session).resolve(event.location)
+        if resolved is None:
+            return f"lieu du cours « {event.summary} » inconnu : ajoutez un alias"
+        return _Endpoint(resolved.name, resolved.coordinates, event.start_at, event.end_at)
+    raise OpError(f"extrémité invalide : {ref} ({ENDPOINT})")
 
 
 def _search(
@@ -1879,6 +2013,7 @@ def _search(
         arrive_before=upper,
         objective=Objective(body.objective),
         max_transfers=body.max_transfers,
+        span=timedelta(minutes=body.window_minutes),
         max_walk=None
         if body.max_walk_minutes is None
         else timedelta(minutes=body.max_walk_minutes),
@@ -1904,7 +2039,7 @@ def _search(
         "status": "ok",
         "objective": body.objective,
         "best": _journey_out(found.best),
-        "alternatives": [_journey_out(j) for j in found.alternatives],
+        "alternatives": [_journey_out(j) for j in found.alternatives[: body.max_alternatives]],
         **explored,
         "note": "meilleur parmi les candidats effectivement explorés" + interrupted,
     }

@@ -84,12 +84,27 @@ def assess_position(
     return PositionStatus.FRESH
 
 
+class AmbiguousLocationError(Exception):
+    """Several planned locations cover the instant: Tempo asks instead of choosing."""
+
+
+def planned_place(at: datetime, stays: list[DeclaredStay]) -> Place | None:
+    """The planned location covering ``at`` (None if none).
+
+    Raises ``AmbiguousLocationError`` when several planned locations overlap."""
+    instant = _utc("at", at)
+    covering = [s for s in stays if _utc("start", s.start) <= instant < _utc("end", s.end)]
+    if len(covering) > 1:
+        raise AmbiguousLocationError
+    return covering[0].place if covering else None
+
+
 def day_base(day: date, stays: list[DeclaredStay], home: Place, tz: ZoneInfo) -> Place | None:
     """Where the user starts and ends ``day``: the planned location covering its noon, else
     home. Two overlapping planned locations are ambiguous: None (Tempo asks, never guesses;
     no automatic switching between homes)."""
-    noon = datetime.combine(day, time(12), tzinfo=tz).astimezone(UTC)
-    covering = [s for s in stays if _utc("start", s.start) <= noon < _utc("end", s.end)]
-    if len(covering) > 1:
+    try:
+        planned = planned_place(datetime.combine(day, time(12), tzinfo=tz), stays)
+    except AmbiguousLocationError:
         return None
-    return covering[0].place if covering else home
+    return planned or home

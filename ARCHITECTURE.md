@@ -212,7 +212,7 @@ Contrat (implémenté) :
 
 | Domaine | Opérations |
 |---|---|
-| Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
+| Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_location`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
 | Événements | `create_event` (fixe/flexible, journée entière occupée/informative, plusieurs jours, RRULE, distanciel), `update_event` (portée occurrence / suivantes / série), `cancel_event`, `set_lock`, `report_activity`, `confirm_activity` |
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
 | Lieux et règles | `upsert_place`, `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location` |
@@ -452,8 +452,10 @@ Résolution centralisée (`transport/location.py`) : position réelle seulement 
 précise (`assess_position`, utilisée aussi par `get_position`) ; chaque jour commence et finit à
 sa base (`day_base` : lieu prévu couvrant midi, sinon domicile ; deux lieux prévus qui se
 chevauchent ⇒ origine inconnue signalée, jamais devinée) ; entre deux engagements, l'origine est
-le lieu de l'engagement précédent. Deux engagements séparés de plus de 3 h ⇒ retour à la base
-entre eux. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,
+le lieu de l'engagement précédent : le trajet est direct, sauf si le retour à la base laisse
+au moins 1 h sur place une fois les deux trajets réels comptés. `get_location` donne à
+l'assistant où l'utilisateur est ou sera à un instant (GPS réel maintenant, sinon trajet ou
+activité située prévus, sinon lieu prévu, sinon domicile), avec la source utilisée. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,
 sessions de tâches situées, études hors base) reçoivent leurs trajets. Un texte de lieu iCal inconnu
 bloque le temps sans trajet et est signalé (ajouter un alias). Coordonnées jamais devinées.
 
@@ -486,29 +488,32 @@ Faits vérifiés le 23/11/2026 par requêtes réelles :
   annulations et retards viennent des TripUpdates. Un retard réel de +7 min a été observé.
 - MOTIS national : import 3 min 29 s, 1,8 Go, serveur 0,7–0,9 Go, requête médiane 100–130 ms.
 
-Contrat de recherche (`search_journey`) : origine (lieu connu ou GPS fiable), destination, au
-moins une borne (arrivée avant, départ après, ou les deux = plage ; une seule borne = fenêtre
-de 2 h autour d'elle), objectif (durée minimale par défaut, arrivée au plus tôt, départ au plus
-tard), critères (correspondances maximales, marche maximale), retour facultatif (départ après /
-arrivée avant pour le chemin inverse, même critères), départage déterministe. La recherche pagine : plusieurs requêtes
-successives (au plus 5) couvrent la plage, ou 2 h avant l'arrivée limite / après le départ
-minimal. Statuts : `ok`
-(meilleur + alternatives, « meilleur parmi les candidats explorés », `exploration_incomplete`
-si une page suivante a échoué), `no_candidate`,
-`origin_unknown`, `unavailable`, `error` (panne, jamais présentée comme impossibilité).
+Contrat de recherche (`search_journey`) : origine et destination quelconques (`place:<id>`,
+`activity:<id>`, `event:<id>` pour un cours, `gps` pour un trajet immédiat) ; bornes : arrivée
+avant, départ après ou plage, par défaut déduites des activités (fin de l'origine, début de la
+destination) ; une borne seule ⇒ fenêtre réglable (`window_minutes`, 2 h par défaut, jusqu'à
+24 h) ; objectif (durée minimale par défaut, arrivée au plus tôt, départ au plus tard) ;
+critères (correspondances, marche) ; nombre d'alternatives (`max_alternatives`, 3 par défaut,
+jusqu'à 10) ; retour facultatif. La pagination s'adapte à la fenêtre (environ une requête par
+demi-heure, de 5 à 20). Statuts : `ok` (meilleur + alternatives, « meilleur parmi les candidats
+explorés », `exploration_incomplete` si une page suivante a échoué), `no_candidate`,
+`origin_unknown`, `place_unknown`, `unavailable`, `error` (panne, jamais présentée comme
+impossibilité). Le temps réel reste distingué en interne (`realtime` par trajet et par
+segment).
 Toute sélection d'itinéraire passe par `itinerary.find_trips` (MOTIS calcule, Tempo choisit
 selon le contexte) :
 
 | Contexte | Bornes | Objectif |
 |---|---|---|
 | Aller vers un engagement | départ après l'engagement précédent, arrivée avant le début − marge (10 min) | départ au plus tard |
+| Trajet direct entre deux engagements | départ après le premier, arrivée avant le second − marge | départ au plus tard |
 | Retour à la base | départ après la fin, arrivée avant la sortie suivante du jour (sinon 6 h) | arrivée au plus tôt |
 | Estimation d'une activité flexible | autour de l'heure préférée (6 h) | durée minimale |
 | Contrôle de départ | départ maintenant, arrivée avant le début − marge ; sinon au plus tôt | départ au plus tard, puis arrivée au plus tôt |
 | Recherche en conversation | choisies par l'utilisateur (2 h autour d'une borne seule) | choisi par l'utilisateur |
 
-Départage : perturbations sévères datées, puis correspondances. Les trois meilleures
-alternatives sont conservées sur chaque trajet du planning publié. Aucun trajet ⇒
+Départage : perturbations sévères datées, puis correspondances. Toutes les alternatives
+acceptables explorées sont conservées sur chaque trajet du planning publié. Aucun trajet ⇒
 `impossible` ; panne ⇒ `unknown` ; le créneau reste bloqué et le problème est signalé. Une
 exécution de planification partage un cache : une requête identique n'atteint MOTIS qu'une fois.
 

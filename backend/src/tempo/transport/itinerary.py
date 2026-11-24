@@ -28,7 +28,10 @@ from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailable
 
 SEARCH_SPAN = timedelta(hours=2)
 """Default window around a single bound (a conversation search)."""
-MAX_PAGES = 5
+MIN_PAGES = 5
+MAX_PAGES = 20
+PAGE_SPAN = timedelta(minutes=30)
+"""Wider windows get more requests: about one per half hour, between MIN_ and MAX_PAGES."""
 STEP = timedelta(minutes=1)
 
 
@@ -122,7 +125,7 @@ class TripResult:
 
     @property
     def alternatives(self) -> list[Journey]:
-        return self.journeys[1:4]
+        return self.journeys[1:]
 
 
 def _key(journey: Journey) -> tuple[Any, ...]:
@@ -158,7 +161,8 @@ def find_trips(provider: RoutingProvider, query: TripQuery) -> TripResult:
         stop = _u(query.arrive_before) if query.arrive_before is not None else cursor + query.span
     found: dict[tuple[Any, ...], Journey] = {}
     result = TripResult()
-    while result.pages < MAX_PAGES and (cursor > stop if backward else cursor < stop):
+    budget = min(MAX_PAGES, max(MIN_PAGES, int(abs(stop - cursor) / PAGE_SPAN)))
+    while result.pages < budget and (cursor > stop if backward else cursor < stop):
         try:
             page = provider.plan(query.origin, query.destination, cursor, arrive_by=backward)
         except RoutingUnavailableError:

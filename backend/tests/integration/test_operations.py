@@ -529,8 +529,8 @@ def test_journey_search_modes_and_errors(session: Session) -> None:
     arrive = ok(
         session,
         "search_journey",
-        origin_place_id="home",
-        destination_place_id="campus",
+        origin="place:home",
+        destination="place:campus",
         arrive_before="2026-12-08T10:00",
     )
     assert arrive["status"] == "ok"
@@ -538,16 +538,16 @@ def test_journey_search_modes_and_errors(session: Session) -> None:
     depart = ok(
         session,
         "search_journey",
-        origin_place_id="home",
-        destination_place_id="campus",
+        origin="place:home",
+        destination="place:campus",
         depart_after="2026-12-08T10:00",
     )
     assert datetime.fromisoformat(depart["best"]["departure"]) >= at(8, 10)
     window = ok(
         session,
         "search_journey",
-        origin_place_id="home",
-        destination_place_id="campus",
+        origin="place:home",
+        destination="place:campus",
         depart_after="2026-12-08T09:50",
         arrive_before="2026-12-08T10:05",
     )
@@ -556,8 +556,8 @@ def test_journey_search_modes_and_errors(session: Session) -> None:
         ok(
             session,
             "search_journey",
-            use_gps=True,
-            destination_place_id="campus",
+            origin="gps",
+            destination="place:campus",
             depart_after="2026-12-08T10:00",
         )["status"]
         == "origin_unknown"
@@ -566,8 +566,8 @@ def test_journey_search_modes_and_errors(session: Session) -> None:
         OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=FakeRouting(fail=True)),
         "search_journey",
         {
-            "origin_place_id": "home",
-            "destination_place_id": "campus",
+            "origin": "place:home",
+            "destination": "place:campus",
             "depart_after": "2026-12-08T10:00",
         },
     )
@@ -624,8 +624,8 @@ def test_journey_search_explores_several_pages_of_the_range(session: Session) ->
         OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=provider),
         "search_journey",
         {
-            "origin_place_id": "home",
-            "destination_place_id": "campus",
+            "origin": "place:home",
+            "destination": "place:campus",
             "depart_after": "2026-12-08T09:00",
             "arrive_before": "2026-12-08T12:00",
         },
@@ -644,8 +644,8 @@ def test_journey_search_only_arrival_explores_earlier_pages(session: Session) ->
         OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=provider),
         "search_journey",
         {
-            "origin_place_id": "home",
-            "destination_place_id": "campus",
+            "origin": "place:home",
+            "destination": "place:campus",
             "arrive_before": "2026-12-08T12:00",
         },
     )["result"]
@@ -661,8 +661,8 @@ def test_journey_search_keeps_explored_pages_when_a_later_page_fails(session: Se
         OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=provider),
         "search_journey",
         {
-            "origin_place_id": "home",
-            "destination_place_id": "campus",
+            "origin": "place:home",
+            "destination": "place:campus",
             "depart_after": "2026-12-08T09:00",
             "arrive_before": "2026-12-08T12:00",
         },
@@ -841,8 +841,8 @@ def test_journey_search_criteria_and_return_trip(session: Session) -> None:
     seed(session)
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=TransferTimetable())
     base = {
-        "origin_place_id": "home",
-        "destination_place_id": "campus",
+        "origin": "place:home",
+        "destination": "place:campus",
         "depart_after": "2026-12-08T09:00",
         "arrive_before": "2026-12-08T11:00",
     }
@@ -877,8 +877,8 @@ def test_single_bound_search_stays_near_the_requested_time(session: Session) -> 
         ctx,
         "search_journey",
         {
-            "origin_place_id": "home",
-            "destination_place_id": "campus",
+            "origin": "place:home",
+            "destination": "place:campus",
             "arrive_before": "2026-12-08T14:00",
         },
     )["result"]
@@ -888,9 +888,105 @@ def test_single_bound_search_stays_near_the_requested_time(session: Session) -> 
         ctx,
         "search_journey",
         {
-            "origin_place_id": "home",
-            "destination_place_id": "campus",
+            "origin": "place:home",
+            "destination": "place:campus",
             "depart_after": "2026-12-08T06:00",
         },
     )["result"]
     assert datetime.fromisoformat(later["best"]["departure"]) <= at(8, 8)
+
+
+def test_direct_journey_between_two_activities_without_going_home(session: Session) -> None:
+    """From the class to the training: bounds come from the activities, no return home."""
+    seed(session)
+    concert = ok(
+        session,
+        "create_event",
+        title="Répétition",
+        scheduling="fixed",
+        start="2026-12-08T14:00",
+        duration_minutes=60,
+        place_id="campus",
+    )["activity"]
+    match = ok(
+        session,
+        "create_event",
+        title="Match",
+        scheduling="fixed",
+        start="2026-12-08T17:00",
+        duration_minutes=60,
+        place_id="club",
+    )["activity"]
+    found = ok(
+        session,
+        "search_journey",
+        origin=f"activity:{concert['id']}",
+        destination=f"activity:{match['id']}",
+        objective="latest_departure",
+    )
+    assert found["status"] == "ok" and (found["from"], found["to"]) == ("Campus", "Club")
+    assert datetime.fromisoformat(found["best"]["departure"]) >= at(8, 15)
+    assert datetime.fromisoformat(found["best"]["arrival"]) <= at(8, 17)
+    remote = ok(
+        session,
+        "create_event",
+        title="Visio",
+        scheduling="fixed",
+        start="2026-12-08T19:00",
+        duration_minutes=30,
+        remote=True,
+    )["activity"]
+    nowhere = ok(
+        session,
+        "search_journey",
+        origin=f"activity:{remote['id']}",
+        destination="place:home",
+        depart_after="2026-12-08T19:30",
+    )
+    assert nowhere["status"] == "place_unknown" and "pas de lieu" in nowhere["detail"]
+    assert "invalide" in err(
+        session,
+        "search_journey",
+        origin="home",
+        destination="place:club",
+        depart_after="2026-12-08T10:00",
+    )
+
+
+def test_wide_window_and_more_alternatives(session: Session) -> None:
+    seed(session)
+    provider = PagedTimetable()
+    found = run_operation(
+        OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=provider),
+        "search_journey",
+        {
+            "origin": "place:home",
+            "destination": "place:campus",
+            "depart_after": "2026-12-08T06:00",
+            "window_minutes": 600,
+            "max_alternatives": 8,
+        },
+    )["result"]
+    assert found["pages"] > 5 and len(found["alternatives"]) == 8
+    assert datetime.fromisoformat(found["best"]["departure"]) == at(8, 9, 45)  # the fast one
+
+
+def test_assistant_reads_where_the_user_is_or_will_be(session: Session) -> None:
+    """B08: location through a business operation: activity, journey, planned stay, home."""
+    seed(session)
+    replan(session, FakeRouting(), NOW, TZ, reason="t")
+    in_class = ok(session, "get_location", at="2026-12-08T10:30")
+    assert (in_class["source"], in_class["place_id"]) == ("schedule", "campus")
+    assert ok(session, "get_location", at="2026-12-08T09:50")["source"] == "travel"
+    assert ok(session, "get_location", at="2026-12-08T21:00")["place_id"] == "home"
+    ok(
+        session,
+        "set_planned_location",
+        place_id="club",
+        start="2026-12-13T00:00",
+        end="2026-12-14T00:00",
+    )
+    stay = ok(session, "get_location", at="2026-12-13T15:00")
+    assert (stay["source"], stay["place_id"]) == ("planned_location", "club")
+    now = ok(session, "get_location")
+    assert now["source"] in ("gps", "schedule", "home") and "gps" in now

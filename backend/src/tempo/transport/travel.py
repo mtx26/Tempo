@@ -37,7 +37,6 @@ MAX_TRAVEL = timedelta(hours=6)
 """Events further than this from a study window are not routed for it."""
 UNRESOLVED_RETURN_BLOCK = timedelta(hours=2)
 """Conservative time kept free after the last event when no return journey is known."""
-MAX_ALTERNATIVES = 3
 
 
 class TravelStatus(StrEnum):
@@ -166,7 +165,7 @@ def _outbound(
             target.place,
             TravelStatus.ROUTED,
             journey,
-            tuple(found.alternatives[:MAX_ALTERNATIVES]),
+            tuple(found.alternatives),
         )
     )
     _journey_warnings(plan, journey, _label(origin, target.place, deadline))
@@ -193,7 +192,7 @@ def _return_trip(
                 arrive_before=return_by,
                 objective=Objective.EARLIEST_ARRIVAL,
             )
-            journey, alternatives = found.best, tuple(found.alternatives[:MAX_ALTERNATIVES])
+            journey, alternatives = found.best, tuple(found.alternatives)
         except RoutingUnavailableError as exc:
             plan.issues.append(f"routing unavailable for return {label}: {exc}")
             status = TravelStatus.UNKNOWN

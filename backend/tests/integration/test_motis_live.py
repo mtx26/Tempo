@@ -117,7 +117,7 @@ def test_assistant_journey_search_on_real_motis(session: object, motis: MotisCli
         )
     session.flush()
     ctx = OpContext(session=session, now=datetime.now(UTC), tz=TZ, actor="test", routing=motis)
-    common = {"origin_place_id": "central", "destination_place_id": "ulb"}
+    common = {"origin": "place:central", "destination": "place:ulb"}
 
     arrive = run_operation(
         ctx, "search_journey", {**common, "arrive_before": tomorrow_at(9).isoformat()}

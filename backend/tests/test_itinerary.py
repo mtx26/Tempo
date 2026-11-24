@@ -98,7 +98,7 @@ def test_shortest_explores_the_whole_window_and_keeps_alternatives() -> None:
     provider = Timetable()
     result = find_trips(provider, TripQuery(A, B, depart_after=at(9), arrive_before=at(11)))
     assert result.best is not None and result.best.departure == at(9, 45)
-    assert 1 < result.pages <= MAX_PAGES and len(result.alternatives) == 3
+    assert 1 < result.pages <= MAX_PAGES and len(result.alternatives) == 4  # all kept
 
 
 def test_criteria_exclude_and_are_reported() -> None:

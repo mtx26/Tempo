@@ -204,3 +204,32 @@ def test_mandatory_travel_blocks_keep_their_alternatives() -> None:
     routed = [b for b in outcome.travel if b.journey is not None]
     assert routed and all(b.alternatives for b in routed)
     assert all(b.journey not in b.alternatives for b in routed)
+
+
+def _day9_legs(second_start: datetime) -> list[tuple[str, str]]:
+    commitments = [
+        Commitment("c", "Analyse", at(9, 10), at(9, 12), CommitmentKind.CLASS, CAMPUS),
+        Commitment(
+            "m",
+            "Réunion",
+            second_start,
+            second_start + timedelta(hours=1),
+            CommitmentKind.OTHER,
+            CLUB,
+        ),
+    ]
+    outcome = run_planning(week(commitments=commitments, trainings=[]), FakeRouting())
+    day9 = sorted((b for b in outcome.travel if b.start.day == 9), key=lambda b: b.start)
+    return [(b.origin.id, b.destination.id) for b in day9]
+
+
+def test_going_home_between_commitments_only_when_worth_it() -> None:
+    """30 min trips, 10 min margin: 2 h 30 between them leaves 1 h 20 at home (go home);
+    1 h 40 leaves 30 min (go directly). No fixed 3 h rule."""
+    assert _day9_legs(at(9, 14, 30)) == [
+        ("home", "campus"),
+        ("campus", "home"),
+        ("home", "club"),
+        ("club", "home"),
+    ]
+    assert _day9_legs(at(9, 13, 40)) == [("home", "campus"), ("campus", "club"), ("club", "home")]
