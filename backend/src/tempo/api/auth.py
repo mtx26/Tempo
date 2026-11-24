@@ -1,5 +1,5 @@
 """Bearer-token checks for the private API: rotation-friendly comparison and a limiter of
-failed attempts per client address (security review items, docs/HANDOFF.md)."""
+failed attempts per client address (security review items, README.md)."""
 
 import hmac
 import threading

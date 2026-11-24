@@ -507,7 +507,7 @@ def _deleted(session: Session, statement: Any) -> int:
 
 def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
     """Purge personal data that is no longer useful. ``audit_entry`` is append-only for the
-    runtime role and is pruned only by the owner role (docs/DEPLOYMENT.md)."""
+    runtime role and is pruned only by the owner role (README.md)."""
     with sessions() as session:
         old_versions = select(ScheduleVersion.id).where(
             ScheduleVersion.state.in_(("superseded", "rejected")),

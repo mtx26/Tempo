@@ -1,6 +1,6 @@
 """Optional LLM interpretation (Claude) for text the deterministic parser does not understand.
 
-Principles (docs/REQUIREMENTS.md, CLAUDE.md): the AI only INTERPRETS; deterministic code then
+Principles (ARCHITECTURE.md, CLAUDE.md): the AI only INTERPRETS; deterministic code then
 validates every field (dates in range, positive durations, known places...) exactly like a
 user request, and the planner decides feasibility. Tempo works fully without it: when no API
 key is configured, ``build_interpreter`` returns ``None`` and callers report "not understood".

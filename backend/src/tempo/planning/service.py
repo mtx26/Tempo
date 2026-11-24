@@ -5,7 +5,7 @@ Persistence rules:
   ``active`` schedule version, the previous one is ``superseded`` (kept for history).
 - Locked study blocks (``study_block.locked``, version NULL) are protected: they are never moved.
   A fixed commitment colliding with one creates a ``proposal`` (kind ``unlock_block``); only the
-  user's approval unlocks it (docs/REQUIREMENTS.md: protected changes need approval).
+  user's approval unlocks it (ARCHITECTURE.md: protected changes need approval).
 - An ``invalid`` or ``no_solution`` outcome never replaces the active plan; it is recorded as a
   ``rejected`` version and notified.
 - Issues (impossible journeys, unplanned hard deadlines, unknown locations...) become

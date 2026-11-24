@@ -1,4 +1,4 @@
-"""Coach weekly plan (.docx) parsing on synthetic fixtures (docs/TRAINING_EMAILS.md)."""
+"""Coach weekly plan (.docx) parsing on synthetic fixtures (ARCHITECTURE.md)."""
 
 import io
 import zipfile

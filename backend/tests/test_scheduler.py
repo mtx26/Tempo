@@ -1,6 +1,6 @@
 """Behavioural tests for the CP-SAT study planner.
 
-Assertions target properties required by docs/REQUIREMENTS.md, not exact placements, because
+Assertions target properties required by ARCHITECTURE.md, not exact placements, because
 CP-SAT may return any optimal solution. Every produced plan is also checked by the independent
 deterministic validator.
 """

@@ -2,7 +2,7 @@
 
 Binds the container port on the internal overlay network only; Home Assistant reaches it there.
 ``server_header=False`` and no proxy headers (nothing sits in front of it). Open security items
-before deployment (docs/HANDOFF.md): 401 rate limiting and two valid tokens for rotation.
+before deployment (README.md): 401 rate limiting and two valid tokens for rotation.
 """
 
 import logging

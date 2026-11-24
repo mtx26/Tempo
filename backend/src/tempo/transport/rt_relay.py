@@ -1,6 +1,6 @@
 """Internal GTFS-RT relay between the Belgian Mobility portal and MOTIS.
 
-Why a relay (docs/TRANSPORT.md "Belgian feeds"):
+Why a relay (ARCHITECTURE.md "Belgian feeds"):
 - one place enforces the portal quota (budget checked at start, rolling 24 h request log that
   survives restarts when ``state_file`` is set, ``429`` back-off), whatever polling interval
   MOTIS is configured with. Run exactly ONE replica: the request log is per process;

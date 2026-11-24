@@ -1,6 +1,6 @@
 """Training e-mails from ONE explicitly authorised sender (milestone 5).
 
-Access is narrow by construction (docs/REQUIREMENTS.md: never the whole mailbox):
+Access is narrow by construction (ARCHITECTURE.md: never the whole mailbox):
 - the mailbox is opened read-only (``EXAMINE``) and searched server-side with
   ``FROM <authorised sender> SINCE <date>``; other messages are never downloaded;
 - each downloaded message's ``From`` address is checked again (exact match) and discarded

@@ -1,4 +1,4 @@
-"""Places, phone position freshness and future-trip origin inference (docs/REQUIREMENTS.md).
+"""Places, phone position freshness and future-trip origin inference (ARCHITECTURE.md).
 
 Rules under test: current location only from the configured HA phone tracker, checked for
 freshness and accuracy; future origins come from the event chain or an explicit declaration,

@@ -1,6 +1,6 @@
 """Integration tests against a REAL nationwide MOTIS (STIB, SNCB, TEC, De Lijn + OSM Belgium).
 
-Requires ``TEMPO_TEST_MOTIS_BE_URL`` (see routing/README.md "Nationwide"). Without it every test
+Requires ``TEMPO_TEST_MOTIS_BE_URL`` (see README.md "MOTIS local"). Without it every test
 is SKIPPED. Invariants only (operator coverage, deadlines, parsing), never exact times.
 """
 

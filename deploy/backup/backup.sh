@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tempo PostgreSQL backup (runs in a postgres client container; see docs/DEPLOYMENT.md).
+# Tempo PostgreSQL backup (runs in a postgres client container; see README.md).
 # Env: PGHOST PGPORT PGUSER PGDATABASE, PGPASSWORD_FILE (Docker secret), BACKUP_DIR,
 #      BACKUP_KEEP_DAYS (default 14). Writes custom-format dumps and verifies each one.
 set -eu

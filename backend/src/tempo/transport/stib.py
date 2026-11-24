@@ -1,6 +1,6 @@
 """STIB-MIVB realtime (milestone 13): official waiting times and traveller information.
 
-Facts verified on 2026-11-23 (docs/TRANSPORT.md "STIB realtime"):
+Facts verified on 2026-11-23 (ARCHITECTURE.md "STIB realtime"):
 - STIB publishes NO GTFS-RT; the Belgian Mobility portal serves JSON snapshots anonymously at
   ``<BASE>/rt/WaitingTimes`` and ``<BASE>/rt/TravellersInformation`` (CC BY 4.0). Nested fields
   (``passingtimes``, ``content``, ``lines``, ``points``) are JSON strings to decode again.

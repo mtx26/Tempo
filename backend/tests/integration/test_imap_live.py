@@ -1,7 +1,7 @@
 """ImapSource against a REAL IMAP server (local GreenMail container, test data only).
 
 Requires ``TEMPO_TEST_IMAP=127.0.0.1`` with GreenMail listening on 3025 (SMTP) / 3993 (IMAPS),
-see docs/DEPLOYMENT.md. SKIPPED otherwise.
+see README.md. SKIPPED otherwise.
 """
 
 import os

@@ -1,4 +1,4 @@
-"""Placement of flexible training sessions (docs/REQUIREMENTS.md: trainings are flexible, races
+"""Placement of flexible training sessions (ARCHITECTURE.md: trainings are flexible, races
 are fixed).
 
 A training keeps its prescribed duration and content; only its day/time moves, inside its window

@@ -7,7 +7,7 @@
 - Floating (naive) times are interpreted in the configured default timezone; a TZID that cannot
   be resolved is rejected rather than reinterpreted (no fabricated times).
 
-Known limitations (documented in docs/DECISIONS.md D012): moving the master DTSTART of a series,
+Known limitations (documented in ARCHITECTURE.md D012): moving the master DTSTART of a series,
 or turning a single event into a series, changes occurrence keys, so the diff reports
 removed + added instead of changed; floating times in a DST gap/overlap are not flagged.
 """

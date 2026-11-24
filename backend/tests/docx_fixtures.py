@@ -1,4 +1,4 @@
-"""Synthetic coach plans (.docx) reproducing the documented format (docs/TRAINING_EMAILS.md).
+"""Synthetic coach plans (.docx) reproducing the documented format (ARCHITECTURE.md).
 
 No real personal data: built in memory from the structure described by the user, until an
 anonymised real document is provided.

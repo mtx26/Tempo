@@ -1,4 +1,4 @@
-"""Weekly training plan from the coach's ``.docx`` attachment (M5b, docs/TRAINING_EMAILS.md).
+"""Weekly training plan from the coach's ``.docx`` attachment (M5b, ARCHITECTURE.md).
 
 Format: a date range ``Semaine du 23 au 29/11/2026`` and one table whose header row holds the
 weekdays (Monday..Sunday) and whose other rows (objective, theme, detailed instructions) hold the

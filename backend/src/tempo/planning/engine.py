@@ -1,7 +1,7 @@
 """Deterministic planning pipeline: fixed events -> trainings -> travel -> study.
 
 Pure function over plain inputs (no database, no clock), so it can be tested exhaustively and
-re-run by the worker. Rules (docs/REQUIREMENTS.md, docs/SCHEDULER.md, docs/TRANSPORT.md):
+re-run by the worker. Rules (ARCHITECTURE.md, ARCHITECTURE.md, ARCHITECTURE.md):
 
 1. University events, races and locked trainings are fixed. An event whose location text is
    not a known place/alias still blocks its time but gets no travel: reported, never guessed.

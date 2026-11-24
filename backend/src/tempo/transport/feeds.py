@@ -1,7 +1,7 @@
 """Registry of the Belgian public transport feeds used by Tempo, and the polling quota budget.
 
 Every URL below was fetched successfully on 2026-11-23 (anonymous access, HTTP 200, protobuf
-for realtime, ZIP for static) — see docs/TRANSPORT.md "Belgian feeds". Nothing here is guessed:
+for realtime, ZIP for static) — see ARCHITECTURE.md "Belgian feeds". Nothing here is guessed:
 
 - Host ``api-management-discovery-production.azure-api.net`` is the one used in the Belgian
   Mobility knowledge-base samples. The portal also documents

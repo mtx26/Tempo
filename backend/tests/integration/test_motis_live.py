@@ -1,6 +1,6 @@
 """Integration tests against a REAL running MOTIS instance.
 
-Requires ``TEMPO_TEST_MOTIS_URL`` (e.g. http://127.0.0.1:18080, see routing/README.md) serving
+Requires ``TEMPO_TEST_MOTIS_URL`` (e.g. http://127.0.0.1:18080, see README.md "MOTIS local") serving
 the Brussels test region (STIB + SNCB GTFS, SNCB GTFS-RT, BBBike Brussels OSM). Without it every
 test here is SKIPPED with an explicit reason.
 
@@ -96,3 +96,67 @@ def test_day_travel_is_routed_end_to_end_with_real_motis(motis: MotisClient) -> 
     outbound = plan.blocks[0]
     assert outbound.journey is not None
     assert outbound.journey.arrival.astimezone(UTC) <= (tomorrow_at(9) - timedelta(minutes=10))
+
+
+def test_assistant_journey_search_on_real_motis(session: object, motis: MotisClient) -> None:
+    """B09 on the REAL MOTIS through the operation catalogue: arrive before, depart after,
+    a range, and an explicit no-candidate answer for an impossible range."""
+    from sqlalchemy.orm import Session
+
+    from tempo.assistant.catalog import OpContext, run_operation
+    from tempo.db.models import PlaceRow
+
+    assert isinstance(session, Session)
+    for place in (CENTRAL, ULB):
+        session.add(
+            PlaceRow(
+                id=place.id,
+                name=place.name,
+                latitude=place.coordinates.lat,
+                longitude=place.coordinates.lon,
+            )
+        )
+    session.flush()
+    ctx = OpContext(session=session, now=datetime.now(UTC), tz=TZ, actor="test", routing=motis)
+    common = {"origin_place_id": "central", "destination_place_id": "ulb"}
+
+    arrive = run_operation(
+        ctx, "search_journey", {**common, "arrive_before": tomorrow_at(9).isoformat()}
+    )
+    assert arrive["ok"] and arrive["result"]["status"] == "ok", arrive
+    best = arrive["result"]["best"]
+    assert datetime.fromisoformat(best["arrival"]) <= tomorrow_at(9)
+    assert best["legs"] and best["duration_minutes"] < 120
+
+    depart = run_operation(
+        ctx,
+        "search_journey",
+        {**common, "depart_after": tomorrow_at(14).isoformat(), "objective": "earliest_arrival"},
+    )
+    assert depart["result"]["status"] == "ok"
+    assert datetime.fromisoformat(depart["result"]["best"]["departure"]) >= tomorrow_at(14)
+
+    window = run_operation(
+        ctx,
+        "search_journey",
+        {
+            **common,
+            "depart_after": tomorrow_at(8).isoformat(),
+            "arrive_before": tomorrow_at(9, 30).isoformat(),
+        },
+    )
+    assert window["result"]["status"] == "ok"
+    best = window["result"]["best"]
+    assert datetime.fromisoformat(best["departure"]) >= tomorrow_at(8)
+    assert datetime.fromisoformat(best["arrival"]) <= tomorrow_at(9, 30)
+
+    tight = run_operation(
+        ctx,
+        "search_journey",
+        {
+            **common,
+            "depart_after": tomorrow_at(8).isoformat(),
+            "arrive_before": tomorrow_at(8, 2).isoformat(),
+        },
+    )
+    assert tight["result"]["status"] == "no_candidate"

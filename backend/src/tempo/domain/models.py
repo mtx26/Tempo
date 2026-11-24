@@ -1,6 +1,6 @@
 """Core planning domain objects.
 
-Rules encoded here (see docs/REQUIREMENTS.md):
+Rules encoded here (see ARCHITECTURE.md):
 - University iCal events are FIXED source events.
 - Personal study work is FLEXIBLE; its target date is SOFT unless explicitly HARD.
 All datetimes must be timezone-aware to keep scheduling DST-safe.

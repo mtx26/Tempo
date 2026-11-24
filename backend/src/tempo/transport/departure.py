@@ -1,7 +1,7 @@
 """Departure re-check from the user's CURRENT position (HA phone tracker) with live routing.
 
 Used shortly before a mandatory trip (worker, M7): "can I still make it, and when must I leave?".
-Rules (docs/TRANSPORT.md "Departure re-check"):
+Rules (ARCHITECTURE.md "Departure re-check"):
 - Only a FRESH and accurate phone position is used; otherwise UNKNOWN_POSITION (never stale GPS,
   never a guessed home).
 - The answer comes from the routing provider at check time, so MOTIS live delays and

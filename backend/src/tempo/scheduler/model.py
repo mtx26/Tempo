@@ -80,7 +80,7 @@ class PlannedBlock:
 
 @dataclass(frozen=True, slots=True)
 class Preferences:
-    """Soft study preferences; never stronger than feasibility (docs/REQUIREMENTS.md)."""
+    """Soft study preferences; never stronger than feasibility (ARCHITECTURE.md)."""
 
     preferred_block_minutes: int = 90
     min_block_minutes: int = 30

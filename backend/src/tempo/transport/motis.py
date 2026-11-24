@@ -1,6 +1,6 @@
 """HTTP client for a private MOTIS instance (``GET /api/v6/plan``).
 
-Built from the MOTIS OpenAPI contract read on 2026-11-23 (docs/FEASIBILITY.md §3) and verified
+Built from the MOTIS OpenAPI contract read on 2026-11-23 (ARCHITECTURE.md §3) and verified
 against a REAL MOTIS v2.11.4 (Brussels and nationwide data, recorded fixtures, live tests). Any
 transport or format problem raises ``RoutingUnavailableError`` — never partial data.
 """

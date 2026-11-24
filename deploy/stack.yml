@@ -1,7 +1,7 @@
 # Tempo production stack for Docker Swarm (Portainer). NOT DEPLOYED — deploying requires the
 # user's explicit approval (CLAUDE.md). Validate with:
 #   TEMPO_REGISTRY=... TEMPO_VERSION=... docker stack config -c deploy/stack.yml
-# Runbook: docs/DEPLOYMENT.md "Swarm deployment".
+# Runbook: README.md "Déploiement Swarm".
 #
 # Network model (no Tempo port is published; Home Assistant is the only UI):
 #   ha       external overlay shared with Home Assistant -> only `api` joins it
@@ -60,13 +60,18 @@ services:
     <<: *hardening
     image: *backend-image
     command: ["python", "-m", "tempo.api"]
+    environment:
+      # The assistant searches journeys and re-plans synchronously (ARCHITECTURE.md §3).
+      TEMPO_MOTIS_URL: http://routing:8080
     secrets: [tempo_api_token, tempo_database_url]
-    # During a token rotation add: tempo_api_token_previous (docs/DECISIONS.md D023).
+    # Optional: tempo_anthropic_api_key (conversational assistant; without it the deterministic
+    # parser answers). During a token rotation add: tempo_api_token_previous.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
       retries: 3
-    networks: [backend, ha]
+    # egress: only needed for the LLM provider when tempo_anthropic_api_key is set.
+    networks: [backend, ha, routing, egress]
     deploy:
       replicas: 1  # in-memory auth limiter: exactly one replica
       resources: {limits: {memory: 1G}}
@@ -79,7 +84,7 @@ services:
     command: ["python", "-m", "tempo.worker"]
     environment:
       TEMPO_MOTIS_URL: http://routing:8080
-      # Training e-mails (M5) stay disabled until these are set (docs/TRAINING_EMAILS.md):
+      # Coach e-mails stay disabled until these are set (README.md, configuration):
       # TEMPO_TRAINING_IMAP_HOST, TEMPO_TRAINING_IMAP_USER, TEMPO_TRAINING_ALLOWED_SENDER
     secrets:
       - tempo_database_url
@@ -114,7 +119,7 @@ services:
     <<: *hardening
     image: *backend-image
     # Nightly conditional refresh of GTFS (4 feeds) + weekly OSM, validated, atomic; publishes
-    # /routing-input/READY only when something changed (milestone 13, docs/TRANSPORT.md).
+    # /routing-input/READY only when something changed (ARCHITECTURE.md §6).
     command:
       - sh
       - -c

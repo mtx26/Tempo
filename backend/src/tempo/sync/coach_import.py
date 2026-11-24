@@ -1,6 +1,6 @@
 """Apply a parsed coach plan (``coach_plan.WeeklyPlan``) to the database (M5b).
 
-Update rules (docs/TRAINING_EMAILS.md):
+Update rules (ARCHITECTURE.md):
 - one row per (week, suggested weekday): ``source='coach_plan'``, ``source_ref='<monday>:<wd>'``;
 - a re-sent plan updates rows in place (same id, so the planned position stays stable when the
   content did not change), adds new days and removes days the coach dropped;

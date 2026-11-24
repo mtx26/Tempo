@@ -7,7 +7,7 @@ timetable:
   first_day: TODAY
   num_days: 30
   # Anonymous Belgian Mobility quota is 100 requests/day: poll every 30 min (48/day).
-  # With a free Standard account key this can drop to 60 s (see docs/TRANSPORT.md).
+  # With a free Standard account key this can drop to 60 s (see ARCHITECTURE.md §6).
   update_interval: 1800
   http_timeout: 30
   default_timezone: Europe/Brussels

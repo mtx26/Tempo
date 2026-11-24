@@ -1,6 +1,6 @@
 """Mandatory travel: journeys between located commitments and travel-aware study windows.
 
-Conventions (docs/REQUIREMENTS.md: travel is mandatory, never invented):
+Conventions (ARCHITECTURE.md: travel is mandatory, never invented):
 - Outbound trips must arrive ``buffer`` before the event; the travel block spans from the
   chosen departure up to the event start (the margin is part of the block).
 - Return trips have no deadline: the block spans from the event end to the arrival.
