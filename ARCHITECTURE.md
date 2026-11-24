@@ -475,8 +475,7 @@ Faits vérifiés le 23/11/2026 par requêtes réelles :
   (`?format=protobuf` obligatoire pour le temps réel). L'hôte documenté
   `opendata-discovery-gtfs-realtime...` n'avait pas d'enregistrement DNS. STIB : GTFS statique
   seulement. MOTIS est la seule source d'itinéraires : les trajets STIB (et tout exploitant
-  sans temps réel) suivent l'horaire théorique et sont annoncés comme tels (« horaire
-  théorique, ponctualité non confirmée »), jamais comme à l'heure.
+  sans temps réel) suivent le GTFS statique.
 - Quotas indicatifs : anonyme 100/jour ; clé Standard (en-tête `bmc-partner-key`) 12 000/jour.
   Acceptation de la clé sur cet hôte **non vérifiée** (pas de clé).
 - Relais (`transport/rt_relay.py`, une seule réplique) : détient la clé, plafonne à 80 % du
@@ -633,7 +632,6 @@ flowchart TD
   (jusqu'à 6 h, marqué « en retard »).
 - Rappels de départ : plusieurs seuils (`update_settings.departure_reminder_minutes`), sur le
   prochain trajet aller, recalculés avec la position réelle et le temps réel.
-- L'absence de temps réel n'est pas une confirmation de ponctualité (legs « horaire théorique »).
 - Notifications dédupliquées par clé ; informatives uniquement (aucune action dans la
   notification).
 - Aucun job ne dépend du LLM ; l'import d'e-mails par LLM (texte libre) passe par une

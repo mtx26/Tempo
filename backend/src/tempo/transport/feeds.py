@@ -12,8 +12,7 @@ for realtime, ZIP for static) — see ARCHITECTURE.md "Belgian feeds". Nothing h
 - Quotas come from the portal terms §5 (indicative): anonymous 100 requests/day and 10/minute;
   free Standard account 12 000/day and 500/minute. The key travels in header ``bmc-partner-key``
   (portal knowledge base). Whether this host accepts the key is NOT yet verified (no key yet).
-- STIB-MIVB publishes no GTFS-RT: STIB legs stay "static timetable only" (reported as such,
-  never as on time).
+- STIB-MIVB publishes no GTFS-RT: MOTIS routes STIB on its static GTFS.
 """
 
 from collections.abc import Iterable, Mapping

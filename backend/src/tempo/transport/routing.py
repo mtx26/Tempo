@@ -132,11 +132,6 @@ class Journey:
             raise ValueError("journey legs end after the arrival")
 
     @property
-    def static_transit_legs(self) -> tuple[Leg, ...]:
-        """Transit legs without live data: static timetable only, never "on time"."""
-        return tuple(leg for leg in self.legs if leg.is_transit and not leg.realtime)
-
-    @property
     def duration(self) -> timedelta:
         return self.arrival.astimezone(UTC) - self.departure.astimezone(UTC)
 

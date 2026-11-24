@@ -71,7 +71,6 @@ def test_stib_legs_are_never_reported_as_realtime(motis: MotisClient) -> None:
     stib = [leg for j in journeys for leg in j.legs if leg.agency == "STIB"]
     assert stib, "expected STIB legs in Brussels"
     assert all(not leg.realtime for leg in stib)
-    assert all(leg in j.static_transit_legs for j in journeys for leg in j.legs if leg in stib)
 
 
 def test_destination_outside_the_region_yields_no_journey(motis: MotisClient) -> None:

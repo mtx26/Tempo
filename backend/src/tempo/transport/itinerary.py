@@ -192,9 +192,6 @@ def find_trips(provider: RoutingProvider, query: TripQuery) -> TripResult:
 
 
 REPORTED_DELAY = timedelta(minutes=2)
-STATIC_ONLY = (
-    "horaire théorique pour une partie du trajet : pas de temps réel, ponctualité non confirmée"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,8 +201,7 @@ class JourneyNotes:
     specific: tuple[str, ...]
     """Live delays and severe disruptions active during this trip."""
     general: tuple[str, ...]
-    """Operator notices without a date, and legs without realtime (static timetable: NOT a
-    confirmation of punctuality) — the same for every journey, reported once."""
+    """Operator notices without a date: the same for every journey, reported once."""
 
     @property
     def all(self) -> list[str]:
@@ -238,8 +234,6 @@ def journey_notes(journey: Journey) -> JourneyNotes:
             f"avis d'exploitant sans période d'impact ({', '.join(agencies)}) : non vérifiés "
             "pour les trajets prévus"
         )
-    if journey.static_transit_legs:
-        general.append(STATIC_ONLY)
     return JourneyNotes(tuple(dict.fromkeys(specific)), tuple(general))
 
 

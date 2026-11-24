@@ -155,16 +155,3 @@ def test_naive_datetimes_are_rejected_in_transport_types() -> None:
         DeclaredStay(HOME, naive, naive + timedelta(hours=1))
     with pytest.raises(ValueError):
         PhonePosition(Coordinates(0, 0), 10.0, naive, "tracker")
-
-
-# static-only label (STIB has no realtime feed) ---------------------------------------------
-
-
-def test_transit_legs_without_realtime_are_flagged_static_only() -> None:
-    legs = (
-        leg(at(8), at(8, 5), mode="WALK"),
-        leg(at(8, 5), at(8, 20), mode="SUBWAY", realtime=False),
-        leg(at(8, 20), at(8, 40), mode="REGIONAL_RAIL", realtime=True),
-    )
-    journey = Journey(legs, at(8), at(8, 40), transfers=1, source="x")
-    assert [lg.mode for lg in journey.static_transit_legs] == ["SUBWAY"]
