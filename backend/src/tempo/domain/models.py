@@ -7,7 +7,7 @@ All datetimes must be timezone-aware to keep scheduling DST-safe.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 
@@ -56,24 +56,3 @@ class FixedEvent:
     def key(self) -> tuple[str, str | None]:
         """Stable identity of an occurrence across syncs (UID + RECURRENCE-ID)."""
         return (self.uid, self.recurrence_id)
-
-
-@dataclass(frozen=True, slots=True)
-class StudyTask:
-    """User-defined study workload, scheduled as movable study blocks."""
-
-    subject: str
-    effort_minutes: int
-    target_date: date
-    target_kind: TargetKind = TargetKind.SOFT
-    completed_minutes: int = 0
-
-    def __post_init__(self) -> None:
-        if self.effort_minutes <= 0:
-            raise ValueError("effort_minutes must be positive")
-        if self.completed_minutes < 0:
-            raise ValueError("completed_minutes must not be negative")
-
-    @property
-    def remaining_minutes(self) -> int:
-        return max(0, self.effort_minutes - self.completed_minutes)

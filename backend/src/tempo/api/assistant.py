@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from tempo.api.ha import SessionDep
 from tempo.assistant import fallback
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
 HISTORY_TURNS = 12
 HISTORY_WINDOW = timedelta(hours=6)
-IDEMPOTENCY_TTL = timedelta(days=2)
 
 
 def _context(request: Request, session: Any, actor: str) -> OpContext:
@@ -154,11 +153,3 @@ def conversation(body: ConversationIn, request: Request, session: SessionDep) ->
         "changed": result["changed"],
         "fallback": True,
     }
-
-
-def purge_conversations(session: Any, now: datetime) -> int:
-    """Retention: conversation turns older than 7 days are deleted."""
-    result = session.execute(
-        delete(ConversationTurnRow).where(ConversationTurnRow.created_at < now - timedelta(days=7))
-    )
-    return int(result.rowcount or 0)

@@ -31,11 +31,13 @@ from tempo.ai.llm import Interpreter
 from tempo.db.ics_repository import apply_ics_sync, get_or_create_source
 from tempo.db.models import (
     ActivityRow,
+    ConversationTurnRow,
     JobRunRow,
     NotificationRow,
     PhonePositionRow,
     ProposalRow,
     ScheduleVersion,
+    SettingRow,
     StudyBlockRow,
 )
 from tempo.planning.service import (
@@ -628,10 +630,27 @@ def series_job(sessions: Sessions, now: datetime) -> int:
         return created
 
 
-def conversation_retention_job(sessions: Sessions, now: datetime) -> int:
-    from tempo.api.assistant import purge_conversations
+CONVERSATION_RETENTION = timedelta(days=7)
+IDEMPOTENCY_RETENTION = timedelta(days=2)
+"""An ``Idempotency-Key`` replays its stored response for this long, then it is purged."""
 
+
+def conversation_retention_job(sessions: Sessions, now: datetime) -> int:
+    """Delete conversation turns older than 7 days and expired idempotency records."""
     with sessions() as session:
-        deleted = purge_conversations(session, now)
+        turns = _deleted(
+            session,
+            delete(ConversationTurnRow).where(
+                ConversationTurnRow.created_at < now - CONVERSATION_RETENTION
+            ),
+        )
+        keys = _deleted(
+            session,
+            delete(SettingRow).where(
+                SettingRow.key.like("idem:%"),
+                SettingRow.value["value"]["at"].astext
+                < (now - IDEMPOTENCY_RETENTION).astimezone(UTC).isoformat(),
+            ),
+        )
         session.commit()
-        return deleted
+        return turns + keys

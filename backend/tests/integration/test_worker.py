@@ -464,3 +464,23 @@ def test_departure_check_adds_official_stib_realtime_notes(sessions: sessionmake
         state = get_setting(s, "departure_check")
     assert stib.calls == 1, state
     assert any("STIB temps réel : ligne 59" in w for w in state["warnings"])
+
+
+def test_conversation_retention_purges_old_turns_and_idempotency_keys(
+    sessions: sessionmaker[Session],
+) -> None:
+    from tempo.db.models import ConversationTurnRow
+    from tempo.worker.jobs import conversation_retention_job
+
+    now = datetime(2026, 12, 10, 12, tzinfo=UTC)
+    with sessions() as s:
+        for days in (1, 9):
+            at = now - timedelta(days=days)
+            s.add(ConversationTurnRow(conversation_id="c", role="user", content="x", created_at=at))
+            set_setting(s, f"idem:{days}", {"at": at.isoformat(), "response": {"ok": True}})
+        s.commit()
+    assert conversation_retention_job(sessions, now) == 2
+    with sessions() as s:
+        assert len(list(s.scalars(select(ConversationTurnRow)))) == 1
+        assert get_setting(s, "idem:1") is not None
+        assert get_setting(s, "idem:9") is None

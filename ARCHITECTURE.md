@@ -688,7 +688,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
 | B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
 
-Dernière exécution locale (24/11/2026) : backend 495 tests réussis (PostgreSQL 16 réel, MOTIS
+Dernière exécution locale (24/11/2026) : backend 490 tests réussis (PostgreSQL 16 réel, MOTIS
 Bruxelles réel, contrat avec le vrai client HA), 13 ignorés avec leur raison (MOTIS national,
 portail Belgian Mobility et IMAP réel non lancés dans cette session), couverture 91 %, Ruff et
 mypy strict propres ; intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres.
