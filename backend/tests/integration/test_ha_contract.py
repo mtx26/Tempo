@@ -87,46 +87,60 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             client = api_module.TempoApiClient(http, server, TOKEN)
             assert (await client.health())["status"] == "ok"
             assert "version" in await client.status()
-            await client.put_place(
-                "home", {"name": "Kot", "latitude": 50.67, "longitude": 4.61, "aliases": []}
+            op = client.operation
+            await op(
+                "upsert_place",
+                {"place_id": "home", "name": "Kot", "latitude": 50.67, "longitude": 4.61},
             )
-            await client.put_place(
-                "club",
-                {"name": "Club", "latitude": 50.7, "longitude": 4.6, "aliases": ["Stade"]},
+            await op(
+                "upsert_place",
+                {
+                    "place_id": "club",
+                    "name": "Club",
+                    "latitude": 50.7,
+                    "longitude": 4.6,
+                    "aliases": ["Stade"],
+                },
             )
             assert {p["id"] for p in await client.places()} == {"home", "club"}
-            await client.put_availability(
-                [
-                    {"weekday": d, "start": "08:00", "end": "20:00", "place_id": "home"}
-                    for d in range(7)
-                ]
+            await op(
+                "set_weekly_availability",
+                {
+                    "windows": [
+                        {"weekday": d, "start": "08:00", "end": "20:00", "place_id": "home"}
+                        for d in range(7)
+                    ]
+                },
             )
             assert len(await client.availability()) == 7
-            await client.patch_settings(
-                {"home_place_id": "home", "tracker_entity_id": "device_tracker.phone"}
-            )
-            assert (await client.settings())["home_place_id"] == "home"
+            await op("update_settings", {"home_place_id": "home"})
+            # technical setting pushed by the options flow
+            await client.patch_settings({"tracker_entity_id": "device_tracker.phone"})
+            settings = await client.settings()
+            assert settings["home_place_id"] == "home"
+            assert settings["tracker_entity_id"] == "device_tracker.phone"
             soon = (datetime.now(UTC) + timedelta(days=3)).date().isoformat()
-            task = await client.create_task(
-                {"subject": "maths", "effort_minutes": 120, "target_date": soon}
-            )
-            assert task["target_kind"] == "soft"
-            updated = await client.update_task(task["id"], {"completed_minutes": 30})
-            assert updated["remaining_minutes"] == 90
-            assert [t["id"] for t in await client.tasks()] == [task["id"]]
+            task = (
+                await op(
+                    "create_task", {"title": "maths", "estimated_minutes": 120, "target_date": soon}
+                )
+            )["result"]["task"]
+            await op("log_work", {"task_id": task["id"], "minutes": 30})
+            tasks = await client.tasks()
+            assert [t["id"] for t in tasks] == [task["id"]]
+            assert tasks[0]["remaining_minutes"] == 90 and tasks[0]["target_kind"] == "soft"
             start = datetime.now(UTC) + timedelta(days=2)
-            race = await client.create_activity(
+            await op(
+                "create_event",
                 {
-                    "kind": "race",
-                    "title": "10 km",
-                    "duration_minutes": 60,
+                    "title": "Concert",
+                    "scheduling": "fixed",
                     "start": start.isoformat(),
+                    "duration_minutes": 90,
                     "place_id": "club",
-                }
+                },
             )
-            assert race["kind"] == "race"
-            await client.update_activity(race["id"], {"notes": "dossard 12"})
-            assert (await client.activities())[0]["notes"] == "dossard 12"
+            assert (await client.activities())[0]["title"] == "Concert"
             await client.post_location(
                 {
                     "entity_id": "device_tracker.phone",
@@ -136,49 +150,23 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
                     "observed_at": datetime.now(UTC).isoformat(),
                 }
             )
-            assert "requested_at" in await client.replan()
             items = await client.schedule(datetime.now(UTC), datetime.now(UTC) + timedelta(days=7))
-            assert any(i["type"] == "race" for i in items)
+            assert any(i["type"] == "personal" for i in items)
             summary = await client.summary()
             assert summary["remaining_study_minutes"] == 90
             assert await client.proposals() == []
             assert isinstance(await client.notifications(), list)
-            answer = await client.interpret("replanifie")
-            assert answer["applied"] and answer["action"] == "replan"
-            question = await client.interpret("combien d'heures d'étude il me reste ?")
-            assert question["action"] == "answer" and "1 h 30" in question["summary"]
-            # A coach-plan session without duration is confirmed through the client.
-            from zoneinfo import ZoneInfo
-
-            from sqlalchemy.orm import Session as OrmSession
-
-            from tempo.sync.coach_import import apply_weekly_plan
-            from tempo.sync.coach_plan import parse_plan_docx
-            from tests.docx_fixtures import plan_docx
-
-            monday = (datetime.now(UTC) + timedelta(days=7 - datetime.now(UTC).weekday())).date()
-            title = f"Semaine du {monday.day:02d}/{monday.month:02d} au "
-            sunday = monday + timedelta(days=6)
-            title += f"{sunday.day:02d}/{sunday.month:02d}/{sunday.year}"
-            with OrmSession(ENGINE[0]) as orm:
-                apply_weekly_plan(
-                    orm,
-                    parse_plan_docx(plan_docx(title=title), monday - timedelta(days=1)),
-                    tz=ZoneInfo("Europe/Brussels"),
-                    today=monday - timedelta(days=1),
-                    origin="contract",
-                )
-                orm.commit()
-            pending = [a for a in await client.activities() if a["status"] == "to_confirm"]
-            assert len(pending) == 1
-            confirmed = await client.confirm_activity(pending[0]["id"], {"duration_minutes": 50})
-            assert confirmed["status"] == "active" and confirmed["duration_minutes"] == 50
-            with pytest.raises(api_module.TempoConflictError):
-                await client.confirm_activity(pending[0]["id"], {"duration_minutes": 50})
+            # Conversation without LLM: deterministic fallback, real data, nothing invented.
+            question = await client.conversation("combien d'heures d'étude il me reste ?", "c1")
+            assert question["used_llm"] is False and "1 h 30" in question["reply"]
+            replan = await client.conversation("replanifie", "c1")
+            assert replan["changed"] is True
             with pytest.raises(api_module.TempoNotFoundError):
-                await client.decide_proposal("00000000-0000-0000-0000-000000000000", True)
-            with pytest.raises(api_module.TempoConflictError):
-                await client.delete_place("home")
-            await client.delete_place("club")
+                await op("no_such_operation", {})
+            with pytest.raises(api_module.TempoApiError):
+                await op("create_task", {"title": ""})
+            with pytest.raises(api_module.TempoApiError):
+                await op("delete_place", {"place_id": "home"})  # still the home place
+            await op("delete_place", {"place_id": "club"})
 
     asyncio.run(scenario())
