@@ -493,6 +493,9 @@ def explain_plan(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         out["hard_deadline_misses"] = [
             subjects.get(k, k) for k in plan.get("hard_deadline_misses", [])
         ]
+        out["deadline_capacity"] = {
+            subjects.get(k, k): v for k, v in (plan.get("deadline_capacity") or {}).items()
+        }
         out["unplaced_activities"] = [titles.get(k, k) for k in plan.get("unplaced_trainings", [])]
         out.pop("unplaced_trainings", None)
         out["journeys_with_problems"] = [

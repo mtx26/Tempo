@@ -358,6 +358,11 @@ def test_not_enough_time_reports_remainder_and_strict_violation(session: Session
     assert task["id"] in result["hard_deadline_misses"]
     explained = ok(session, "explain_plan")["active_plan"]
     assert explained["hard_deadline_misses"] == ["Chimie"]
+    # Why: the free study time before the deadline is smaller than the work (the "core").
+    capacity = explained["deadline_capacity"]["Chimie"]
+    assert capacity["needed_minutes"] == 3000
+    assert 0 < capacity["free_minutes_before_deadline"] < 3000
+    assert capacity["deadline"].startswith("2026-12-08")
 
 
 def test_non_splittable_located_task_is_one_session(session: Session) -> None:

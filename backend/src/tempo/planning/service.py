@@ -734,6 +734,7 @@ def replan(
         "unplanned_minutes": {} if result is None else result.unplanned_minutes,
         "late_minutes": {} if result is None else result.late_minutes,
         "hard_deadline_misses": [] if result is None else result.hard_deadline_misses,
+        "deadline_capacity": outcome.deadline_capacity,
         "conflicts": [] if result is None else result.conflicts,
     }
     usable = outcome.status in (OutcomeStatus.COMPLETE, OutcomeStatus.PARTIAL)

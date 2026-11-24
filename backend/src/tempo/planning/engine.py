@@ -21,6 +21,7 @@ re-run by the worker. Rules (ARCHITECTURE.md, ARCHITECTURE.md, ARCHITECTURE.md):
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from tempo.scheduler.activities import FlexibleActivity, PlacedActivity, plan_activities
@@ -126,6 +127,31 @@ class PlanningOutcome:
     issues: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
+    deadline_capacity: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Per missed strict deadline: work needed vs free study time before it (B12 diagnosis)."""
+
+
+def free_minutes(availability: list[Interval], busy: list[Interval], until: datetime) -> int:
+    """Study-window minutes before ``until`` not taken by busy time (commitments, travel,
+    trainings, locked blocks). Shared by every task: an upper bound for one task."""
+    total = 0.0
+    for window in availability:
+        start, end = utc(window.start), min(utc(window.end), utc(until))
+        if end <= start:
+            continue
+        cuts = sorted(
+            (max(start, utc(b.start)), min(end, utc(b.end)))
+            for b in busy
+            if utc(b.start) < end and utc(b.end) > start
+        )
+        covered, cursor = 0.0, start
+        for c_start, c_end in cuts:
+            c_start = max(c_start, cursor)
+            if c_end > c_start:
+                covered += (c_end - c_start).total_seconds()
+                cursor = c_end
+        total += (end - start).total_seconds() - covered
+    return int(total // 60)
 
 
 def _base_place(day: date, data: PlanningInput) -> Place:
@@ -285,6 +311,23 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         issues=issues,
         warnings=warnings,
     )
+    if result.hard_deadline_misses:
+        by_task = {d.task_id: d for d in data.demands}
+        for task_id in result.hard_deadline_misses:
+            demand = by_task.get(task_id)
+            if demand is None:
+                continue
+            outcome.deadline_capacity[task_id] = {
+                "deadline": (demand.target - timedelta(minutes=1))
+                .astimezone(tz)
+                .date()
+                .isoformat(),
+                "deadline_end": demand.target.isoformat(),
+                "needed_minutes": demand.remaining_minutes,
+                "free_minutes_before_deadline": free_minutes(
+                    problem.availability, problem.busy, demand.target
+                ),
+            }
     if category_violations:
         outcome.status, outcome.violations = OutcomeStatus.INVALID, category_violations
     elif result.status is not PlanStatus.NO_SOLUTION:

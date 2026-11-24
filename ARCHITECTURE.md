@@ -548,7 +548,9 @@ flowchart TD
 
 Exemple vérifié par test : « 50 h de chimie avant demain, stricte » ⇒ statut `partial`,
 minutes non planifiées par tâche, échéance stricte signalée comme manquée, jamais comme
-réussie. `propose_alternatives` simule ensuite, sans rien publier ni modifier, des alternatives
+réussie. `explain_plan` donne pour chaque échéance stricte manquée la cause chiffrée
+(`deadline_capacity` : minutes nécessaires et minutes d'étude libres avant l'échéance, après
+engagements, trajets et entraînements). `propose_alternatives` simule ensuite, sans rien publier ni modifier, des alternatives
 déterministes par tâche touchée (au plus 3) : reporter l'échéance (plus petit report essayé
 parmi +2, +7, +14, +28 jours qui résout), rendre souple une échéance stricte, réduire le volume
 à ce qui tient. Chaque alternative donne le résultat réel de sa simulation (reliquat, retard,
@@ -682,14 +684,14 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B09 Transport | Vérifié | `search_journey` vérifié sur un **vrai MOTIS** (région de Bruxelles) : arrivée avant, départ après, plage, aucun candidat (`test_motis_live.py`) ; panne et origine inconnue testées avec MOTIS simulé ; client MOTIS vérifié aussi sur le graphe national. Exploration paginée (jusqu'à 5 requêtes, vers l'avant depuis le départ minimal ou vers l'arrière depuis l'arrivée limite, 2 h sans seconde borne ; une panne après la première page garde les candidats déjà explorés et le signale) testée avec un fournisseur paginé simulé et exécutée sur le vrai MOTIS. Le résultat reste « meilleur parmi les candidats explorés ». |
 | B10 Planning mixte | Vérifié | Cours, étude, entraînements, compétition, activités personnelles, trajets ; validateur indépendant. |
 | B11 Stabilité | Vérifié | Ajout en créneau libre sans déplacement ; conflit local avec changements minimaux ; mode global sur demande. Poids bornés, pas d'optimisation lexicographique stricte. |
-| B12 Conflits | Partiel | Manque de temps, reliquat, échéance stricte manquée, panne de routage, version invalide rejetée ; alternatives simulées automatiquement (`propose_alternatives`, rien publié). **Écart** : pas de calcul de noyau incompatible minimal (le diagnostic est par tâche). |
+| B12 Conflits | Vérifié | Manque de temps, reliquat, échéance stricte manquée, panne de routage, version invalide rejetée ; diagnostic par échéance stricte manquée (`deadline_capacity` : travail nécessaire vs minutes d'étude libres avant l'échéance, après engagements, trajets et entraînements) ; alternatives simulées automatiquement (`propose_alternatives`, rien publié). Le diagnostic n'est pas un noyau minimal calculé par le solveur : la capacité libre est partagée entre les tâches (borne supérieure). |
 | B13 Validation | Vérifié | Proposition périmée rejetée ; replanifications concurrentes sérialisées (3 fils). |
 | B14 Notifications | Vérifié | Rappel relatif qui suit sa cible, sans doublon, annulé avec la cible ; plusieurs rappels de départ. |
 | B15 Autonomie | Vérifié | Jobs testés individuellement, sans LLM ; endurance : la vraie fonction `tick` du worker sur 7 jours simulés (1 008 cycles de 10 min, PostgreSQL réel) avec un cours déplacé par l'iCal, une panne de routage de 4 h et du travail déclaré chaque soir : tous les jobs sains à la fin, rappels émis une seule fois par échéance, replanification au moins nocturne, aucune séance sur un cours, croissance bornée, cycle p95 0,03 s / max 0,4 s (`test_soak.py`). Pas encore mesuré en temps réel sur le serveur. |
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
 | B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
 
-Dernière exécution locale (24/11/2026) : backend 491 tests réussis (PostgreSQL 16 réel, MOTIS
+Dernière exécution locale (24/11/2026) : backend 492 tests réussis (PostgreSQL 16 réel, MOTIS
 Bruxelles réel, contrat avec le vrai client HA), 13 ignorés avec leur raison (MOTIS national,
 portail Belgian Mobility et IMAP réel non lancés dans cette session), couverture 91 %, Ruff et
 mypy strict propres ; intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres.

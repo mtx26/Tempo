@@ -153,3 +153,13 @@ def test_long_gap_means_going_home_between_commitments() -> None:
     day8 = sorted((b for b in outcome.travel if b.start.day == 8), key=lambda b: b.start)
     legs = [(b.origin.id, b.destination.id) for b in day8]
     assert legs == [("home", "campus"), ("campus", "home"), ("home", "club"), ("club", "home")]
+
+
+def test_free_minutes_before_a_deadline_counts_overlapping_busy_time_once() -> None:
+    from tempo.planning.engine import free_minutes
+
+    window = [Interval(at(7, 8), at(7, 20))]
+    busy = [Interval(at(7, 10), at(7, 12)), Interval(at(7, 11), at(7, 13))]
+    assert free_minutes(window, busy, at(7, 23)) == 720 - 180
+    assert free_minutes(window, busy, at(7, 15)) == 420 - 180
+    assert free_minutes(window, busy, at(7, 7)) == 0
