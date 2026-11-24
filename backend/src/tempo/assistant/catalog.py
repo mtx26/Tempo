@@ -67,12 +67,12 @@ from tempo.planning.service import (
 )
 from tempo.planning.views import schedule_items, summary
 from tempo.scheduler.model import Preferences
+from tempo.transport.itinerary import Objective, TripQuery, find_trips
+from tempo.transport.location import PhonePosition, PositionStatus, assess_position
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
 
 MAX_SPAN = timedelta(days=62)
-POSITION_MAX_AGE = timedelta(minutes=10)
-POSITION_MAX_ACCURACY_M = 200.0
 
 
 @dataclass(slots=True)
@@ -334,7 +334,12 @@ def get_position(ctx: OpContext, _: NoInput) -> dict[str, Any]:
     if row is None:
         return {"available": False, "reason": "aucune position reçue de Home Assistant"}
     age = ctx.now - row.observed_at
-    reliable = age <= POSITION_MAX_AGE and row.accuracy_m <= POSITION_MAX_ACCURACY_M
+    status = assess_position(
+        PhonePosition(
+            Coordinates(row.latitude, row.longitude), row.accuracy_m, row.observed_at, row.entity_id
+        ),
+        ctx.now,
+    )
     return {
         "available": True,
         "latitude": row.latitude,
@@ -342,7 +347,8 @@ def get_position(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "accuracy_m": row.accuracy_m,
         "observed_at": _iso(row.observed_at),
         "age_minutes": int(age.total_seconds() // 60),
-        "reliable_now": reliable,
+        "reliable_now": status is PositionStatus.FRESH,
+        "status": status.value,
     }
 
 
@@ -1804,66 +1810,6 @@ def _journey_out(journey: Journey) -> dict[str, Any]:
     }
 
 
-MAX_JOURNEY_PAGES = 5
-OPEN_SEARCH_SPAN = timedelta(hours=2)
-"""Exploration span after the only lower bound (or before the only upper bound)."""
-
-
-def _explore_journeys(
-    routing: RoutingProvider,
-    origin: Coordinates,
-    target: Coordinates,
-    lower: datetime | None,
-    upper: datetime | None,
-) -> tuple[list[Journey], int, bool]:
-    """Page through the provider's answers (a MOTIS answer holds only a few itineraries).
-
-    With a lower bound, pages move forward from it (up to the upper bound, or
-    ``OPEN_SEARCH_SPAN``); with only an upper bound, arrive-by pages move backward. At most
-    ``MAX_JOURNEY_PAGES`` requests. A failure on the first page propagates; a later failure
-    keeps what was explored and is reported as an incomplete exploration."""
-    found: dict[tuple[Any, ...], Journey] = {}
-    pages = 0
-    forward = lower is not None
-    if forward:
-        assert lower is not None  # noqa: S101 - narrowing
-        cursor = lower
-        stop = upper if upper is not None else lower + OPEN_SEARCH_SPAN
-    else:
-        assert upper is not None  # noqa: S101 - one bound is required by the caller
-        cursor = upper
-        stop = upper - OPEN_SEARCH_SPAN
-    while pages < MAX_JOURNEY_PAGES and (cursor < stop if forward else cursor > stop):
-        try:
-            page = routing.plan(origin, target, cursor, arrive_by=not forward)
-        except RoutingUnavailableError:
-            if pages == 0:
-                raise
-            return list(found.values()), pages, True
-        pages += 1
-        new = 0
-        for journey in page:
-            key = (
-                journey.departure,
-                journey.arrival,
-                tuple((leg.mode, leg.line, leg.start) for leg in journey.legs),
-            )
-            if key not in found:
-                found[key] = journey
-                new += 1
-        if forward:
-            later = [j.departure for j in page if j.departure >= cursor]
-            if not new or not later:
-                break
-            cursor = max(later) + timedelta(minutes=1)
-        else:
-            earlier = [j.arrival for j in page if j.arrival <= cursor]
-            if not new or not earlier:
-                break
-            cursor = min(earlier) - timedelta(minutes=1)
-    return list(found.values()), pages, False
-
-
 @operation(
     "search_journey",
     "Public-transport itinerary via MOTIS: arrive before, depart after, or both (a range); "
@@ -1910,12 +1856,6 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
     return result
 
 
-def _walk_minutes(journey: Journey) -> float:
-    return sum(
-        (leg.end - leg.start).total_seconds() / 60 for leg in journey.legs if leg.mode == "WALK"
-    )
-
-
 def _search(
     routing: RoutingProvider,
     origin: Coordinates,
@@ -1925,55 +1865,46 @@ def _search(
     arrive_before: datetime | None,
     tz: ZoneInfo,
 ) -> dict[str, Any]:
-    """One direction: paged exploration, bounds, criteria, then the objective's ranking."""
+    """One direction through the itinerary service, reported for the conversation."""
     if depart_after is None and arrive_before is None:
         raise OpError("indiquez au moins un départ minimal ou une arrivée maximale")
     lower = None if depart_after is None else _local(depart_after, tz)
     upper = None if arrive_before is None else _local(arrive_before, tz)
     if lower is not None and upper is not None and upper <= lower:
         raise OpError("plage horaire vide")
+    query = TripQuery(
+        origin,
+        target,
+        depart_after=lower,
+        arrive_before=upper,
+        objective=Objective(body.objective),
+        max_transfers=body.max_transfers,
+        max_walk=None
+        if body.max_walk_minutes is None
+        else timedelta(minutes=body.max_walk_minutes),
+    )
     try:
-        found, pages, incomplete = _explore_journeys(routing, origin, target, lower, upper)
+        found = find_trips(routing, query)
     except RoutingUnavailableError as exc:
         return {"status": "error", "detail": f"routage indisponible : {exc}"}
-
-    # One bound only: stay within OPEN_SEARCH_SPAN of it (leaving 3 h early for a 09:00
-    # appointment, or 3 h after the requested departure, is not an answer).
-    def acceptable(j: Journey) -> bool:
-        if lower is not None and upper is not None:
-            return j.departure >= lower and j.arrival <= upper
-        if upper is not None:
-            return upper - OPEN_SEARCH_SPAN <= j.arrival <= upper
-        assert lower is not None  # noqa: S101 - one bound is required above
-        return lower <= j.departure <= lower + OPEN_SEARCH_SPAN
-
-    in_range = [j for j in found if acceptable(j)]
-    candidates = [
-        j
-        for j in in_range
-        if (body.max_transfers is None or j.transfers <= body.max_transfers)
-        and (body.max_walk_minutes is None or _walk_minutes(j) <= body.max_walk_minutes)
-    ]
-    interrupted = " (exploration interrompue par une panne de routage)" if incomplete else ""
-    explored = {"explored": len(found), "pages": pages, "exploration_incomplete": incomplete}
-    if not candidates:
+    interrupted = " (exploration interrompue par une panne de routage)" if found.incomplete else ""
+    explored = {
+        "explored": found.explored,
+        "pages": found.pages,
+        "exploration_incomplete": found.incomplete,
+    }
+    if found.best is None:
         reason = (
             "aucun trajet ne respecte les critères demandés dans la plage explorée"
-            if in_range
+            if found.excluded_by_criteria
             else "aucun trajet dans la plage explorée"
         )
         return {"status": "no_candidate", **explored, "detail": reason + interrupted}
-    keys: dict[str, Callable[[Journey], Any]] = {
-        "shortest": lambda j: (j.duration, j.arrival, j.departure),
-        "earliest_arrival": lambda j: (j.arrival, j.duration),
-        "latest_departure": lambda j: (-j.departure.timestamp(), j.duration),
-    }
-    ranked = sorted(candidates, key=keys[body.objective])
     return {
         "status": "ok",
         "objective": body.objective,
-        "best": _journey_out(ranked[0]),
-        "alternatives": [_journey_out(j) for j in ranked[1:4]],
+        "best": _journey_out(found.best),
+        "alternatives": [_journey_out(j) for j in found.alternatives],
         **explored,
         "note": "meilleur parmi les candidats effectivement explorés" + interrupted,
     }

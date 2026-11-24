@@ -156,7 +156,7 @@ supplémentaire.
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
 | `planning/` | Chargement des entrées, moteur (`engine.py`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), vues. |
 | `scheduler/` | CP-SAT : étude (`solver.py`), activités flexibles (`activities.py`), validateur indépendant (`validate.py`). |
-| `transport/` | Lieux, position, client MOTIS, trajets obligatoires, contrôle de départ, relais GTFS-RT, flux belges, mise à jour GTFS. |
+| `transport/` | `itinerary.py` : **service d'itinéraire unique** (bornes, objectif, critères, pagination MOTIS, alternatives, cache par exécution) utilisé par la recherche, les trajets du planning, l'estimation des activités flexibles et le contrôle de départ ; `location.py` : position réelle et base du jour ; client MOTIS, trajets obligatoires (`travel.py`), contrôle de départ, relais GTFS-RT, flux belges, mise à jour des données de routage. |
 | `sync/` | iCal (`ics.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
 | `worker/` | Boucle de jobs durables (`job_run`) : iCal, séries, replanification, rappels, contrôle de départ, e-mails, rétention. |
 | `../tempo-homeassistant` | Intégration HACS `custom_components/tempo` (dépôt séparé). |
@@ -448,8 +448,13 @@ flowchart TD
  GEO --> REQ
 ```
 
-Chaque jour commence et finit à sa base (lieu prévu couvrant midi, sinon domicile). Deux
-engagements séparés de plus de 3 h ⇒ retour à la base entre eux. Un texte de lieu iCal inconnu
+Résolution centralisée (`transport/location.py`) : position réelle seulement si fraîche et
+précise (`assess_position`, utilisée aussi par `get_position`) ; chaque jour commence et finit à
+sa base (`day_base` : lieu prévu couvrant midi, sinon domicile ; deux lieux prévus qui se
+chevauchent ⇒ origine inconnue signalée, jamais devinée) ; entre deux engagements, l'origine est
+le lieu de l'engagement précédent. Deux engagements séparés de plus de 3 h ⇒ retour à la base
+entre eux. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,
+sessions de tâches situées, études hors base) reçoivent leurs trajets. Un texte de lieu iCal inconnu
 bloque le temps sans trajet et est signalé (ajouter un alias). Coordonnées jamais devinées.
 
 ### D08 — Données et moteur de transport
@@ -492,9 +497,21 @@ minimal. Statuts : `ok`
 (meilleur + alternatives, « meilleur parmi les candidats explorés », `exploration_incomplete`
 si une page suivante a échoué), `no_candidate`,
 `origin_unknown`, `unavailable`, `error` (panne, jamais présentée comme impossibilité).
-Trajets du planning : aller avec marge (10 min par défaut) avant l'engagement, retour sans
-marge ; dernier départ réalisable puis moins de correspondances ; aucun trajet ⇒
-`impossible` ; panne ⇒ `unknown` ; le créneau reste bloqué et le problème est signalé.
+Toute sélection d'itinéraire passe par `itinerary.find_trips` (MOTIS calcule, Tempo choisit
+selon le contexte) :
+
+| Contexte | Bornes | Objectif |
+|---|---|---|
+| Aller vers un engagement | départ après l'engagement précédent, arrivée avant le début − marge (10 min) | départ au plus tard |
+| Retour à la base | départ après la fin, arrivée avant la sortie suivante du jour (sinon 6 h) | arrivée au plus tôt |
+| Estimation d'une activité flexible | autour de l'heure préférée (6 h) | durée minimale |
+| Contrôle de départ | départ maintenant, arrivée avant le début − marge ; sinon au plus tôt | départ au plus tard, puis arrivée au plus tôt |
+| Recherche en conversation | choisies par l'utilisateur (2 h autour d'une borne seule) | choisi par l'utilisateur |
+
+Départage : perturbations sévères datées, puis correspondances. Les trois meilleures
+alternatives sont conservées sur chaque trajet du planning publié. Aucun trajet ⇒
+`impossible` ; panne ⇒ `unknown` ; le créneau reste bloqué et le problème est signalé. Une
+exécution de planification partage un cache : une requête identique n'atteint MOTIS qu'une fois.
 
 ## 8. Planification, stabilité et absence de solution
 

@@ -8,9 +8,7 @@ from tempo.scheduler.model import Interval
 from tempo.transport.location import (
     DeclaredStay,
     LocatedEvent,
-    OriginSource,
     PhonePosition,
-    infer_origin,
 )
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
@@ -114,60 +112,6 @@ def test_long_trip_far_after_window_still_shrinks_it() -> None:
 # 4/5/9. origin priorities --------------------------------------------------------------------
 
 
-def fresh(now: datetime) -> PhonePosition:
-    return PhonePosition(Coordinates(50.668, 4.612), 20.0, now - timedelta(minutes=1), "tracker")
-
-
-def test_fresh_gps_beats_old_event_for_imminent_departure() -> None:
-    now = at(18)
-    result = infer_origin(
-        departure=at(18, 30),
-        chain=[LocatedEvent(at(8), at(10), CAMPUS)],
-        position=fresh(now),
-        stays=[],
-        now=now,
-    )
-    assert result.source is OriginSource.CURRENT_POSITION
-
-
-def test_declared_stay_started_after_event_beats_event() -> None:
-    result = infer_origin(
-        departure=at(19),
-        chain=[LocatedEvent(at(8), at(10), CAMPUS)],
-        position=None,
-        stays=[DeclaredStay(MUM, at(12), at(23))],
-        now=at(7),
-    )
-    assert result.source is OriginSource.DECLARED_STAY
-    assert result.place == MUM
-
-
-def test_event_after_stay_start_beats_stay() -> None:
-    result = infer_origin(
-        departure=at(19),
-        chain=[LocatedEvent(at(15), at(17), CAMPUS)],
-        position=None,
-        stays=[DeclaredStay(MUM, at(0), at(23, 59))],
-        now=at(7),
-    )
-    assert result.source is OriginSource.PREVIOUS_EVENT
-
-
-def test_overlapping_declared_stays_need_clarification() -> None:
-    stays = [
-        DeclaredStay(HOME, at(0, day=2), at(0, day=4)),
-        DeclaredStay(MUM, at(12, day=3), at(0, day=4)),
-    ]
-    result = infer_origin(departure=at(19, day=3), chain=[], position=None, stays=stays, now=at(7))
-    assert result.source is OriginSource.NEEDS_CLARIFICATION
-
-
-def test_departure_in_the_past_does_not_use_current_gps() -> None:
-    now = at(18)
-    result = infer_origin(departure=at(17), chain=[], position=fresh(now), stays=[], now=now)
-    assert result.source is OriginSource.NEEDS_CLARIFICATION
-
-
 # 6. partial blocking instead of dropping a whole study window -------------------------------
 
 
@@ -211,8 +155,6 @@ def test_naive_datetimes_are_rejected_in_transport_types() -> None:
         DeclaredStay(HOME, naive, naive + timedelta(hours=1))
     with pytest.raises(ValueError):
         PhonePosition(Coordinates(0, 0), 10.0, naive, "tracker")
-    with pytest.raises(ValueError):
-        infer_origin(departure=naive, chain=[], position=None, stays=[], now=at(7))
 
 
 # static-only label (STIB has no realtime feed) ---------------------------------------------

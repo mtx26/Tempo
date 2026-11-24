@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from tempo.transport.itinerary import Objective, TripQuery, find_trips
 from tempo.transport.location import (
     LocatedEvent,
     PhonePosition,
@@ -107,19 +108,21 @@ def check_departure(
 
     deadline = start - buffer
     try:
-        candidates = (
-            provider.plan(here, target.place.coordinates, deadline, arrive_by=True)
+        best = (
+            find_trips(
+                provider,
+                TripQuery(
+                    here,
+                    target.place.coordinates,
+                    depart_after=now_u,
+                    arrive_before=deadline,
+                    objective=Objective.LATEST_DEPARTURE,
+                ),
+            ).best
             if deadline > now_u
-            else []
+            else None
         )
-        keeping_buffer = [
-            j for j in candidates if _u(j.departure) >= now_u and _u(j.arrival) <= deadline
-        ]
-        if keeping_buffer:
-            best = max(
-                keeping_buffer,
-                key=lambda j: (_u(j.departure), -j.severe_disruptions, -j.transfers),
-            )
+        if best is not None:
             leave_at = _u(best.departure)
             if planned_departure is not None and leave_at < _u(planned_departure):
                 advice = DepartureStatus.LEAVE_EARLIER
@@ -129,17 +132,20 @@ def check_departure(
                 advice = DepartureStatus.ON_TIME
             return DepartureAdvice(advice, best, leave_at, warnings=_warnings(best))
 
-        asap = [
-            j
-            for j in provider.plan(here, target.place.coordinates, now_u, arrive_by=False)
-            if _u(j.departure) >= now_u
-        ]
+        earliest = find_trips(
+            provider,
+            TripQuery(
+                here,
+                target.place.coordinates,
+                depart_after=now_u,
+                objective=Objective.EARLIEST_ARRIVAL,
+            ),
+        ).best
     except RoutingUnavailableError as exc:
         return DepartureAdvice(DepartureStatus.UNKNOWN_ROUTING, reason=str(exc))
 
-    if not asap:
+    if earliest is None:
         return DepartureAdvice(DepartureStatus.IMPOSSIBLE, reason="no journey found from here")
-    earliest = min(asap, key=lambda j: (_u(j.arrival), j.severe_disruptions, j.transfers))
     arrival = _u(earliest.arrival)
     if arrival <= start:
         return DepartureAdvice(

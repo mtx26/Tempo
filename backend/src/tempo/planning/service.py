@@ -500,6 +500,15 @@ def _travel_json(outcome: PlanningOutcome) -> list[dict[str, Any]]:
                     }
                     for leg in journey.legs
                 ],
+                "alternatives": [
+                    {
+                        "departure": alt.departure.isoformat(),
+                        "arrival": alt.arrival.isoformat(),
+                        "transfers": alt.transfers,
+                        "realtime": alt.uses_realtime,
+                    }
+                    for alt in block.alternatives
+                ],
             }
         )
     return items

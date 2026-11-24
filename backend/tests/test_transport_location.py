@@ -1,8 +1,8 @@
-"""Places, phone position freshness and future-trip origin inference (ARCHITECTURE.md).
+"""Places, phone position freshness and the day's base (ARCHITECTURE.md §7).
 
 Rules under test: current location only from the configured HA phone tracker, checked for
-freshness and accuracy; future origins come from the event chain or an explicit declaration,
-never from today's (stale) GPS; when uncertain, ask instead of guessing.
+freshness and accuracy; future days start from the planned location, else home; when
+ambiguous, ask instead of guessing.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -11,12 +11,10 @@ import pytest
 
 from tempo.transport.location import (
     DeclaredStay,
-    LocatedEvent,
-    OriginSource,
     PhonePosition,
     PositionStatus,
     assess_position,
-    infer_origin,
+    day_base,
 )
 from tempo.transport.places import Coordinates, Place, PlaceDirectory
 
@@ -89,84 +87,30 @@ def test_position_from_the_future_is_not_trusted() -> None:
     assert assess_position(position(age_minutes=-10), NOW) is PositionStatus.STALE
 
 
-# --- origin inference ------------------------------------------------------------------------
+# --- day base -----------------------------------------------------------------------------
 
 
-def event(place: Place, start_h: int, end_h: int, day: int = 1) -> LocatedEvent:
-    return LocatedEvent(
-        start=datetime(2026, 12, day, start_h, tzinfo=UTC),
-        end=datetime(2026, 12, day, end_h, tzinfo=UTC),
-        place=place,
+def test_day_base_is_the_planned_location_covering_noon_else_home() -> None:
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Europe/Brussels")
+    day = datetime(2026, 12, 3).date()
+    weekend = DeclaredStay(
+        POOL, datetime(2026, 12, 2, 18, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)
     )
-
-
-def test_origin_is_previous_event_of_the_same_day() -> None:
-    chain = [event(CAMPUS, 8, 10)]
-    result = infer_origin(
-        departure=datetime(2026, 12, 1, 16, tzinfo=UTC),
-        chain=chain,
-        position=position(),
-        stays=[],
-        now=NOW,
+    assert day_base(day, [weekend], HOME, tz) == POOL
+    assert day_base(day, [], HOME, tz) == HOME
+    evening = DeclaredStay(
+        POOL, datetime(2026, 12, 3, 18, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)
     )
-    assert result.source is OriginSource.PREVIOUS_EVENT
-    assert result.place == CAMPUS
+    assert day_base(day, [evening], HOME, tz) == HOME  # not covering the day
 
 
-def test_near_term_departure_uses_fresh_phone_position() -> None:
-    result = infer_origin(
-        departure=NOW + timedelta(minutes=45), chain=[], position=position(), stays=[], now=NOW
-    )
-    assert result.source is OriginSource.CURRENT_POSITION
-    assert result.coordinates == position().coordinates
+def test_overlapping_planned_locations_are_ambiguous_not_guessed() -> None:
+    from zoneinfo import ZoneInfo
 
-
-def test_future_departure_never_uses_todays_gps() -> None:
-    result = infer_origin(
-        departure=NOW + timedelta(days=2), chain=[], position=position(), stays=[], now=NOW
-    )
-    assert result.source is OriginSource.NEEDS_CLARIFICATION
-    assert result.coordinates is None
-
-
-def test_declared_stay_is_used_for_future_departure() -> None:
-    stay = DeclaredStay(place=HOME, start=NOW + timedelta(days=1), end=NOW + timedelta(days=3))
-    result = infer_origin(
-        departure=NOW + timedelta(days=2), chain=[], position=position(), stays=[stay], now=NOW
-    )
-    assert result.source is OriginSource.DECLARED_STAY
-    assert result.place == HOME
-
-
-def test_stale_position_for_near_term_departure_needs_clarification() -> None:
-    result = infer_origin(
-        departure=NOW + timedelta(minutes=30),
-        chain=[],
-        position=position(age_minutes=60),
-        stays=[],
-        now=NOW,
-    )
-    assert result.source is OriginSource.NEEDS_CLARIFICATION
-    assert "stale" in result.reason
-
-
-def test_previous_event_on_another_day_is_not_used() -> None:
-    result = infer_origin(
-        departure=datetime(2026, 12, 2, 9, tzinfo=UTC),
-        chain=[event(CAMPUS, 8, 10, day=1)],
-        position=None,
-        stays=[],
-        now=NOW,
-    )
-    assert result.source is OriginSource.NEEDS_CLARIFICATION
-
-
-def test_event_still_running_at_departure_is_not_an_origin() -> None:
-    result = infer_origin(
-        departure=datetime(2026, 12, 1, 9, tzinfo=UTC),
-        chain=[event(CAMPUS, 8, 10)],
-        position=None,
-        stays=[],
-        now=NOW,
-    )
-    assert result.source is OriginSource.NEEDS_CLARIFICATION
+    stays = [
+        DeclaredStay(HOME, datetime(2026, 12, 2, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)),
+        DeclaredStay(POOL, datetime(2026, 12, 3, 6, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)),
+    ]
+    assert day_base(datetime(2026, 12, 3).date(), stays, HOME, ZoneInfo("Europe/Brussels")) is None

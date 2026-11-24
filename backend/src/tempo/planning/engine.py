@@ -19,7 +19,7 @@ re-run by the worker. Rules (ARCHITECTURE.md, ARCHITECTURE.md, ARCHITECTURE.md):
 """
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,11 +37,13 @@ from tempo.scheduler.model import (
 )
 from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import validate_plan
-from tempo.transport.location import DeclaredStay, LocatedEvent
+from tempo.transport.itinerary import CachedRouting, TripQuery, find_trips
+from tempo.transport.location import DeclaredStay, LocatedEvent, day_base
 from tempo.transport.places import Place
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
 from tempo.transport.travel import (
     DEFAULT_BUFFER,
+    MAX_TRAVEL,
     StudyWindow,
     TravelBlock,
     plan_day_travel,
@@ -154,35 +156,43 @@ def free_minutes(availability: list[Interval], busy: list[Interval], until: date
     return int(total // 60)
 
 
-def _base_place(day: date, data: PlanningInput) -> Place:
-    noon = datetime.combine(day, time(12), tzinfo=data.timezone).astimezone(UTC)
-    covering = [s for s in data.stays if utc(s.start) <= noon < utc(s.end)]
-    return covering[0].place if len(covering) == 1 else data.home
-
-
-def _training_travel(
-    request: TrainingRequest, base: Place, routing: RoutingProvider, issues: list[str]
+def _activity_travel(
+    request: TrainingRequest, base: Place | None, routing: RoutingProvider, issues: list[str]
 ) -> tuple[timedelta, timedelta]:
+    """Travel time to reserve around a flexible activity before it is placed (estimate around
+    its preferred time; the actual journeys are chosen once it is placed)."""
     if request.place is None or request.place == base:
         return timedelta(0), timedelta(0)
+    if base is None:
+        issues.append(f"activity '{request.title}': travel origin unknown; travel reserved")
+        return UNROUTED_TRAINING_TRAVEL, UNROUTED_TRAINING_TRAVEL
     anchor = request.preferred_start or request.earliest_start
     try:
-        there = routing.plan(base.coordinates, request.place.coordinates, anchor, arrive_by=True)
-        back = routing.plan(
-            request.place.coordinates, base.coordinates, anchor + request.duration, arrive_by=False
-        )
+        there = find_trips(
+            routing,
+            TripQuery(
+                base.coordinates, request.place.coordinates, arrive_before=anchor, span=MAX_TRAVEL
+            ),
+        ).best
+        back = find_trips(
+            routing,
+            TripQuery(
+                request.place.coordinates,
+                base.coordinates,
+                depart_after=anchor + request.duration,
+                span=MAX_TRAVEL,
+            ),
+        ).best
     except RoutingUnavailableError as exc:
-        issues.append(f"training '{request.title}': routing unavailable ({exc}); travel reserved")
+        issues.append(f"activity '{request.title}': routing unavailable ({exc}); travel reserved")
         return UNROUTED_TRAINING_TRAVEL, UNROUTED_TRAINING_TRAVEL
-    before = min((j.duration for j in there), default=None)
-    after = min((j.duration for j in back), default=None)
-    if before is None or after is None:
+    if there is None or back is None:
         issues.append(
-            f"training '{request.title}': no journey to/from {request.place.name}; travel reserved"
+            f"activity '{request.title}': no journey to/from {request.place.name}; travel reserved"
         )
     return (
-        UNROUTED_TRAINING_TRAVEL if before is None else before,
-        UNROUTED_TRAINING_TRAVEL if after is None else after,
+        UNROUTED_TRAINING_TRAVEL if there is None else there.duration,
+        UNROUTED_TRAINING_TRAVEL if back is None else back.duration,
     )
 
 
@@ -198,6 +208,7 @@ def _outings(events: list[LocatedEvent]) -> list[list[LocatedEvent]]:
 
 
 def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutcome:
+    routing = CachedRouting(routing)  # one planning run: identical requests reach MOTIS once
     tz, now = data.timezone, utc(data.now)
     horizon = Interval(now, utc(data.horizon_end))
     issues: list[str] = []
@@ -212,14 +223,17 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
             )
     fixed_busy = [Interval(c.start, c.end) for c in fixed]
 
-    # 2. trainings
+    def base_of(day: date) -> Place | None:
+        return day_base(day, data.stays, data.home, tz)
+
+    # 2. flexible activities (trainings, personal, located task sessions)
     flexible: list[FlexibleActivity] = []
     by_id = {t.activity_id: t for t in data.trainings}
     for request in data.trainings:
         if utc(request.latest_end) <= now:
             continue
-        base = _base_place(request.earliest_start.astimezone(tz).date(), data)
-        before, after = _training_travel(request, base, routing, issues)
+        base = base_of(request.earliest_start.astimezone(tz).date())
+        before, after = _activity_travel(request, base, routing, issues)
         flexible.append(
             FlexibleActivity(
                 activity_id=request.activity_id,
@@ -241,7 +255,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     activity_plan = plan_activities(flexible, fixed_busy, tz)
     for missing in activity_plan.unplaced:
         rule = " and its category windows" if by_id[missing].allowed is not None else ""
-        issues.append(f"training '{by_id[missing].title}': no free slot in its window{rule}")
+        issues.append(f"activity '{by_id[missing].title}': no free slot in its window{rule}")
     # Independent check of the hard category windows (never trust the solver alone).
     category_violations = [
         f"activity '{by_id[p.activity_id].title}' placed outside its category windows"
@@ -264,13 +278,26 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     for event in located:
         days.setdefault(event.start.astimezone(tz).date(), []).append(event)
     for day, events in sorted(days.items()):
-        base = _base_place(day, data)
-        for outing in _outings(events):
+        base = base_of(day)
+        if base is None:
+            issues.append(
+                f"planned locations overlap on {day.isoformat()}: travel origin unknown "
+                "(say where you will be)"
+            )
+        outings = _outings(events)
+        for index, outing in enumerate(outings):
             first_start = min(utc(e.start) for e in outing)
             # Already under way: the departure check (worker) handles the current trip.
             start_place: Place | None = None if first_start <= now else base
+            # The way back must be home before the next outing of the day starts.
+            following = outings[index + 1] if index + 1 < len(outings) else None
             plan = plan_day_travel(
-                outing, routing, buffer=data.buffer, start_place=start_place, end_place=base
+                outing,
+                routing,
+                buffer=data.buffer,
+                start_place=start_place,
+                end_place=base,
+                return_by=None if following is None else min(e.start for e in following),
             )
             travel += plan.blocks
             issues += [i for i in plan.issues if not i.startswith("origin unknown")]

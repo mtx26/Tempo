@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from tempo.scheduler.model import Interval
+from tempo.transport.itinerary import CachedRouting
 from tempo.transport.location import LocatedEvent
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
@@ -186,7 +187,8 @@ def test_identical_routing_queries_are_cached() -> None:
     ]
     events = [located(CAMPUS, at(10, 30), at(12))]
     routing = FakeRouting(TIMES)
-    travel_aware_study_windows(windows, events, routing, buffer=BUFFER)
+    # One planning run shares one cache (the engine wraps its provider in CachedRouting).
+    travel_aware_study_windows(windows, events, CachedRouting(routing), buffer=BUFFER)
     assert len(routing.calls) == len(set(routing.calls))
 
 
@@ -222,3 +224,17 @@ def test_planner_never_places_study_on_travel_or_away_time() -> None:
     for block in result.blocks:
         assert not any(b.overlaps(block.interval) for b in busy)
         assert any(w.contains(block.interval) for w in study.windows)
+
+
+def test_way_back_has_a_deadline_and_is_reported_when_it_cannot_be_kept() -> None:
+    """The return trip is not unbounded: it must reach the base before ``return_by``."""
+    routing = FakeRouting(TIMES)
+    events = [located(POOL, at(9), at(10))]
+    ok = plan_day_travel(events, routing, start_place=CAMPUS, end_place=CAMPUS, return_by=at(11))
+    back = ok.blocks[-1]
+    assert back.status is TravelStatus.ROUTED and back.end <= at(11)
+    late = plan_day_travel(
+        events, routing, start_place=CAMPUS, end_place=CAMPUS, return_by=at(10, 30)
+    )
+    assert late.blocks[-1].status is TravelStatus.IMPOSSIBLE
+    assert any("no return journey" in issue for issue in late.issues)

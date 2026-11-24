@@ -1,5 +1,6 @@
 """End-to-end planning pipeline on a realistic week (fake routing: 30 min between places)."""
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -163,3 +164,43 @@ def test_free_minutes_before_a_deadline_counts_overlapping_busy_time_once() -> N
     assert free_minutes(window, busy, at(7, 23)) == 720 - 180
     assert free_minutes(window, busy, at(7, 15)) == 420 - 180
     assert free_minutes(window, busy, at(7, 7)) == 0
+
+
+def test_overlapping_planned_locations_are_reported_not_guessed() -> None:
+    stays = [DeclaredStay(MUM, at(11, 0), at(13, 0)), DeclaredStay(HOME, at(12, 6), at(12, 23))]
+    outcome = run_planning(week(stays=stays), FakeRouting())
+    assert any("planned locations overlap on 2026-12-12" in i for i in outcome.issues)
+    assert not [b for b in outcome.travel if b.start.day == 12 and b.origin == HOME]
+
+
+def test_mandatory_travel_blocks_keep_their_alternatives() -> None:
+    class Several(FakeRouting):
+        """Three journeys per answer, 15 min apart."""
+
+        def plan(self, origin, destination, time, *, arrive_by):  # type: ignore[no-untyped-def]
+            first = super().plan(origin, destination, time, arrive_by=arrive_by)[0]
+            step = timedelta(minutes=-15 if arrive_by else 15)
+            return [
+                Journey(
+                    tuple(
+                        replace(
+                            leg,
+                            start=leg.start + k * step,
+                            end=leg.end + k * step,
+                            scheduled_start=leg.start + k * step,
+                            scheduled_end=leg.end + k * step,
+                        )
+                        for leg in first.legs
+                    ),
+                    first.departure + k * step,
+                    first.arrival + k * step,
+                    0,
+                    "fake",
+                )
+                for k in range(3)
+            ]
+
+    outcome = run_planning(week(), Several())
+    routed = [b for b in outcome.travel if b.journey is not None]
+    assert routed and all(b.alternatives for b in routed)
+    assert all(b.journey not in b.alternatives for b in routed)
