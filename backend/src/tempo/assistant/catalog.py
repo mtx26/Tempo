@@ -2032,6 +2032,9 @@ def _search(
         reason = (
             "aucun trajet ne respecte les critères demandés dans la plage explorée"
             if found.excluded_by_criteria
+            else "MOTIS ne connaît aucun itinéraire entre ces points (coordonnées loin de toute "
+            "rue ou de tout arrêt ? vérifiez le lieu)"
+            if found.explored == 0
             else "aucun trajet dans la plage explorée"
         )
         return {"status": "no_candidate", **explored, "detail": reason + interrupted}

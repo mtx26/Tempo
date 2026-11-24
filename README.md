@@ -119,6 +119,12 @@ MSYS_NO_PATHCONV=1 docker run -d --name tempo-ha-e2e --network tempo-dev_front \
 cd backend && uv run python scripts/ha_e2e.py ../deploy/secrets/tempo_api_token  # 15 contrôles
 ```
 
+Scénario de recette sur la pile complète (`docker compose ... up -d`, MOTIS national) :
+stabilité, déplacement minimal, trajets réels, proposition approuvée en conversation, plan
+partiel expliqué, alternatives, trajet direct entre activités, localisation (15 contrôles ;
+données de développement uniquement) :
+`cd backend && uv run python scripts/live_scenario.py ../deploy/secrets/tempo_api_token`.
+
 ## Configuration
 
 Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou des variables

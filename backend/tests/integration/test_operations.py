@@ -990,3 +990,19 @@ def test_assistant_reads_where_the_user_is_or_will_be(session: Session) -> None:
     assert (stay["source"], stay["place_id"]) == ("planned_location", "club")
     now = ok(session, "get_location")
     assert now["source"] in ("gps", "schedule", "home") and "gps" in now
+
+
+def test_unreachable_point_is_explained_not_reported_as_a_busy_range(session: Session) -> None:
+    class Nothing:
+        def plan(self, *args: object, **kwargs: object) -> list[Journey]:
+            return []
+
+    seed(session)
+    found = run_operation(
+        OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=Nothing()),  # type: ignore[arg-type]
+        "search_journey",
+        {"origin": "place:home", "destination": "place:club", "depart_after": "2026-12-08T10:00"},
+    )["result"]
+    assert (
+        found["status"] == "no_candidate" and "aucun itinéraire entre ces points" in found["detail"]
+    )

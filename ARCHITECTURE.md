@@ -713,6 +713,13 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
 | B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification ; pile Docker complète (postgres, migrate, api, worker, relais temps réel, MOTIS national) démarrée et utilisée : jobs du worker sains, replanification et recherche d'itinéraire réelles ; `scripts/backup.sh` et `restore_drill.sh` exécutés contre le PostgreSQL de la pile (6 tables identiques, schéma à jour) ; mise à jour des données de routage (`gtfs_update`) exécutée contre le portail réel. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm et exercice de restauration sur le serveur (non autorisés). |
 
+Recette sur la pile complète (`scripts/live_scenario.py`, PostgreSQL et MOTIS national réels,
+worker actif) : 15/15 — rendez-vous en créneau libre sans aucun déplacement, rendez-vous sur un
+bloc ⇒ un seul bloc déplacé, trajets réels sans étude pendant le trajet, bloc verrouillé en
+conflit ⇒ proposition approuvée en conversation, échéance stricte impossible ⇒ plan partiel,
+capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
+trajet direct entre deux activités, localisation future.
+
 Dernière exécution locale : backend **505 tests réussis, 0 ignoré** (PostgreSQL 16
 réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
 portail Belgian Mobility réel en anonyme), couverture 93 %, Ruff et mypy strict propres ;
