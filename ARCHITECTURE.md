@@ -149,12 +149,12 @@ supplémentaire.
 
 | Module | Responsabilité |
 |---|---|
-| `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) ; **unique surface de mutation** pour l'IA et l'API (`/v1/operations`). |
+| `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) : **unique surface métier**, lectures comprises, pour l'IA, Home Assistant et tout client (`/v1/operations`). |
 | `assistant/agent.py` | Boucle d'appels d'outils Claude (Messages API, `claude-opus-5-5`, prompt système mis en cache, repli serveur `fallbacks`) ; bornée à 16 étapes. |
 | `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`ai/actions.py`, `ai/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. |
-| `api/` | FastAPI : `/v1/conversation`, `/v1/operations`, lectures pour l'affichage passif HA (`/v1/schedule`, `/v1/summary`, `/v1/tasks`, `/v1/places`, `/v1/activities`, `/v1/proposals`, `/v1/notifications`), `/v1/location` (GPS réel), réglages techniques (`/v1/settings`), accusé de notification. **Aucune route REST de mutation métier.** |
+| `api/` | FastAPI, cinq routes : `/health` (public), `/v1/status`, `/v1/conversation`, `/v1/operations` (liste et exécution), `/v1/location` (GPS réel poussé par HA : télémétrie, jamais une opération accessible au LLM). |
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
-| `planning/` | Chargement des entrées, moteur (`engine.py`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), réglages validés (`settings.py`), vues. |
+| `planning/` | Chargement des entrées, moteur (`engine.py`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), vues. |
 | `scheduler/` | CP-SAT : étude (`solver.py`), activités flexibles (`activities.py`), validateur indépendant (`validate.py`). |
 | `transport/` | Lieux, position, client MOTIS, trajets obligatoires, contrôle de départ, relais GTFS-RT, flux belges, STIB temps réel, mise à jour GTFS. |
 | `sync/` | iCal (`ics.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
@@ -691,7 +691,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
 | B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification ; image backend construite et pile de développement Docker (postgres, migrate, api) utilisée par la recette Home Assistant réelle. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
 
-Dernière exécution locale (24/11/2026) : backend **505 tests réussis, 0 ignoré** (PostgreSQL 16
+Dernière exécution locale : backend **505 tests réussis, 0 ignoré** (PostgreSQL 16
 réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
 portail Belgian Mobility réel en anonyme), couverture 93 %, Ruff et mypy strict propres ;
 intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres ; recette dans un vrai
@@ -717,7 +717,8 @@ autorisation de déploiement Swarm.
 - Image de routage : binaire officiel MOTIS v2.11.4 épinglé par SHA-256 ; reconstruction des
   graphes dans un volume séparé avec bascule atomique et conservation de la version précédente.
 - Les e-mails libres interprétés par LLM ne sont jamais appliqués sans approbation.
-- Les routes REST de mutation historiques et `/v1/interpret` ont été supprimées (24/11/2026) :
-  toute modification métier passe par le catalogue (`/v1/conversation` ou `/v1/operations`).
-  L'interpréteur LLM `ai/llm.py` ne sert plus qu'aux e-mails libres du coach (proposition à
-  approuver).
+- Une seule surface métier : le catalogue d'opérations (`/v1/conversation`, `/v1/operations`).
+  L'intégration HA lit elle aussi par opérations (`get_summary`, `get_schedule`, `list_tasks`,
+  `list_proposals`, `list_notifications`, `get_context`, `list_places`) et règle ses paramètres
+  techniques par `update_settings`. L'interpréteur LLM `ai/llm.py` ne sert qu'aux e-mails libres
+  du coach (proposition à approuver).

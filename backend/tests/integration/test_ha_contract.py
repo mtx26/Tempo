@@ -116,8 +116,8 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             assert len(rules["result"]["weekly_windows"]) == 7
             await op("update_settings", {"home_place_id": "home"})
             # technical setting pushed by the options flow
-            await client.patch_settings({"tracker_entity_id": "device_tracker.phone"})
-            settings = await client.settings()
+            await client.update_settings({"tracker_entity_id": "device_tracker.phone"})
+            settings = await client.context()
             assert settings["home_place_id"] == "home"
             assert settings["tracker_entity_id"] == "device_tracker.phone"
             soon = (datetime.now(UTC) + timedelta(days=3)).date().isoformat()
@@ -129,7 +129,7 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             await op("log_work", {"task_id": task["id"], "minutes": 30})
             tasks = await client.tasks()
             assert [t["id"] for t in tasks] == [task["id"]]
-            assert tasks[0]["remaining_minutes"] == 90 and tasks[0]["target_kind"] == "soft"
+            assert tasks[0]["remaining_minutes"] == 90 and tasks[0]["hard_deadline"] is False
             start = datetime.now(UTC) + timedelta(days=2)
             await op(
                 "create_event",
@@ -141,7 +141,6 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
                     "place_id": "club",
                 },
             )
-            assert (await client.activities())[0]["title"] == "Concert"
             await client.post_location(
                 {
                     "entity_id": "device_tracker.phone",
@@ -152,11 +151,12 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
                 }
             )
             items = await client.schedule(datetime.now(UTC), datetime.now(UTC) + timedelta(days=7))
-            assert any(i["type"] == "personal" for i in items)
+            assert any(i["type"] == "personal" and i["title"] == "Concert" for i in items)
             summary = await client.summary()
             assert summary["remaining_study_minutes"] == 90
             assert await client.proposals() == []
             assert isinstance(await client.notifications(), list)
+            assert summary["to_confirm"] == []
             # Conversation without LLM: deterministic fallback, real data, nothing invented.
             question = await client.conversation("combien d'heures d'étude il me reste ?", "c1")
             assert question["used_llm"] is False and "1 h 30" in question["reply"]

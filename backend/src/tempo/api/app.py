@@ -13,8 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from tempo import __version__
 from tempo.api.assistant import router as assistant_router
 from tempo.api.auth import FailureLimiter, token_matches
-from tempo.api.ha import router as ha_router
-from tempo.api.planning import router as planning_router
+from tempo.api.location import router as location_router
 from tempo.assistant.agent import build_assistant
 from tempo.config import Settings
 from tempo.transport.motis import MotisClient
@@ -80,7 +79,6 @@ def create_app(settings: Settings) -> FastAPI:
     def service_status() -> dict[str, str]:
         return {"version": __version__, "timezone": settings.timezone}
 
-    app.include_router(ha_router, dependencies=[Depends(require_token)])
-    app.include_router(planning_router, dependencies=[Depends(require_token)])
+    app.include_router(location_router, dependencies=[Depends(require_token)])
     app.include_router(assistant_router, dependencies=[Depends(require_token)])
     return app

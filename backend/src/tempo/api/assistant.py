@@ -17,7 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from tempo.api.ha import SessionDep
+from tempo.api.location import SessionDep
 from tempo.assistant import fallback
 from tempo.assistant.agent import Assistant, LLMUnavailableError
 from tempo.assistant.catalog import CATALOG, OpContext, run_operation

@@ -1,20 +1,20 @@
-"""Routes consumed by the Home Assistant integration: passive task list and the phone's real
-GPS position. Business changes go through the conversation (``/v1/conversation``)."""
+"""Database session dependency and the phone position pushed by Home Assistant.
+
+The position is telemetry, not a business change: it is the ONLY real location source
+(ARCHITECTURE.md §2) and is never writable through the operation catalogue or the LLM.
+"""
 
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from tempo.api.schemas import PositionIn, TaskOut
-from tempo.db.models import PhonePositionRow, StudyTaskRow
-from tempo.domain.ops import remaining_minutes
+from tempo.db.models import PhonePositionRow
 
-ACTOR = "home_assistant"
 router = APIRouter(prefix="/v1")
 
 
@@ -36,29 +36,19 @@ def get_session(request: Request) -> Iterator[Session]:
 SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 
 
-def _out(row: StudyTaskRow) -> TaskOut:
-    return TaskOut(
-        id=row.id,
-        subject=row.subject,
-        effort_minutes=row.effort_minutes,
-        completed_minutes=row.completed_minutes,
-        remaining_minutes=remaining_minutes(row),
-        target_date=row.target_date,
-        target_kind=row.target_kind,
-        archived=row.archived,
-    )
+class PositionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-
-@router.get("/tasks")
-def list_tasks(session: SessionDep) -> list[TaskOut]:
-    rows = session.scalars(
-        select(StudyTaskRow).order_by(StudyTaskRow.created_at, StudyTaskRow.id)
-    ).all()
-    return [_out(r) for r in rows]
+    entity_id: str = Field(pattern=r"^device_tracker\.[a-z0-9_]{1,200}$")
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy_m: float = Field(ge=0, le=100_000)
+    observed_at: AwareDatetime
 
 
 @router.post("/location", status_code=status.HTTP_204_NO_CONTENT)
 def push_location(body: PositionIn, session: SessionDep) -> Response:
+    """Keep only the latest observation per tracker (an older one never overwrites)."""
     values = {**body.model_dump(), "received_at": datetime.now(UTC)}
     statement = insert(PhonePositionRow).values(**values)
     statement = statement.on_conflict_do_update(

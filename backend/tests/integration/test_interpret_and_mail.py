@@ -146,7 +146,8 @@ def test_training_mail_import_is_narrow_idempotent_and_protects_races(
         assert trainings[0].source == "email" and trainings[0].place_id == "club"
         kinds = sorted(n.kind for n in s.scalars(select(NotificationRow)))
         assert kinds == ["training_added", "training_unparsed"]
-    proposals = api.get("/v1/proposals", headers=AUTH).json()
+    listed = api.post("/v1/operations/list_proposals", json={}, headers=AUTH).json()
+    proposals = listed["result"]["proposals"]
     assert len(proposals) == 1 and proposals[0]["kind"] == "training_import"
     approve = {"proposal_id": proposals[0]["id"], "approve": True}
     decided = api.post("/v1/operations/decide_proposal", json=approve, headers=AUTH)

@@ -15,6 +15,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx2
@@ -76,6 +77,13 @@ def onboard(http: httpx2.Client) -> str:
     return access
 
 
+def op(http: httpx2.Client, name: str, **arguments: object) -> Any:
+    """Read the backend through its operation catalogue (the only API surface)."""
+    response = http.post(f"{BACKEND}/v1/operations/{name}", json=arguments, headers=BACK)
+    response.raise_for_status()
+    return response.json()["result"]
+
+
 def main() -> None:
     with httpx2.Client(timeout=60) as http:
         wait_ha(http)
@@ -127,7 +135,7 @@ def main() -> None:
             json={"tracker_entity_id": "device_tracker.phone"},
         ).json()
         check("config entry created", done.get("type") == "create_entry", str(done)[:200])
-        settings = http.get(f"{BACKEND}/v1/settings", headers=BACK).json()
+        settings = op(http, "get_context")
         check(
             "tracker pushed to the backend",
             settings.get("tracker_entity_id") == "device_tracker.phone",
@@ -162,10 +170,8 @@ def main() -> None:
         target = (today + timedelta(days=10)).strftime("%d/%m/%Y")
         added = say(f"ajoute 2h de maths pour le {target}")
         check("task added through HA conversation", "Ajouté" in added and "maths" in added, added)
-        tasks = [
-            t for t in http.get(f"{BACKEND}/v1/tasks", headers=BACK).json() if not t["archived"]
-        ]
-        check("task stored in the backend", "maths" in [t["subject"] for t in tasks], str(tasks))
+        tasks = op(http, "list_tasks")["tasks"]
+        check("task stored in the backend", "maths" in [t["title"] for t in tasks], str(tasks))
         total = sum(t["remaining_minutes"] or 0 for t in tasks)
         hours, minutes = divmod(total, 60)
         expected = f"{hours} h" + (f" {minutes:02d}" if minutes else "")

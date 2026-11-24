@@ -1,10 +1,10 @@
-"""HTTP API used by the Home Assistant integration (read-only tasks, phone position) and
-task changes through the operation catalogue.
+"""Tasks through the operation catalogue and the phone position pushed by Home Assistant.
 
 Runs the real FastAPI app against the per-session PostgreSQL test database.
 """
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,10 +43,16 @@ def create_task(api: TestClient, **overrides: object) -> dict[str, object]:
     return result
 
 
-def test_task_routes_require_the_token_and_are_read_only(api: TestClient) -> None:
-    assert api.get("/v1/tasks").status_code == 401
+def tasks(api: TestClient) -> list[dict[str, Any]]:
+    response = api.post("/v1/operations/list_tasks", json={}, headers=AUTH)
+    assert response.status_code == 200, response.text
+    found: list[dict[str, Any]] = response.json()["result"]["tasks"]
+    return found
+
+
+def test_task_operations_require_the_token(api: TestClient) -> None:
+    assert api.post("/v1/operations/list_tasks", json={}).status_code == 401
     assert api.post("/v1/operations/create_task", json={}).status_code == 401
-    assert api.post("/v1/tasks", json={}, headers=AUTH).status_code == 405
 
 
 def test_created_task_has_soft_target_by_default(api: TestClient) -> None:
@@ -57,17 +63,16 @@ def test_created_task_has_soft_target_by_default(api: TestClient) -> None:
 
 
 def test_hard_deadline_must_be_explicit(api: TestClient) -> None:
-    listed = api.get("/v1/tasks", headers=AUTH).json()
-    assert listed == []
+    assert tasks(api) == []
     task = create_task(api, hard_deadline=True)
     assert task["hard_deadline"] is True
-    assert api.get("/v1/tasks", headers=AUTH).json()[0]["target_kind"] == "hard"
+    assert tasks(api)[0]["hard_deadline"] is True
 
 
 def test_tasks_are_listed(api: TestClient) -> None:
     create_task(api, title="Analyse")
     create_task(api, title="Chimie")
-    subjects = [t["subject"] for t in api.get("/v1/tasks", headers=AUTH).json()]
+    subjects = [t["title"] for t in tasks(api)]
     assert subjects == ["Analyse", "Chimie"]
 
 
@@ -77,8 +82,7 @@ def test_progress_update_changes_remaining_effort(api: TestClient) -> None:
         "/v1/operations/log_work", json={"task_id": task["id"], "minutes": 150}, headers=AUTH
     )
     assert response.status_code == 200, response.text
-    listed = api.get("/v1/tasks", headers=AUTH).json()
-    assert listed[0]["remaining_minutes"] == 450
+    assert tasks(api)[0]["remaining_minutes"] == 450
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,5 @@
-"""Home Assistant read routes, technical settings and the operation catalogue over HTTP, on a
-REAL PostgreSQL."""
+"""The operation catalogue over HTTP (what Home Assistant and any client use), on a REAL
+PostgreSQL: reads, technical settings and business changes share one surface."""
 
 from collections.abc import Iterator
 from datetime import datetime
@@ -77,7 +77,7 @@ def configure(api: TestClient) -> None:
         "horizon_days": 6,
         "tracker_entity_id": "device_tracker.phone",
     }
-    assert api.patch("/v1/settings", json=patch, headers=AUTH).status_code == 204
+    done(api, "update_settings", **patch)
 
 
 def add_maths(api: TestClient, minutes: int) -> None:
@@ -111,22 +111,27 @@ def run_replan(engine: Engine) -> None:
 
 
 def test_every_route_requires_the_token(api: TestClient) -> None:
-    for path in (
-        "/v1/summary",
-        "/v1/places",
-        "/v1/settings",
-        "/v1/activities",
-        "/v1/proposals",
-        "/v1/notifications",
-    ):
-        assert api.get(path).status_code == 401
-    assert api.post("/v1/operations/plan_now", json={}).status_code == 401
+    assert api.get("/v1/operations").status_code == 401
+    for name in ("get_summary", "list_places", "plan_now"):
+        assert api.post(f"/v1/operations/{name}", json={}).status_code == 401
+    assert api.post("/v1/conversation", json={"text": "x"}).status_code == 401
+    assert api.post("/v1/location", json={}).status_code == 401
 
 
-def test_business_changes_have_no_rest_route(api: TestClient) -> None:
-    """Product rule: every change goes through the catalogue (conversation or operations)."""
+def test_only_the_catalogue_is_exposed(api: TestClient) -> None:
+    """One surface: no dedicated REST route for reads or business changes."""
     some = "00000000-0000-0000-0000-000000000000"
     for method, path in (
+        ("get", "/v1/summary"),
+        ("get", "/v1/schedule"),
+        ("get", "/v1/tasks"),
+        ("get", "/v1/places"),
+        ("get", "/v1/settings"),
+        ("patch", "/v1/settings"),
+        ("get", "/v1/activities"),
+        ("get", "/v1/proposals"),
+        ("get", "/v1/notifications"),
+        ("post", f"/v1/notifications/{some}/ack"),
         ("post", "/v1/replan"),
         ("put", "/v1/places/home"),
         ("delete", "/v1/places/home"),
@@ -143,22 +148,19 @@ def test_business_changes_have_no_rest_route(api: TestClient) -> None:
 
 def test_configuration_round_trip_and_validation(api: TestClient) -> None:
     configure(api)
-    places = api.get("/v1/places", headers=AUTH).json()
+    places = done(api, "list_places")["places"]
     assert [p["id"] for p in places] == ["campus", "club", "home"]
     assert places[0]["aliases"] == ["auditoire a.1"]
     assert len(done(api, "get_rules")["weekly_windows"]) == 7
-    settings = api.get("/v1/settings", headers=AUTH).json()
+    settings = done(api, "get_context")
     assert settings["home_place_id"] == "home" and settings["horizon_days"] == 6
     bad = {"name": "x", "latitude": 1, "longitude": 1, "aliases": ["Auditoire A.1"]}
     assert "déjà utilisé" in op(api, "upsert_place", place_id="other", **bad).json()["detail"]
     assert op(api, "upsert_place", place_id="Bad-Id", **bad).status_code == 422
     assert "domicile" in op(api, "delete_place", place_id="home").json()["detail"]
-    assert (
-        api.patch("/v1/settings", json={"home_place_id": "nowhere"}, headers=AUTH).status_code
-        == 422
-    )
-    prefs = {"study_preferences": {"preferred_block_minutes": 7}}
-    assert api.patch("/v1/settings", json=prefs, headers=AUTH).status_code == 422
+    assert op(api, "update_settings", home_place_id="nowhere").status_code == 422
+    prefs = {"preferred_block_minutes": 7}
+    assert op(api, "update_settings", study_preferences=prefs).status_code == 422
     window = [{"weekday": 0, "start": "08:00", "end": "07:00", "place_id": "home"}]
     assert op(api, "set_weekly_availability", windows=window).status_code == 422
 
@@ -190,7 +192,7 @@ def test_activities(api: TestClient) -> None:
         preferred_start=at(8, 18).isoformat(),
     )["activity"]
     assert training["notes"] == "45 min EF"
-    listed = api.get("/v1/activities", headers=AUTH).json()
+    listed = done(api, "list_activities")["activities"]
     assert {a["kind"] for a in listed} == {"race", "training"}
     lock = op(api, "set_lock", target_id=training["id"], locked=True)
     assert lock.status_code == 422  # not placed yet
@@ -204,7 +206,7 @@ def test_schedule_and_summary_after_planning(api: TestClient, engine: Engine) ->
     done(api, "create_event", **RACE)
     run_replan(engine)
     params = {"start": at(7, 0).isoformat(), "end": at(13, 0).isoformat()}
-    items = api.get("/v1/schedule", params=params, headers=AUTH).json()
+    items = done(api, "get_schedule", **params)["items"]
     types = {i["type"] for i in items}
     assert {"class", "study", "race", "travel"} <= types
     assert next(i for i in items if i["type"] == "class")["place_id"] == "campus"
@@ -217,11 +219,11 @@ def test_schedule_and_summary_after_planning(api: TestClient, engine: Engine) ->
         )
         == 180
     )
-    summary = api.get("/v1/summary", headers=AUTH).json()
+    summary = done(api, "get_summary")
     assert summary["plan_status"] == "complete"
     assert summary["remaining_study_minutes"] == 180
     bad = {"start": at(13, 0).isoformat(), "end": at(7, 0).isoformat()}
-    assert api.get("/v1/schedule", params=bad, headers=AUTH).status_code == 422
+    assert op(api, "get_schedule", **bad).status_code == 422
 
 
 def locked_blocks(engine: Engine) -> list[StudyBlockRow]:
@@ -257,9 +259,9 @@ def test_conflict_proposal_approval_flow(api: TestClient, engine: Engine) -> Non
         s.add(StudyBlockRow(task_id=task.id, start_at=at(8, 11), end_at=at(8, 12, 30), locked=True))
         s.commit()
     run_replan(engine)
-    proposals = api.get("/v1/proposals", headers=AUTH).json()
+    proposals = done(api, "list_proposals")["proposals"]
     assert len(proposals) == 1 and proposals[0]["kind"] == "unlock_block"
-    assert api.get("/v1/summary", headers=AUTH).json()["pending_proposals"] == 1
+    assert done(api, "get_summary")["pending_proposals"] == 1
     decided = done(api, "decide_proposal", proposal_id=proposals[0]["id"], approve=True)
     assert decided["proposal"]["status"] == "approved"
     again = op(api, "decide_proposal", proposal_id=proposals[0]["id"], approve=False)
@@ -288,10 +290,10 @@ def test_notifications_and_replan_request(api: TestClient, engine: Engine) -> No
         )
         s.commit()
     run_replan(engine)
-    notes = api.get("/v1/notifications", headers=AUTH).json()
+    notes = done(api, "list_notifications")["notifications"]
     target = next(n for n in notes if "Salle inconnue" in n["message"])
-    assert api.post(f"/v1/notifications/{target['id']}/ack", headers=AUTH).status_code == 204
-    remaining = api.get("/v1/notifications", headers=AUTH).json()
+    done(api, "acknowledge_notification", id=target["id"])
+    remaining = done(api, "list_notifications")["notifications"]
     assert all(n["id"] != target["id"] for n in remaining)
     # No routing engine in this API instance: the worker re-plans (request recorded).
     assert done(api, "plan_now")["status"] == "requested"
@@ -299,8 +301,8 @@ def test_notifications_and_replan_request(api: TestClient, engine: Engine) -> No
 
 def test_hardening_limits(api: TestClient) -> None:
     configure(api)
-    assert api.get("/v1/notifications", params={"limit": -1}, headers=AUTH).status_code == 422
-    assert api.get("/v1/notifications", params={"limit": 500}, headers=AUTH).status_code == 422
+    assert op(api, "list_notifications", limit=-1).status_code == 422
+    assert op(api, "list_notifications", limit=500).status_code == 422
     huge = {
         "study_preferences": {
             "granularity_minutes": 1,
@@ -309,7 +311,7 @@ def test_hardening_limits(api: TestClient) -> None:
             "max_block_minutes": 1,
         }
     }
-    assert api.patch("/v1/settings", json=huge, headers=AUTH).status_code == 422
+    assert op(api, "update_settings", **huge).status_code == 422
     many = {"name": "x", "latitude": 1, "longitude": 1, "aliases": [f"a{i}" for i in range(51)]}
     assert op(api, "upsert_place", place_id="x", **many).status_code == 422
 

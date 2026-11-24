@@ -176,6 +176,19 @@ def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
         .select_from(NotificationRow)
         .where(NotificationRow.acknowledged_at.is_(None))
     )
+    to_confirm = [
+        {
+            "id": str(a.id),
+            "kind": a.kind,
+            "title": a.title,
+            "preferred_day": None if a.preferred_day is None else a.preferred_day.isoformat(),
+        }
+        for a in session.scalars(
+            select(ActivityRow)
+            .where(ActivityRow.status == "to_confirm")
+            .order_by(ActivityRow.earliest_start_at)
+        )
+    ]
     return {
         "now": now.isoformat(),
         "plan_status": plan.get("status", "none"),
@@ -191,4 +204,5 @@ def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
         "today_study_minutes": int(today_study),
         "pending_proposals": pending or 0,
         "unread_notifications": unread or 0,
+        "to_confirm": to_confirm,
     }

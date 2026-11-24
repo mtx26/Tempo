@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -65,8 +65,8 @@ from tempo.planning.service import (
     replan,
     set_setting,
 )
-from tempo.planning.settings import SettingsIn, apply_settings
 from tempo.planning.views import schedule_items, summary
+from tempo.scheduler.model import Preferences
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
 
@@ -152,7 +152,7 @@ def _place_exists(ctx: OpContext, place_id: str | None) -> None:
 @operation(
     "get_context",
     "Current date/time and timezone, configured home place and phone tracker, planning "
-    "settings. Call first when dates or places are involved.",
+    "settings, planned locations. Call first when dates or places are involved.",
     NoInput,
     mutates=False,
 )
@@ -168,6 +168,7 @@ def get_context(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "buffer_minutes": get_setting(ctx.session, "buffer_minutes", 10),
         "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
+        "planned_locations": get_setting(ctx.session, "stays", []) or [],
     }
 
 
@@ -1228,7 +1229,9 @@ class SettingsChangeIn(Strict):
     )
     horizon_days: int | None = Field(default=None, ge=1, le=42)
     buffer_minutes: int | None = Field(default=None, ge=0, le=120)
-    departure_reminder_minutes: list[int] | None = Field(default=None, max_length=5)
+    departure_reminder_minutes: list[Annotated[int, Field(ge=0, le=240)]] | None = Field(
+        default=None, max_length=5, description="Minutes before the advised leave time"
+    )
     study_preferences: dict[str, int] | None = Field(
         default=None,
         description="preferred_block_minutes, min_block_minutes, max_block_minutes, "
@@ -1249,10 +1252,18 @@ def update_settings(ctx: OpContext, body: SettingsChangeIn) -> dict[str, Any]:
     values = body.model_dump(exclude_none=True)
     if "departure_reminder_minutes" in values:
         values["reminder_minutes"] = values.pop("departure_reminder_minutes")
+    if "home_place_id" in values:
+        _place_exists(ctx, values["home_place_id"])
     if "study_preferences" in values:
         current = get_setting(ctx.session, "study_preferences", {}) or {}
         values["study_preferences"] = {**current, **values["study_preferences"]}
-    return {"updated": apply_settings(ctx.session, SettingsIn(**values), actor=ctx.actor)}
+        try:
+            Preferences(**values["study_preferences"])
+        except (TypeError, ValueError) as exc:
+            raise OpError(f"préférences d'étude invalides : {exc}") from exc
+    for key, value in values.items():
+        set_setting(ctx.session, key, value)
+    return {"updated": sorted(values)}
 
 
 class WindowIn(Strict):

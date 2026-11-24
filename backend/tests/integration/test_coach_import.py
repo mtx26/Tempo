@@ -120,8 +120,14 @@ def test_confirm_api_and_planning_respects_order_and_recovery(
         set_setting(s, "horizon_days", 10)
         s.commit()
     with TestClient(create_app(Settings(api_token=TOKEN, database_url=database_url))) as api:
+        summary = api.post("/v1/operations/get_summary", json={}, headers=AUTH).json()
+        assert [a["kind"] for a in summary["result"]["to_confirm"]] == ["training"]
         vma = next(
-            a for a in api.get("/v1/activities", headers=AUTH).json() if a["status"] == "to_confirm"
+            a
+            for a in api.post("/v1/operations/list_activities", json={}, headers=AUTH).json()[
+                "result"
+            ]["activities"]
+            if a["status"] == "to_confirm"
         )
         assert vma["preferred_day"] == "2026-11-25"
 
