@@ -224,7 +224,7 @@ def test_arrival_delay_is_reported() -> None:
         line="E69",
     )
     late_arrival = Journey((leg,), start, start + timedelta(minutes=46), 0, "test")
-    assert late_arrival.max_delay == timedelta(minutes=6)
+    assert max(leg.arrival_delay for leg in late_arrival.legs) == timedelta(minutes=6)
     plan = plan_day_travel([lecture()], Fixed([late_arrival]), start_place=HOME)
     assert plan.warnings == [
         "retard en temps réel +6 min sur E69 (Kot -> Campus (2026-12-01T08:50:00+00:00))"

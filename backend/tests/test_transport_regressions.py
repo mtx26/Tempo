@@ -73,7 +73,7 @@ def test_journey_departing_after_event_start_is_never_routed() -> None:
     plan = plan_day_travel(events, Scripted([late]))
     (block,) = plan.blocks
     assert block.status is TravelStatus.IMPOSSIBLE
-    assert plan.busy_intervals() == [Interval(at(8), at(9))]
+    assert [Interval(b.start, b.end) for b in plan.blocks] == [Interval(at(8), at(9))]
 
 
 # 2. return trip failures block time ----------------------------------------------------------

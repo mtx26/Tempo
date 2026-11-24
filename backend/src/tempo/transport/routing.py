@@ -164,13 +164,6 @@ class Journey:
     def severe_disruptions(self) -> int:
         return sum(1 for alert in self.timed_disruptions if alert.severe)
 
-    @property
-    def max_delay(self) -> timedelta:
-        return max(
-            (max(leg.delay, leg.arrival_delay) for leg in self.legs if leg.is_transit),
-            default=timedelta(0),
-        )
-
 
 class RoutingProvider(Protocol):
     def plan(

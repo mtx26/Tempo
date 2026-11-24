@@ -999,7 +999,7 @@ def test_unreachable_point_is_explained_not_reported_as_a_busy_range(session: Se
 
     seed(session)
     found = run_operation(
-        OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=Nothing()),  # type: ignore[arg-type]
+        OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=Nothing()),
         "search_journey",
         {"origin": "place:home", "destination": "place:club", "depart_after": "2026-12-08T10:00"},
     )["result"]

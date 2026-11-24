@@ -22,7 +22,6 @@ from enum import StrEnum
 
 BASE_URL = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed"
 KEY_HEADER = "bmc-partner-key"
-VERIFIED_ON = "2026-11-23"
 SECONDS_PER_DAY = 86_400
 
 

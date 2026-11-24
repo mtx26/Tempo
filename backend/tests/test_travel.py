@@ -131,7 +131,7 @@ def test_outbound_journey_from_start_place_is_planned() -> None:
 def test_travel_blocks_become_busy_intervals() -> None:
     events = [located(CAMPUS, at(8), at(10)), located(POOL, at(12), at(13))]
     plan = plan_day_travel(events, FakeRouting(TIMES), buffer=BUFFER)
-    (busy,) = plan.busy_intervals()
+    (busy,) = [Interval(b.start, b.end) for b in plan.blocks]
     assert isinstance(busy, Interval)
     assert busy.end == at(12)
 
@@ -209,7 +209,9 @@ def test_planner_never_places_study_on_travel_or_away_time() -> None:
     study = travel_aware_study_windows(
         [StudyWindow(Interval(at(7), at(21)), HOME)], events, routing, buffer=BUFFER
     )
-    busy = [Interval(e.start, e.end) for e in events] + travel.busy_intervals()
+    busy = [Interval(e.start, e.end) for e in events] + [
+        Interval(b.start, b.end) for b in travel.blocks
+    ]
     problem = PlanningProblem(
         horizon=Interval(at(0), at(23, 59)),
         timezone=ZoneInfo("UTC"),

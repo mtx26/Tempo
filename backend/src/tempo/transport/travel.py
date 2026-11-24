@@ -64,9 +64,6 @@ class TravelPlan:
     warnings: list[str] = field(default_factory=list)
     """Live delays and disruption notices on routed journeys (informative, not blocking)."""
 
-    def busy_intervals(self) -> list[Interval]:
-        return [Interval(b.start, b.end) for b in self.blocks if b.end > b.start]
-
 
 @dataclass(frozen=True, slots=True)
 class StudyWindow:
