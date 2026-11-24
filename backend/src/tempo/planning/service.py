@@ -20,13 +20,14 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import ColumnElement, or_, select, update
+from sqlalchemy import ColumnElement, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from tempo.db.models import (
     ActivityRow,
     AuditEntry,
+    AvailabilityExceptionRow,
     AvailabilityRow,
     FixedEventRow,
     NotificationRow,
@@ -39,6 +40,7 @@ from tempo.db.models import (
     StudyTaskRow,
 )
 from tempo.domain.models import EventStatus, TargetKind
+from tempo.domain.ops import needs_session, remaining_minutes
 from tempo.planning.engine import (
     Commitment,
     CommitmentKind,
@@ -55,6 +57,7 @@ from tempo.transport.routing import RoutingProvider
 from tempo.transport.travel import StudyWindow
 
 DEFAULT_HORIZON_DAYS = 14
+ACTIVITY_KINDS = {"race": CommitmentKind.RACE, "training": CommitmentKind.TRAINING}
 ACTOR = "planner"
 
 
@@ -102,6 +105,28 @@ def notify(session: Session, kind: str, title: str, message: str, dedupe_key: st
     session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
 
 
+def proposal_revision(session: Session, details: dict[str, Any]) -> str | None:
+    """Digest of the state a proposal was computed on (its target block / activity). Approval
+    recomputes it: a different value means the inputs changed and the proposal is obsolete."""
+    parts: list[str] = []
+    if "block_id" in details:
+        block = session.get(StudyBlockRow, uuid.UUID(details["block_id"]))
+        parts.append(
+            "-"
+            if block is None
+            else f"{block.start_at}|{block.end_at}|{block.locked}|{block.state}"
+        )
+    if "activity_id" in details:
+        act = session.get(ActivityRow, uuid.UUID(details["activity_id"]))
+        parts.append(
+            "-"
+            if act is None
+            else f"{act.status}|{act.locked}|{act.earliest_start_at}|{act.latest_end_at}|"
+            f"{act.duration_minutes}|{act.planned_start_at if act.locked else ''}"
+        )
+    return _digest("#".join(parts)) if parts else None
+
+
 def propose(
     session: Session, kind: str, title: str, details: dict[str, Any], dedupe_key: str
 ) -> None:
@@ -112,6 +137,7 @@ def propose(
         details=details,
         dedupe_key=dedupe_key[:300],
         created_at=datetime.now(UTC),
+        input_revision=proposal_revision(session, details),
     )
     session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
 
@@ -133,30 +159,68 @@ def _end_of_day(day: date, tz: ZoneInfo) -> datetime:
 def _availability(
     session: Session, directory: PlaceDirectory, start: datetime, end: datetime, tz: ZoneInfo
 ) -> list[StudyWindow]:
+    """Weekly windows, then the dated exceptions of each day: blocked time is removed from
+    the windows; extra free time is added (at its place). Fixed commitments still win."""
     rows = list(session.scalars(select(AvailabilityRow)))
+    first_day = start.astimezone(tz).date()
+    exceptions = list(
+        session.scalars(
+            select(AvailabilityExceptionRow).where(
+                AvailabilityExceptionRow.day >= first_day - timedelta(days=1),
+                AvailabilityExceptionRow.day <= end.astimezone(tz).date(),
+            )
+        )
+    )
     windows: list[StudyWindow] = []
-    day = start.astimezone(tz).date()
+    day = first_day
     while datetime.combine(day, time(0), tzinfo=tz) < end:
+        midnight = datetime.combine(day, time(0), tzinfo=tz)
+        todays: list[StudyWindow] = []
         for row in rows:
             place = directory.get(row.place_id)
             if row.weekday != day.weekday() or place is None:
                 continue
-            midnight = datetime.combine(day, time(0), tzinfo=tz)
-            # Wall-clock minutes (DST-safe): build local times, not midnight + offset.
-            begin = datetime.combine(
-                day, time(row.start_minute // 60, row.start_minute % 60), tzinfo=tz
-            )
-            finish = (
-                _end_of_day(day, tz)
-                if row.end_minute == 1440
-                else datetime.combine(
-                    day, time(row.end_minute // 60, row.end_minute % 60), tzinfo=tz
-                )
-            )
+            begin, finish = _wall_clock(day, row.start_minute, row.end_minute, tz)
             if utc(finish) > utc(begin) and utc(midnight) < utc(end):
-                windows.append(StudyWindow(Interval(begin, finish), place))
+                todays.append(StudyWindow(Interval(begin, finish), place))
+        for exc in (e for e in exceptions if e.day == day):
+            begin, finish = _wall_clock(day, exc.start_minute, exc.end_minute, tz)
+            if utc(finish) <= utc(begin):
+                continue
+            if exc.available:
+                place = directory.get(exc.place_id) if exc.place_id else None
+                if place is not None:
+                    todays.append(StudyWindow(Interval(begin, finish), place))
+            else:
+                todays = _remove(todays, Interval(begin, finish))
+        windows += todays
         day += timedelta(days=1)
     return windows
+
+
+def _wall_clock(day: date, start: int, end: int, tz: ZoneInfo) -> tuple[datetime, datetime]:
+    # Wall-clock minutes (DST-safe): build local times, not midnight + offset.
+    begin = datetime.combine(day, time(start // 60, start % 60), tzinfo=tz)
+    finish = (
+        _end_of_day(day, tz)
+        if end == 1440
+        else datetime.combine(day, time(end // 60, end % 60), tzinfo=tz)
+    )
+    return begin, finish
+
+
+def _remove(windows: list[StudyWindow], blocked: Interval) -> list[StudyWindow]:
+    kept: list[StudyWindow] = []
+    for window in windows:
+        span = window.interval
+        if not span.overlaps(blocked):
+            kept.append(window)
+            continue
+        if utc(span.start) < utc(blocked.start):
+            kept.append(StudyWindow(Interval(span.start, blocked.start), window.place))
+        if utc(blocked.end) < utc(span.end):
+            kept.append(StudyWindow(Interval(blocked.end, span.end), window.place))
+    return kept
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,17 +289,20 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
     for act in activity_rows:
         if act.duration_minutes is None:
             continue  # duration to confirm: never scheduled with a guessed length
-        place = directory.get(act.place_id) if act.place_id else None
+        if act.all_day and not act.busy:
+            continue  # informative all-day event: shown, blocks nothing
+        travels = act.place_id is not None and not (act.remote or act.all_day)
+        place = directory.get(act.place_id) if travels and act.place_id else None
         duration = timedelta(minutes=act.duration_minutes)
         fixed_start = (
             act.earliest_start_at
-            if act.kind == "race"
+            if act.scheduling == "fixed"
             else (act.planned_start_at or act.preferred_start_at)
             if act.locked
             else None
         )
         if fixed_start is not None:
-            kind = CommitmentKind.RACE if act.kind == "race" else CommitmentKind.TRAINING
+            kind = ACTIVITY_KINDS.get(act.kind, CommitmentKind.OTHER)
             commitments.append(
                 Commitment(
                     f"activity:{act.id}",
@@ -270,22 +337,30 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
     today = now.astimezone(tz).date()
     last_day = (horizon_end - timedelta(minutes=1)).astimezone(tz).date()
     for task in session.scalars(select(StudyTaskRow).where(StudyTaskRow.archived.is_(False))):
-        remaining = max(0, task.effort_minutes - task.completed_minutes)
-        if remaining == 0:
+        remaining = remaining_minutes(task)
+        if not remaining or needs_session(task):
+            # Unknown duration: kept, never planned with a guessed length. Located or
+            # non-splittable tasks are planned as one flexible session (an activity).
             continue
         task_ids[str(task.id)] = task.id
-        target, target_kind, minutes = (
-            _end_of_day(task.target_date, tz),
-            task.target_kind,
-            remaining,
-        )
-        if task.target_date > last_day:
+        if task.target_date is None:
+            # No deadline: low urgency, spread like a far target (never forced in).
+            target_day = last_day + timedelta(days=DEFAULT_HORIZON_DAYS)
+            target_kind = TargetKind.SOFT
+        else:
+            target_day, target_kind = task.target_date, task.target_kind
+        target, minutes = _end_of_day(target_day, tz), remaining
+        if target_day > last_day:
             # Target beyond the planning horizon: plan only the proportional share now (spread
             # the work until the target); the real deadline is checked once it is in range.
-            minutes = _proportional_share(remaining, today, last_day, task.target_date)
+            minutes = _proportional_share(remaining, today, last_day, target_day)
             target, target_kind = _end_of_day(last_day, tz), TargetKind.SOFT
             spread[str(task.id)] = minutes
-        demands.append(StudyDemand(str(task.id), task.subject, minutes, target, target_kind))
+        demands.append(
+            StudyDemand(
+                str(task.id), task.subject, minutes, target, target_kind, priority=task.priority
+            )
+        )
     subjects = {d.task_id: d.subject for d in demands}
 
     locked = [
@@ -438,7 +513,9 @@ def _activity_conflicts(session: Session, data: PlanningInput) -> None:
     - race (fixed by nature): nothing can move automatically -> conflict notification."""
     classes = [c for c in data.commitments if c.kind is CommitmentKind.CLASS]
     protected = [
-        c for c in data.commitments if c.kind in (CommitmentKind.RACE, CommitmentKind.TRAINING)
+        c
+        for c in data.commitments
+        if c.kind in (CommitmentKind.RACE, CommitmentKind.TRAINING, CommitmentKind.OTHER)
     ]
     for activity in protected:
         span = Interval(activity.start, activity.end)
@@ -461,11 +538,13 @@ def _activity_conflicts(session: Session, data: PlanningInput) -> None:
                     f"unlock_activity:{key}",
                 )
             else:
+                race = activity.kind is CommitmentKind.RACE
                 notify(
                     session,
-                    "race_conflict",
-                    "Conflit avec une compétition",
-                    f"Le cours '{event.title}' ({when}) chevauche la compétition "
+                    "race_conflict" if race else "fixed_conflict",
+                    "Conflit avec une compétition" if race else "Conflit avec un rendez-vous",
+                    f"Le cours '{event.title}' ({when}) chevauche "
+                    f"{'la compétition' if race else 'le rendez-vous fixe'} "
                     f"'{activity.title}'. Rien n'est déplacé automatiquement : à arbitrer.",
                     f"race_conflict:{key}",
                 )
@@ -527,11 +606,83 @@ def _underway_blocks(session: Session, now: datetime, loaded: LoadedInput) -> li
     ]
 
 
+REPLAN_LOCK = 0x7E4D0
+"""PostgreSQL advisory lock: the API and the worker never re-plan concurrently (the second
+waits, then plans on the first one's published version; no silent overwrite)."""
+
+
+def _block_keys(session: Session, version: ScheduleVersion | None) -> set[tuple[str, str, str]]:
+    if version is None:
+        return set()
+    return {
+        (str(b.task_id), utc(b.start_at).isoformat(), utc(b.end_at).isoformat())
+        for b in session.scalars(
+            select(StudyBlockRow).where(
+                StudyBlockRow.schedule_version_id == version.id,
+                StudyBlockRow.locked.is_(False),
+            )
+        )
+    }
+
+
+def _schedule_diff(
+    before: set[tuple[str, str, str]],
+    after: set[tuple[str, str, str]],
+    moved_activities: list[str],
+) -> dict[str, Any]:
+    removed, added = before - after, after - before
+    shift = 0
+    moved = 0
+    pending = sorted(added)
+    for task, start, _end in sorted(removed):
+        same = next((a for a in pending if a[0] == task), None)
+        if same is None:
+            continue
+        pending.remove(same)
+        moved += 1
+        shift += abs(
+            int(
+                (datetime.fromisoformat(same[1]) - datetime.fromisoformat(start)).total_seconds()
+                // 60
+            )
+        )
+    return {
+        "added_blocks": len(added) - moved,
+        "removed_blocks": len(removed) - moved,
+        "moved_blocks": moved,
+        "kept_blocks": len(before & after),
+        "total_shift_minutes": shift,
+        "moved_activities": moved_activities,
+    }
+
+
 def replan(
-    session: Session, routing: RoutingProvider, now: datetime, tz: ZoneInfo, *, reason: str
+    session: Session,
+    routing: RoutingProvider,
+    now: datetime,
+    tz: ZoneInfo,
+    *,
+    reason: str,
+    mode: str = "local",
 ) -> ScheduleVersion:
+    """Compute and publish a new plan. ``mode = "global"`` (explicit user request only) drops
+    the stability preference so the whole horizon may be reorganised; locked and under-way
+    items stay protected in every mode."""
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": REPLAN_LOCK})
     missed = mark_missed_blocks(session, now)
     loaded = build_input(session, now, tz)
+    if mode == "global":
+        loaded = LoadedInput(
+            replace(
+                loaded.data,
+                previous_blocks=[],
+                trainings=[replace(t, previous_start=None) for t in loaded.data.trainings],
+            ),
+            loaded.task_ids,
+            loaded.spread,
+        )
+    before_blocks = _block_keys(session, active_version(session))
+    before_activities = {t.activity_id: t.previous_start for t in loaded.data.trainings}
     underway = _underway_blocks(session, now, loaded)
     if underway:
         # A session already under way is never moved (requirements): fixed for this re-plan,
@@ -539,6 +690,7 @@ def replan(
         loaded = LoadedInput(
             replace(loaded.data, locked_blocks=[*loaded.data.locked_blocks, *underway]),
             loaded.task_ids,
+            loaded.spread,
         )
     carried = {(b.task_id, utc(b.start)) for b in underway}
     outcome = run_planning(loaded.data, routing)
@@ -547,6 +699,7 @@ def replan(
         "missed_blocks": missed,
         "spread": loaded.spread,
         "reason": reason,
+        "mode": mode,
         "planned_at": now.isoformat(),
         "horizon_end": loaded.data.horizon_end.isoformat(),
         "status": outcome.status.value,
@@ -611,6 +764,16 @@ def replan(
             f"rejected:{_digest(reason_text)}:{now.date()}",
         )
 
+    if usable:
+        session.flush()
+        moved = [
+            placed.activity_id
+            for placed in outcome.trainings
+            if before_activities.get(placed.activity_id) is not None
+            and utc(before_activities[placed.activity_id]) != utc(placed.start)  # type: ignore[arg-type]
+        ]
+        summary["diff"] = _schedule_diff(before_blocks, _block_keys(session, version), moved)
+        version.summary = dict(summary)
     _conflict_proposals(session, loaded.data)
     for issue in outcome.issues:
         notify(session, "plan_issue", "Tempo : point à vérifier", issue, f"issue:{_digest(issue)}")

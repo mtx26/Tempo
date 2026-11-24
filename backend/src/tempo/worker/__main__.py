@@ -23,12 +23,15 @@ from tempo.transport.motis import MotisClient
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
 from tempo.transport.stib import StibRealtime
 from tempo.worker.jobs import (
+    conversation_retention_job,
     departure_job,
     fetch_ics,
     ics_sync,
+    reminders_job,
     replan_job,
     retention_job,
     run_job,
+    series_job,
     training_mail_job,
 )
 
@@ -92,11 +95,17 @@ def tick(
     if due_ics and ics_url is not None:
         url = ics_url.get_secret_value()
         run_job(sessions, "ics_sync", lambda: ics_sync(sessions, fetch_ics(http, url), now, tz))
+    if due_ics:
+        run_job(sessions, "series", lambda: series_job(sessions, now))
     run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz))
+    run_job(sessions, "reminders", lambda: reminders_job(sessions, now, tz))
     if due_departure:
         run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now, stib))
     if due_ics and now.astimezone(tz).hour == 4 and now.astimezone(tz).minute < 31:
         run_job(sessions, "retention", lambda: retention_job(sessions, now))
+        run_job(
+            sessions, "conversation_retention", lambda: conversation_retention_job(sessions, now)
+        )
     if mail is not None and due_ics:
         run_job(
             sessions,

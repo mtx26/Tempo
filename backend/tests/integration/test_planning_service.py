@@ -205,6 +205,7 @@ def test_past_undone_blocks_are_missed_notified_and_replanned(session: Session) 
     fresh = list(
         session.scalars(select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == second.id))
     )
+    assert task.effort_minutes is not None
     remaining = task.effort_minutes - task.completed_minutes
     assert sum((b.end_at - b.start_at).total_seconds() // 60 for b in fresh) == remaining
     assert all(b.start_at >= later for b in fresh)

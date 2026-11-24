@@ -541,3 +541,97 @@ def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
         }
         session.commit()
         return counts
+
+
+# --- user reminders, recurring events, conversation retention ---
+
+REMINDER_GRACE = timedelta(hours=6)
+"""A reminder missed during an outage still fires after a restart, up to this late."""
+
+
+def _reminder_due(session: Session, row: Any, now: datetime, tz: ZoneInfo) -> list[datetime]:
+    """Due instants of ``row`` in ``(now - REMINDER_GRACE, now]`` (several for a recurrence)."""
+    if row.target_type == "time":
+        if row.remind_at is None:
+            return []
+        if row.rrule is None:
+            return [row.remind_at] if row.remind_at <= now else []
+        from dateutil.rrule import rrulestr
+
+        local = row.remind_at.astimezone(tz).replace(tzinfo=None)
+        rule = rrulestr(row.rrule, dtstart=local)
+        lower = (now - REMINDER_GRACE).astimezone(tz).replace(tzinfo=None)
+        upper = now.astimezone(tz).replace(tzinfo=None)
+        return [naive.replace(tzinfo=tz) for naive in rule.between(lower, upper, inc=True)]
+    start = _reminder_target_start(session, row)
+    if start is None:
+        return []
+    due = start - timedelta(minutes=row.offset_minutes)
+    return [due] if due <= now < start + timedelta(minutes=1) else []
+
+
+def _reminder_target_start(session: Session, row: Any) -> datetime | None:
+    """Current start of the target; cancels the reminder when its target is gone."""
+    import uuid
+
+    from tempo.db.models import FixedEventRow
+
+    if row.target_type == "activity":
+        act = session.get(ActivityRow, uuid.UUID(row.target_id))
+        if act is None or act.status in ("cancelled", "done", "missed"):
+            row.status = "cancelled"
+            return None
+        return act.earliest_start_at if act.scheduling == "fixed" else act.planned_start_at
+    event = session.get(FixedEventRow, uuid.UUID(row.target_id))
+    if event is None or event.deleted_at is not None or event.status == "cancelled":
+        row.status = "cancelled"
+        return None
+    return event.start_at
+
+
+def reminders_job(sessions: Sessions, now: datetime, tz: ZoneInfo) -> int:
+    """Fire due reminders as notifications. Identity = reminder + due instant, so a restart
+    never duplicates one and a moved target gets a fresh reminder at its new time."""
+    from tempo.db.models import ReminderRow
+
+    fired = 0
+    with sessions() as session:
+        for row in session.scalars(select(ReminderRow).where(ReminderRow.status == "active")):
+            for due in _reminder_due(session, row, now, tz):
+                if now - due > REMINDER_GRACE:
+                    continue
+                late = now - due > timedelta(minutes=5)
+                notify(
+                    session,
+                    "reminder",
+                    "Rappel" + (" (en retard)" if late else ""),
+                    row.message,
+                    f"user_reminder:{row.id}:{due.astimezone(UTC).isoformat()}",
+                )
+                fired += 1
+            one_shot = row.target_type == "time" and row.rrule is None
+            if one_shot and row.remind_at is not None and row.remind_at <= now:
+                row.status = "done"
+        session.commit()
+    return fired
+
+
+def series_job(sessions: Sessions, now: datetime) -> int:
+    """Keep recurring personal events materialised on the rolling horizon."""
+    from tempo.assistant.catalog import expand_all_series
+
+    with sessions() as session:
+        created = expand_all_series(session, now)
+        if created:
+            set_setting(session, "replan_requested", now.isoformat())
+        session.commit()
+        return created
+
+
+def conversation_retention_job(sessions: Sessions, now: datetime) -> int:
+    from tempo.api.assistant import purge_conversations
+
+    with sessions() as session:
+        deleted = purge_conversations(session, now)
+        session.commit()
+        return deleted

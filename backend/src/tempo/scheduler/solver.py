@@ -319,7 +319,9 @@ class _Builder:
             overshoot = model.new_int_var(0, prefs.min_block_minutes, f"over_{demand.task_id}")
             model.add(sum(effective) + unplanned - overshoot == need)
             self.unplanned[demand.task_id] = unplanned
-            self.penalties.append(unplanned_weight * unplanned)
+            # Priority only scales the unplanned cost (1x, 2x, 3x): it still dominates every
+            # soft penalty, so a lower-priority task is never left out for comfort.
+            self.penalties.append(unplanned_weight * demand.priority * unplanned)
             self.penalties.append(OVERSHOOT_PENALTY_PER_MINUTE * overshoot)
 
         self._add_daily_constraints(days)

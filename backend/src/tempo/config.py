@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     """Optional (Docker secret ``tempo_anthropic_api_key``): enables AI interpretation of text
     the deterministic parser does not understand. Tempo works fully without it."""
 
+    motis_url: str | None = None
+    """MOTIS base URL: lets the assistant search journeys and re-plan synchronously."""
+
     timezone: str = "Europe/Brussels"
     """IANA timezone used to interpret local wall-clock planning rules."""
 

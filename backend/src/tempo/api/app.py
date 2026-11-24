@@ -12,11 +12,14 @@ from sqlalchemy.orm import sessionmaker
 
 from tempo import __version__
 from tempo.ai.llm import build_interpreter
+from tempo.api.assistant import router as assistant_router
 from tempo.api.auth import FailureLimiter, token_matches
 from tempo.api.ha import router as ha_router
 from tempo.api.interpret import router as interpret_router
 from tempo.api.planning import router as planning_router
+from tempo.assistant.agent import build_assistant
 from tempo.config import Settings
+from tempo.transport.motis import MotisClient
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -42,6 +45,10 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.state.timezone = ZoneInfo(settings.timezone)
     app.state.interpreter = build_interpreter(settings.anthropic_api_key)
+    app.state.assistant = build_assistant(settings.anthropic_api_key)
+    app.state.routing = (
+        MotisClient(settings.motis_url, timeout_seconds=30) if settings.motis_url else None
+    )
 
     limiter = FailureLimiter()
     app.state.auth_limiter = limiter
@@ -79,4 +86,5 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(ha_router, dependencies=[Depends(require_token)])
     app.include_router(planning_router, dependencies=[Depends(require_token)])
     app.include_router(interpret_router, dependencies=[Depends(require_token)])
+    app.include_router(assistant_router, dependencies=[Depends(require_token)])
     return app

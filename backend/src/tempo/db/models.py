@@ -101,21 +101,52 @@ class SyncRun(Base):
 
 
 class StudyTaskRow(Base):
+    """A task: study work for a subject (``kind = 'study'``) or a personal task.
+
+    ``effort_minutes`` NULL = duration unknown: the task is kept but never planned with a
+    guessed length. ``target_date`` NULL = no deadline. ``completed_minutes`` is a cache of the
+    sum of ``work_log`` rows, recomputed only by ``tempo.domain.ops.record_work``."""
+
     __tablename__ = "study_task"
     __table_args__ = (
-        CheckConstraint("effort_minutes > 0", name="positive_effort"),
+        CheckConstraint("effort_minutes IS NULL OR effort_minutes > 0", name="positive_effort"),
         CheckConstraint("completed_minutes >= 0", name="non_negative_completed"),
+        CheckConstraint("kind IN ('study', 'personal')", name="kind"),
+        CheckConstraint("priority BETWEEN 1 AND 3", name="priority_range"),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     subject: Mapped[str] = mapped_column(String(200))
-    effort_minutes: Mapped[int]
+    """Study subject, or the title of a personal task."""
+    effort_minutes: Mapped[int | None]
     completed_minutes: Mapped[int] = mapped_column(default=0, server_default="0")
-    target_date: Mapped[date] = mapped_column(Date)
+    target_date: Mapped[date | None] = mapped_column(Date)
     target_kind: Mapped[TargetKind] = mapped_column(
         _enum(TargetKind, "target_kind"), default=TargetKind.SOFT, server_default="soft"
     )
     archived: Mapped[bool] = mapped_column(default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    kind: Mapped[str] = mapped_column(String(10), default="study", server_default="study")
+    priority: Mapped[int] = mapped_column(default=2, server_default="2")
+    """1 = low, 2 = normal, 3 = high."""
+    splittable: Mapped[bool] = mapped_column(default=True, server_default="true")
+    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    place_id: Mapped[str | None] = mapped_column(ForeignKey("place.id", ondelete="SET NULL"))
+    """A located task is planned as one flexible session (an ``activity`` of kind 'task')."""
+
+
+class WorkLogRow(Base):
+    """Work actually done on a task (a correction is a negative entry). Idempotent by key."""
+
+    __tablename__ = "work_log"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("study_task.id", ondelete="CASCADE"))
+    block_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("study_block.id", ondelete="SET NULL")
+    )
+    minutes: Mapped[int]
+    recorded_at: Mapped[datetime]
+    note: Mapped[str] = mapped_column(Text, default="", server_default="")
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True)
 
 
 class StudyBlockRow(Base):
@@ -206,12 +237,25 @@ class AvailabilityRow(Base):
     place_id: Mapped[str] = mapped_column(ForeignKey("place.id", ondelete="CASCADE"))
 
 
+def _default_scheduling(context: Any) -> str:
+    return "fixed" if context.get_current_parameters().get("kind") == "race" else "flexible"
+
+
 class ActivityRow(Base):
-    """Training (flexible: day/time movable, content and duration kept) or race (fixed)."""
+    """A planned activity: training (flexible, prescribed content kept), race (fixed), personal
+    event (fixed appointment or flexible outing) or a located task session.
+
+    Category (``kind``), scheduling mode and lock are independent. Fixed activities occupy
+    ``earliest_start_at`` .. ``latest_end_at``; flexible ones move inside that window and their
+    chosen start, ``planned_start_at``, belongs to the plan."""
 
     __tablename__ = "activity"
     __table_args__ = (
-        CheckConstraint("kind IN ('training', 'race')", name="kind"),
+        CheckConstraint("kind IN ('training', 'race', 'personal', 'task')", name="kind"),
+        CheckConstraint("scheduling IN ('fixed', 'flexible')", name="scheduling"),
+        CheckConstraint("kind <> 'race' OR scheduling = 'fixed'", name="race_fixed"),
+        CheckConstraint("priority BETWEEN 1 AND 3", name="priority_range"),
+        UniqueConstraint("series_id", "occurrence_key", name="series_occurrence"),
         CheckConstraint(
             "duration_minutes IS NULL OR duration_minutes > 0", name="positive_duration"
         ),
@@ -246,6 +290,104 @@ class ActivityRow(Base):
     sequence_index: Mapped[int | None]
     preferred_day: Mapped[date | None] = mapped_column(Date)
     """The coach's suggested day (a soft preference, not a commitment)."""
+    scheduling: Mapped[str] = mapped_column(
+        String(10), default=_default_scheduling, server_default="flexible"
+    )
+    """Races are always fixed (database check); other kinds default to flexible."""
+    all_day: Mapped[bool] = mapped_column(default=False, server_default="false")
+    busy: Mapped[bool] = mapped_column(default=True, server_default="true")
+    """All-day events: busy ones block their days, informative ones block nothing."""
+    remote: Mapped[bool] = mapped_column(default=False, server_default="false")
+    """Remote / no-travel activity: never gets a journey."""
+    priority: Mapped[int] = mapped_column(default=2, server_default="2")
+    series_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("recurrence_series.id", ondelete="SET NULL")
+    )
+    occurrence_key: Mapped[str | None] = mapped_column(String(40))
+    """Original start (UTC ISO) of a series occurrence: stable identity across edits."""
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("study_task.id", ondelete="CASCADE")
+    )
+
+
+class RecurrenceSeriesRow(Base):
+    """RRULE series of personal activities; occurrences are materialised on a bounded horizon."""
+
+    __tablename__ = "recurrence_series"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    rrule: Mapped[str] = mapped_column(String(500))
+    dtstart: Mapped[datetime]
+    """First occurrence start; expanded in ``timezone`` wall-clock time (DST-safe)."""
+    timezone: Mapped[str] = mapped_column(String(64))
+    template: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    """Fields copied to each occurrence (title, kind, scheduling, duration, place...)."""
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    ended_at: Mapped[datetime | None]
+    """Set when the whole series is cancelled (rows kept for history)."""
+
+
+class RecurrenceExceptionRow(Base):
+    __tablename__ = "recurrence_exception"
+    __table_args__ = (UniqueConstraint("series_id", "occurrence_key", name="exception_occurrence"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("recurrence_series.id", ondelete="CASCADE")
+    )
+    occurrence_key: Mapped[str] = mapped_column(String(40))
+    cancelled: Mapped[bool] = mapped_column(default=False, server_default="false")
+    overrides: Mapped[dict[str, Any]] = mapped_column(default=dict)
+
+
+class AvailabilityExceptionRow(Base):
+    """Dated exception to the weekly availability: extra time (``available``) or blocked time."""
+
+    __tablename__ = "availability_exception"
+    __table_args__ = (
+        CheckConstraint("end_minute > start_minute", name="positive_duration"),
+        CheckConstraint("start_minute >= 0 AND end_minute <= 1440", name="minute_range"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    day: Mapped[date] = mapped_column(Date)
+    start_minute: Mapped[int]
+    end_minute: Mapped[int]
+    available: Mapped[bool]
+    place_id: Mapped[str | None] = mapped_column(ForeignKey("place.id", ondelete="CASCADE"))
+    reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+
+
+class ReminderRow(Base):
+    """User reminder: at a fixed time, or ``offset_minutes`` before an activity/event start.
+
+    Relative reminders follow their target: the due time is recomputed from the target's
+    current start at each check, so a moved activity never leaves a stale reminder."""
+
+    __tablename__ = "reminder"
+    __table_args__ = (
+        CheckConstraint("target_type IN ('time', 'activity', 'event')", name="target_type"),
+        CheckConstraint("status IN ('active', 'cancelled', 'done')", name="status"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    message: Mapped[str] = mapped_column(String(300))
+    target_type: Mapped[str] = mapped_column(String(10))
+    target_id: Mapped[str | None] = mapped_column(String(64))
+    offset_minutes: Mapped[int] = mapped_column(default=0, server_default="0")
+    remind_at: Mapped[datetime | None]
+    """Absolute time for ``target_type = 'time'`` (first occurrence when recurring)."""
+    rrule: Mapped[str | None] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(10), default="active", server_default="active")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ConversationTurnRow(Base):
+    """Recent conversation history (context for references such as "déplace-le")."""
+
+    __tablename__ = "conversation_turn"
+    __table_args__ = (Index("ix_conversation_turn_conv", "conversation_id", "created_at"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[str] = mapped_column(String(100))
+    role: Mapped[str] = mapped_column(String(10))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime]
 
 
 class ProposalRow(Base):
@@ -264,6 +406,8 @@ class ProposalRow(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
     created_at: Mapped[datetime]
     decided_at: Mapped[datetime | None]
+    input_revision: Mapped[str | None] = mapped_column(String(64))
+    """Digest of the inputs the proposal was computed on; approval re-checks it (obsolete)."""
 
 
 class NotificationRow(Base):

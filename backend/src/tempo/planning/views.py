@@ -17,6 +17,7 @@ from tempo.db.models import (
     StudyTaskRow,
 )
 from tempo.domain.models import EventStatus
+from tempo.domain.ops import remaining_minutes
 from tempo.planning.service import active_version, get_setting, place_directory
 from tempo.scheduler.model import utc
 
@@ -79,7 +80,7 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
         )
     places = {p.id: p.name for p in session.scalars(select(PlaceRow))}
     for act in session.scalars(select(ActivityRow).where(ActivityRow.status == "active")):
-        begins = act.earliest_start_at if act.kind == "race" else act.planned_start_at
+        begins = act.earliest_start_at if act.scheduling == "fixed" else act.planned_start_at
         if begins is None or act.duration_minutes is None:
             continue
         ends = begins + timedelta(minutes=act.duration_minutes)
@@ -97,7 +98,11 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                 "location": places.get(act.place_id or ""),
                 "place_id": act.place_id,
                 "locked": act.locked,
-                "fixed": act.kind == "race" or act.locked,
+                "fixed": act.scheduling == "fixed" or act.locked,
+                "all_day": act.all_day,
+                "busy": act.busy,
+                "series_id": None if act.series_id is None else str(act.series_id),
+                "task_id": None if act.task_id is None else str(act.task_id),
             }
         )
     if version is not None:
@@ -158,7 +163,7 @@ def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
         if i["type"] == "study"
     )
     remaining = sum(
-        max(0, t.effort_minutes - t.completed_minutes)
+        remaining_minutes(t) or 0
         for t in session.scalars(select(StudyTaskRow).where(StudyTaskRow.archived.is_(False)))
     )
     version = active_version(session)

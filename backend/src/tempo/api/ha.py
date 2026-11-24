@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.api.schemas import PositionIn, TaskCreate, TaskOut, TaskUpdate
 from tempo.db.models import AuditEntry, PhonePositionRow, StudyTaskRow
+from tempo.domain.ops import record_work, remaining_minutes
 
 ACTOR = "home_assistant"
 router = APIRouter(prefix="/v1")
@@ -41,7 +42,7 @@ def _out(row: StudyTaskRow) -> TaskOut:
         subject=row.subject,
         effort_minutes=row.effort_minutes,
         completed_minutes=row.completed_minutes,
-        remaining_minutes=max(0, row.effort_minutes - row.completed_minutes),
+        remaining_minutes=remaining_minutes(row),
         target_date=row.target_date,
         target_kind=row.target_kind,
         archived=row.archived,
@@ -93,8 +94,19 @@ def update_task(task_id: uuid.UUID, body: TaskUpdate, session: SessionDep) -> Ta
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
+    done = changes.pop("completed_minutes", None)
     for name, value in changes.items():
         setattr(row, name, value)
+    if done is not None and done != row.completed_minutes:
+        # Corrections go through the work log (never overwrite the total silently).
+        record_work(
+            session,
+            row,
+            done - row.completed_minutes,
+            now=datetime.now(UTC),
+            note="correction",
+        )
+        changes["completed_minutes"] = done
     session.flush()
     _audit(session, "task_updated", "study_task", str(row.id), {"fields": sorted(changes)})
     return _out(row)

@@ -33,10 +33,10 @@ class TaskUpdate(BaseModel):
 class TaskOut(BaseModel):
     id: uuid.UUID
     subject: str
-    effort_minutes: int
+    effort_minutes: int | None
     completed_minutes: int
-    remaining_minutes: int
-    target_date: date
+    remaining_minutes: int | None
+    target_date: date | None
     target_kind: TargetKind
     archived: bool
 

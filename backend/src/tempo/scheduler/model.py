@@ -45,10 +45,14 @@ class StudyDemand:
     target: datetime
     """Instant by which the work should be done (end of the target day, local time)."""
     target_kind: TargetKind = TargetKind.SOFT
+    priority: int = 2
+    """1 low, 2 normal, 3 high: scales the cost of leaving this task's effort unplanned."""
 
     def __post_init__(self) -> None:
         if self.remaining_minutes < 0:
             raise ValueError("remaining_minutes must not be negative")
+        if not 1 <= self.priority <= 3:
+            raise ValueError("priority must be 1, 2 or 3")
         utc(self.target)
 
 

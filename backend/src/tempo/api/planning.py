@@ -25,9 +25,9 @@ from tempo.db.models import (
     PlaceRow,
     ProposalRow,
     StudyBlockRow,
-    StudyTaskRow,
 )
-from tempo.planning.service import audit, get_setting, set_setting
+from tempo.domain.ops import complete_block
+from tempo.planning.service import audit, get_setting, proposal_revision, set_setting
 from tempo.planning.views import schedule_items, summary
 
 ACTOR = "home_assistant"
@@ -465,12 +465,8 @@ def unlock_block(block_id: uuid.UUID, session: SessionDep) -> Response:
 @router.post("/blocks/{block_id}/done", status_code=status.HTTP_204_NO_CONTENT)
 def block_done(block_id: uuid.UUID, session: SessionDep) -> Response:
     row = _block(session, block_id)
-    if row.state != "done":
-        task = session.get(StudyTaskRow, row.task_id)
-        if task is not None:
-            minutes = int((row.end_at - row.start_at).total_seconds() // 60)
-            task.completed_minutes = min(task.effort_minutes, task.completed_minutes + minutes)
-        row.state = "done"
+    if row.state not in ("done", "partial"):
+        complete_block(session, row, datetime.now(UTC), None)
         row.locked = False
     audit(session, ACTOR, "block_done", "study_block", str(block_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -525,6 +521,16 @@ def _decide(session: Session, proposal_id: uuid.UUID, approve: bool) -> dict[str
         raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
     if row.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, f"proposal already {row.status}")
+    if (
+        approve
+        and row.input_revision is not None
+        and proposal_revision(session, row.details) != row.input_revision
+    ):
+        # Inputs changed since the proposal was computed: never apply a stale decision.
+        row.status, row.decided_at = "obsolete", datetime.now(UTC)
+        set_setting(session, "replan_requested", datetime.now(UTC).isoformat())
+        audit(session, ACTOR, "proposal_obsolete", "proposal", str(row.id), kind=row.kind)
+        return _proposal_out(row)
     row.status, row.decided_at = ("approved" if approve else "rejected"), datetime.now(UTC)
     if approve:
         handler = PROPOSAL_HANDLERS.get(row.kind)
