@@ -102,7 +102,8 @@ def test_coach_change_on_protected_session_becomes_a_proposal(
         s.commit()
         proposal = s.scalars(select(ProposalRow)).one()
         assert proposal.kind == "coach_plan_change"
-        assert s.get(ActivityRow, row_id).notes == "ma version"  # not overwritten
+        kept = s.get(ActivityRow, row_id)
+        assert kept is not None and kept.notes == "ma version"  # not overwritten
     with TestClient(create_app(Settings(api_token=TOKEN, database_url=database_url))) as api:
         assert api.post(f"/v1/proposals/{proposal.id}/approve", headers=AUTH).status_code == 200
     with sessions() as s:
