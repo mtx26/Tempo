@@ -47,6 +47,8 @@ services:
     <<: *hardening
     mem_limit: 1g
     image: tempo-backend:dev
+    environment:
+      TEMPO_MOTIS_URL: http://routing:8080   # same as the Swarm stack (plan_now, search_journey)
     secrets: [tempo_api_token, tempo_database_url]
     read_only: true
     tmpfs: [/tmp]
