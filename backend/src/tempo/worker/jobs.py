@@ -412,8 +412,42 @@ def departure_job(
                 _departure_message(state),
                 f"departure:{trip.end.isoformat()}:{advice.status.value}",
             )
+        _reminder(session, advice.status, advice.leave_at, trip, now)
         session.commit()
         return advice.status.value
+
+
+DEFAULT_REMINDERS = (60, 15)
+REMINDER_STATUSES = frozenset(
+    {DepartureStatus.ON_TIME, DepartureStatus.LEAVE_NOW, DepartureStatus.LEAVE_EARLIER}
+)
+
+
+def _reminder(
+    session: Session,
+    status: DepartureStatus,
+    leave_at: datetime | None,
+    trip: _Trip,
+    now: datetime,
+) -> None:
+    """Configurable departure reminders (setting ``reminder_minutes``, default 60 and 15): the
+    smallest threshold already reached fires once per trip."""
+    if leave_at is None or status not in REMINDER_STATUSES:
+        return
+    left = (leave_at - now).total_seconds() / 60
+    thresholds = sorted(get_setting(session, "reminder_minutes", list(DEFAULT_REMINDERS)) or [])
+    reached = [m for m in thresholds if 0 <= left <= m]
+    if not reached:
+        return
+    minutes = reached[0]
+    local = leave_at.strftime("%H:%M")
+    notify(
+        session,
+        "departure_reminder",
+        f"Départ dans {max(0, round(left))} min pour {trip.title}",
+        f"Départ conseillé à {local} (rappel {minutes} min).",
+        f"reminder:{trip.end.isoformat()}:{minutes}",
+    )
 
 
 def _departure_title(status: DepartureStatus, destination: str) -> str:

@@ -35,7 +35,16 @@ MAX_PARAGRAPHS = 500
 MAX_UNCOMPRESSED = 20_000_000
 WEEKDAYS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
 REST_WORDS = ("repos", "off", "rien")
-RACE_WORDS = ("competition", "course", "cross", "semi", "marathon", "trail", "10 km", "10km")
+RACE_WORDS = (
+    "competition",
+    "compet ",
+    "cross",
+    "semi-marathon",
+    "marathon",
+    "dossard",
+    "championnat",
+)
+"""Unambiguous race markers only ("course", "trail" or "10 km" often describe ordinary training)."""
 PART_PREFIX = re.compile(
     r"(?:^|[\s(,;+])(rac|retour au calme|echauffement|echauf|ech\.?|r|recup|recuperation|x)"
     r"\s*[:=]?\s*$"

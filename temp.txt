@@ -1,211 +1,23 @@
-# TEMPO — Complete Claude Code Environment Audit
+Reorient the entire Tempo project toward the final product described in TEMPO_ARCHITECTURE_CIBLE.md.
 
-You are working on the Tempo project.
+This document defines the expected outcome, functional requirements, business rules, architectural responsibilities, UML diagrams, and acceptance criteria. Treat it as the authoritative target specification, not as a step-by-step implementation plan.
 
-**Your mission is to audit and optimize the existing AI development environment before any further feature development.**
+Analyze the existing repository and independently determine what must be preserved, improved, simplified, replaced, implemented, or removed to achieve that target.
 
-You MUST communicate with the user exclusively in French.
+Consolidate the project documentation into three primary files:
 
-## Critical constraints
+- ARCHITECTURE.md: the single authoritative product and architecture specification, including relevant non-redundant UML diagrams.
+- README.md: practical installation, configuration, deployment, and usage information.
+- CLAUDE.md: concise permanent development instructions.
 
-- Do not develop new Tempo features.
-- Do not install, uninstall, upgrade, or reconfigure anything during this audit.
-- Do not modify application source code.
-- Do not expose credentials, tokens, API keys, or secrets.
-- Do not execute destructive commands.
-- Do not assume an installed tool is functional.
-- Every conclusion must be supported by actual evidence.
-- If something cannot be verified, mark it as UNKNOWN.
-- Do not claim a tool is active merely because its configuration file exists.
+Remove obsolete, redundant, historical, and conflicting documentation after preserving any essential verified technical information. Do not create additional roadmaps, phase documents, handoff reports, or implementation plans in the repository.
 
-## Phase 1 — Environment discovery
+Favor simplicity, existing reliable libraries, maintainability, and functional completeness. Avoid unnecessary abstractions, duplicated logic, and overengineering.
 
-Inspect the complete Claude Code environment:
+You are responsible for determining the implementation strategy autonomously. The objective is the final working product, not the completion of predefined development phases.
 
-- Claude Code version and diagnostic status
-- Global and project-level configuration
-- CLAUDE.md files and instruction hierarchy
-- .claude/ directory
-- settings.json and local settings
-- Plugins and extensions
-- Skills and slash commands
-- MCP servers
-- Subagents
-- Hooks and automation scripts
-- Environment variables (names only)
-- Git configuration
-- Project documentation
-- Development and testing tools
+Do not consider the project complete until the target requirements are implemented, integrated, and validated through meaningful tests and real end-to-end checks wherever possible. Clearly identify anything that cannot be verified.
 
-Identify conflicting, obsolete, duplicated, or unused configurations.
+Update the repository accordingly and commit and push the validated changes if possible.
 
-## Phase 2 — Installed tooling
-
-Specifically investigate:
-
-- Superpowers
-- Ponytail
-- Agent Skills
-- Graphify
-- OmniRoute
-- Context7
-- Serena, if present
-- Any other discovered plugin, skill, or MCP server
-
-For each tool determine:
-
-1. Installed or missing
-2. Exact version, if available
-3. Correctly configured
-4. Accessible from Claude Code
-5. Functional through a safe test
-6. Automatically or manually activated
-7. Actual benefit for Tempo
-8. Overlap with other tools
-9. Potential token or performance overhead
-
-Pay particular attention to OmniRoute and its actual model-routing configuration.
-
-## Phase 3 — Skills and agents
-
-Discover all custom skills and subagents.
-
-Verify:
-
-- Their definitions and instructions
-- Their activation conditions
-- Their access to required tools
-- Their model configuration
-- Their responsibilities
-- Their ability to operate without unnecessary duplication
-- Whether they can be invoked successfully
-
-Use safe, read-only tests whenever possible.
-
-Do not confuse the existence of an agent with evidence that it is used effectively.
-
-## Phase 4 — Hooks and automation
-
-Inspect every configured hook.
-
-Determine:
-
-- Trigger events
-- Commands executed
-- Expected behavior
-- Actual execution evidence
-- Error handling
-- Timeouts
-- Security risks
-- Performance impact
-
-Identify missing quality gates and redundant executions.
-
-## Phase 5 — Memory and context efficiency
-
-Audit:
-
-- CLAUDE.md organization
-- Persistent project memory
-- Documentation structure
-- Progress tracking
-- Session recovery procedures
-- Context consumption
-- Repeated instructions
-- Large or unnecessary context injections
-- Agent context isolation
-
-Determine whether Claude can reliably resume work after a session interruption or usage-limit reset.
-
-## Phase 6 — Development workflow
-
-Inspect the existing Tempo workflow.
-
-Verify:
-
-- Architecture documentation
-- ADRs
-- Specifications
-- Progress journal
-- Status dashboard
-- Git checkpoints
-- Test commands
-- Ruff
-- Mypy
-- CI configuration
-- Code review procedures
-- Feature completion criteria
-
-Determine whether Claude systematically uses the existing tools when they are relevant.
-
-## Phase 7 — End-to-end validation
-
-Perform safe tests to verify that the environment works as an integrated system.
-
-Test the workflow:
-
-Task understanding → planning → skill selection → agent delegation → documentation lookup → safe verification → progress reporting.
-
-Do not modify application code.
-
-If an actual test cannot be performed safely, explain why and provide the exact verification procedure.
-
-## Phase 8 — Optimization recommendations
-
-Identify opportunities to improve:
-
-- Reasoning reliability
-- Code quality
-- Context efficiency
-- Development speed
-- Token consumption
-- Model routing
-- Agent coordination
-- Documentation retrieval
-- Test automation
-- Long-term autonomy
-- Recovery after interruptions
-
-Prioritize existing tools before recommending new installations.
-
-Do not recommend tools solely because they are popular.
-
-For each recommendation provide:
-
-- Current problem
-- Supporting evidence
-- Proposed improvement
-- Expected benefit
-- Risks and tradeoffs
-- Implementation priority
-
-## Deliverables
-
-Produce:
-
-1. A complete inventory of the environment.
-2. A tool-by-tool verification matrix.
-3. A list of configuration conflicts and redundancies.
-4. A list of unused or nonfunctional tools.
-5. An assessment of context and token efficiency.
-6. An assessment of Claude Code's current development autonomy.
-7. A prioritized optimization plan.
-8. A final readiness verdict: READY, READY WITH ISSUES, or NOT READY.
-
-Save the audit report to:
-
-`docs/audits/claude-environment-audit.md`
-
-Do not modify any other project files.
-
-The report must distinguish:
-
-- VERIFIED
-- PARTIALLY VERIFIED
-- NOT WORKING
-- NOT INSTALLED
-- UNKNOWN
-
-At the end, provide a concise French summary and wait for explicit user approval before implementing any optimization.
-
-**The objective is not to maximize the number of installed tools. It is to maximize the reliability, efficiency, and effective utilization of the tools already available.**
+Always communicate with me in French.

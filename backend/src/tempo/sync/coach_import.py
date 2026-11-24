@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tempo.db.models import ActivityRow
-from tempo.planning.service import notify
+from tempo.planning.service import notify, propose
 from tempo.sync.coach_plan import PlanSession, WeeklyPlan
 
 SOURCE = "coach_plan"
@@ -69,6 +69,10 @@ def _values(
     }
 
 
+def _json_value(value: object) -> object:
+    return value.isoformat() if isinstance(value, (date, datetime)) else value
+
+
 def apply_weekly_plan(
     session: Session, plan: WeeklyPlan, *, tz: ZoneInfo, today: date, origin: str
 ) -> PlanImport:
@@ -102,6 +106,17 @@ def apply_weekly_plan(
                 values["duration_minutes"],
             ):
                 report.protected_changes.append(label)
+                propose(
+                    session,
+                    "coach_plan_change",
+                    f"Le coach a modifié « {item.title} » ({item.day.strftime('%d/%m')})",
+                    {
+                        "activity_id": str(row.id),
+                        "values": {k: _json_value(v) for k, v in values.items()},
+                        "previous": {"title": row.title, "notes": row.notes},
+                    },
+                    f"coach_plan_change:{row.id}:{origin}",
+                )
             continue
         elif all(getattr(row, key) == value for key, value in values.items()):
             report.unchanged += 1
@@ -159,6 +174,7 @@ def _notify(session: Session, plan: WeeklyPlan, report: PlanImport, origin: str)
             "coach_plan_conflict",
             "Plan du coach modifié sur des séances protégées",
             "Le coach a changé des séances que vous avez verrouillées, modifiées ou terminées ; "
-            "elles n'ont pas été écrasées : " + ", ".join(report.protected_changes),
+            "elles n'ont pas été écrasées. Une proposition à approuver est créée pour chacune : "
+            + ", ".join(report.protected_changes),
             f"coach_plan_conflict:{origin}",
         )

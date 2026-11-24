@@ -90,3 +90,11 @@ def test_impossible_dates_and_oversized_tables_are_unreadable_not_crashes() -> N
     big = {f"Ligne {i}": [""] * 7 for i in range(70)}
     with pytest.raises(PlanFormatError, match="rows"):
         parse_plan_docx(plan_docx(week=big), TODAY)
+
+
+def test_ordinary_running_words_are_not_races() -> None:
+    week = {k: list(v) for k, v in EXAMPLE_WEEK.items()}
+    week["Séance"][1] = "Course à pied 45'"
+    week["Séance"][3] = "Trail en forêt 1h"
+    plan = parse_plan_docx(plan_docx(week=week), TODAY)
+    assert not any(s.is_race for s in plan.sessions)

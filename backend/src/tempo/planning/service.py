@@ -428,6 +428,47 @@ def _conflict_proposals(session: Session, data: PlanningInput) -> None:
                     },
                     f"unlock:{row.id}:{commitment.ref}:{commitment.start.isoformat()}",
                 )
+    _activity_conflicts(session, data)
+
+
+def _activity_conflicts(session: Session, data: PlanningInput) -> None:
+    """Protected activities colliding with a university event (iCal is the source of truth).
+
+    - locked training: proposal to unlock it (approval -> it becomes flexible and is re-placed);
+    - race (fixed by nature): nothing can move automatically -> conflict notification."""
+    classes = [c for c in data.commitments if c.kind is CommitmentKind.CLASS]
+    protected = [
+        c for c in data.commitments if c.kind in (CommitmentKind.RACE, CommitmentKind.TRAINING)
+    ]
+    for activity in protected:
+        span = Interval(activity.start, activity.end)
+        for event in classes:
+            if not Interval(event.start, event.end).overlaps(span):
+                continue
+            key = f"{activity.ref}:{event.ref}:{event.start.isoformat()}"
+            when = event.start.isoformat(timespec="minutes")
+            if activity.kind is CommitmentKind.TRAINING:
+                propose(
+                    session,
+                    "unlock_activity",
+                    f"Le cours '{event.title}' chevauche l'entraînement verrouillé "
+                    f"'{activity.title}'",
+                    {
+                        "activity_id": activity.ref.removeprefix("activity:"),
+                        "commitment": event.ref,
+                        "commitment_start": event.start.isoformat(),
+                    },
+                    f"unlock_activity:{key}",
+                )
+            else:
+                notify(
+                    session,
+                    "race_conflict",
+                    "Conflit avec une compétition",
+                    f"Le cours '{event.title}' ({when}) chevauche la compétition "
+                    f"'{activity.title}'. Rien n'est déplacé automatiquement : à arbitrer.",
+                    f"race_conflict:{key}",
+                )
 
 
 def mark_missed_blocks(session: Session, now: datetime) -> int:

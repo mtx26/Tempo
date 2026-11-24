@@ -211,6 +211,10 @@ class SettingsIn(BaseModel):
     buffer_minutes: int | None = Field(default=None, ge=0, le=120)
     stays: list[StayIn] | None = Field(default=None, max_length=50)
     study_preferences: dict[str, int] | None = None
+    reminder_minutes: list[Annotated[int, Field(ge=0, le=240)]] | None = Field(
+        default=None, max_length=5
+    )
+    """Departure reminders before the advised leave time (default [60, 15])."""
 
 
 SETTING_KEYS = (
@@ -220,6 +224,7 @@ SETTING_KEYS = (
     "buffer_minutes",
     "stays",
     "study_preferences",
+    "reminder_minutes",
 )
 
 
@@ -501,8 +506,15 @@ def _apply_unlock(session: Session, row: ProposalRow) -> None:
         session.delete(block)
 
 
+def _apply_unlock_activity(session: Session, row: ProposalRow) -> None:
+    activity = session.get(ActivityRow, uuid.UUID(row.details["activity_id"]))
+    if activity is not None and activity.locked:
+        activity.locked = False  # flexible again: the next re-plan moves it around the class
+
+
 PROPOSAL_HANDLERS: dict[str, Callable[[Session, ProposalRow], None]] = {
     "unlock_block": _apply_unlock,
+    "unlock_activity": _apply_unlock_activity,
 }
 """What approving a proposal does; other modules (e.g. training e-mails) register theirs."""
 
