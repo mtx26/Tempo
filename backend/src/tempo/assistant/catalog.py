@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from tempo.db.models import (
@@ -32,6 +32,7 @@ from tempo.db.models import (
     JobRunRow,
     NotificationRow,
     PhonePositionRow,
+    PlaceAliasRow,
     PlaceRow,
     ProposalRow,
     RecurrenceSeriesRow,
@@ -55,6 +56,7 @@ from tempo.domain.ops import (
     sync_task_session,
     update_series,
 )
+from tempo.planning.proposals import decide, proposal_out
 from tempo.planning.service import (
     PlanningNotConfiguredError,
     active_version,
@@ -63,6 +65,7 @@ from tempo.planning.service import (
     replan,
     set_setting,
 )
+from tempo.planning.settings import SettingsIn, apply_settings
 from tempo.planning.views import schedule_items, summary
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
@@ -228,6 +231,8 @@ def activity_out(row: ActivityRow) -> dict[str, Any]:
         "window_start": _iso(row.earliest_start_at),
         "window_end": _iso(row.latest_end_at),
         "planned_start": _iso(begins),
+        "preferred_start": _iso(row.preferred_start_at),
+        "preferred_day": None if row.preferred_day is None else row.preferred_day.isoformat(),
         "place_id": row.place_id,
         "series_id": None if row.series_id is None else str(row.series_id),
         "occurrence_key": row.occurrence_key,
@@ -298,9 +303,21 @@ def list_tasks(ctx: OpContext, body: TasksIn) -> dict[str, Any]:
 
 @operation("list_places", "Known places with coordinates and aliases.", NoInput, mutates=False)
 def list_places(ctx: OpContext, _: NoInput) -> dict[str, Any]:
-    from tempo.api.planning import list_places as rest_list_places
-
-    return {"places": rest_list_places(ctx.session)}
+    aliases: dict[str, list[str]] = {}
+    for alias in ctx.session.scalars(select(PlaceAliasRow)):
+        aliases.setdefault(alias.place_id, []).append(alias.alias)
+    return {
+        "places": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "latitude": p.latitude,
+                "longitude": p.longitude,
+                "aliases": sorted(aliases.get(p.id, [])),
+            }
+            for p in ctx.session.scalars(select(PlaceRow).order_by(PlaceRow.id))
+        ]
+    }
 
 
 @operation(
@@ -389,14 +406,12 @@ class ProposalsIn(Strict):
     mutates=False,
 )
 def list_proposals(ctx: OpContext, body: ProposalsIn) -> dict[str, Any]:
-    from tempo.api.planning import _proposal_out
-
     rows = ctx.session.scalars(
         select(ProposalRow)
         .where(ProposalRow.status == body.status)
         .order_by(ProposalRow.created_at)
     )
-    return {"proposals": [_proposal_out(r) for r in rows]}
+    return {"proposals": [proposal_out(r) for r in rows]}
 
 
 class NotificationsIn(Strict):
@@ -557,6 +572,11 @@ def get_history(ctx: OpContext, body: HistoryIn) -> dict[str, Any]:
 
 class EventIn(Strict):
     title: str = Field(min_length=1, max_length=300)
+    kind: Literal["personal", "training", "race"] = Field(
+        default="personal",
+        description="training = sport session (flexible by default, prescribed content in "
+        "notes, kept verbatim); race = competition (always fixed)",
+    )
     scheduling: Literal["fixed", "flexible"] = Field(
         description="fixed = imposed time (appointment); flexible = Tempo chooses the time "
         "inside [window_start, window_end]"
@@ -566,6 +586,9 @@ class EventIn(Strict):
     duration_minutes: int | None = Field(default=None, gt=0, le=14 * 24 * 60)
     window_start: datetime | None = None
     window_end: datetime | None = None
+    preferred_start: datetime | None = Field(
+        default=None, description="Flexible only: preferred start inside the window (soft)"
+    )
     all_day: bool = False
     all_day_last_day: date | None = Field(default=None, description="Multi-day all-day event")
     busy: bool = Field(default=True, description="All-day events: False = informative only")
@@ -617,22 +640,31 @@ def _event_times(ctx: OpContext, body: EventIn) -> tuple[datetime, datetime, int
 
 @operation(
     "create_event",
-    "Create a personal event: fixed appointment, flexible outing (Tempo picks the time in a "
-    "window), all-day (busy or informative), multi-day, recurring (RRULE). Never invent a "
-    "duration or a place: ask when unknown.",
+    "Create an event: personal (fixed appointment, flexible outing where Tempo picks the time "
+    "in a window, all-day busy or informative, multi-day, recurring RRULE), a training "
+    "(flexible) or a race (fixed). Never invent a duration, time or place: ask when unknown.",
     EventIn,
     mutates=True,
     replan=True,
 )
 def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
     _place_exists(ctx, body.place_id)
+    if body.kind == "race" and (body.scheduling != "fixed" or body.all_day):
+        raise OpError("une compétition est toujours fixe : demandez son heure de départ")
     begin, finish, duration = _event_times(ctx, body)
     if finish <= ctx.now:
         raise OpError("l'événement est déjà passé")
     scheduling = "fixed" if body.all_day else body.scheduling
+    preferred = None
+    if body.preferred_start is not None:
+        if scheduling != "flexible":
+            raise OpError("heure préférée seulement pour un événement flexible")
+        preferred = _local(body.preferred_start, ctx.tz)
+        if not begin <= preferred <= finish - timedelta(minutes=duration):
+            raise OpError("heure préférée hors de la fenêtre")
     template = {
         "title": body.title,
-        "kind": "personal",
+        "kind": body.kind,
         "scheduling": scheduling,
         "duration_minutes": duration,
         "window_minutes": int((finish - begin).total_seconds() // 60),
@@ -670,13 +702,14 @@ def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
             "first": activity_out(rows[0]) if rows else None,
         }
     row = ActivityRow(
-        kind="personal",
+        kind=body.kind,
         title=body.title,
         notes=body.notes,
         scheduling=scheduling,
         duration_minutes=duration,
         earliest_start_at=begin,
         latest_end_at=finish,
+        preferred_start_at=preferred,
         place_id=body.place_id,
         all_day=body.all_day,
         busy=body.busy,
@@ -907,10 +940,20 @@ def set_lock(ctx: OpContext, body: LockIn) -> dict[str, Any]:
         body.target_id.startswith("block:")
         or ctx.session.get(StudyBlockRow, _uuid(body.target_id, "block")) is not None
     ):
-        from tempo.api.planning import lock_block, unlock_block
-
-        block_id = _uuid(body.target_id, "block")
-        (lock_block if body.locked else unlock_block)(block_id, ctx.session)
+        block_id = _uuid(body.target_id.removeprefix("block:"), "block")
+        block = ctx.session.get(StudyBlockRow, block_id)
+        if block is None:
+            raise OpError("séance introuvable")
+        if body.locked and not block.locked and block.state not in ("promoted", "done"):
+            # The user protects this block: a locked copy is never moved without approval.
+            ctx.session.add(
+                StudyBlockRow(
+                    task_id=block.task_id, start_at=block.start_at, end_at=block.end_at, locked=True
+                )
+            )
+            block.state = "promoted"
+        elif not body.locked and block.locked:
+            ctx.session.delete(block)
         return {"block_id": str(block_id), "locked": body.locked}
     row = _activity(ctx, body.target_id)
     if body.locked and row.scheduling == "flexible" and row.planned_start_at is None:
@@ -959,15 +1002,25 @@ class ConfirmIn(Strict):
     replan=True,
 )
 def confirm_activity(ctx: OpContext, body: ConfirmIn) -> dict[str, Any]:
-    from tempo.api.planning import ConfirmIn as RestConfirm
-    from tempo.api.planning import confirm_activity as rest_confirm
-
-    start = None if body.start is None else _local(body.start, ctx.tz)
-    return rest_confirm(
-        _uuid(body.activity_id, "activity"),
-        RestConfirm(duration_minutes=body.duration_minutes, start=start),
-        ctx.session,
-    )
+    row = ctx.session.get(ActivityRow, _uuid(body.activity_id, "activity"), with_for_update=True)
+    if row is None:
+        raise OpError("activité introuvable")
+    if row.status != "to_confirm":
+        raise OpError(f"activité déjà {row.status}")
+    duration = timedelta(minutes=body.duration_minutes)
+    if row.kind == "race":
+        if body.start is None:
+            raise OpError("une course a besoin de son heure de départ")
+        start = _local(body.start, ctx.tz)
+        if not row.earliest_start_at <= start < row.latest_end_at:
+            raise OpError("le départ doit être le jour de la course")
+        row.earliest_start_at, row.latest_end_at = start, start + duration
+    elif row.latest_end_at - row.earliest_start_at < duration:
+        raise OpError("plus long que sa fenêtre")
+    row.duration_minutes = body.duration_minutes
+    row.status = "active"
+    row.user_modified = True
+    return {"activity": activity_out(row)}
 
 
 # --- tasks ---
@@ -1137,16 +1190,16 @@ class PlaceIn(Strict):
     replan=True,
 )
 def upsert_place(ctx: OpContext, body: PlaceIn) -> dict[str, Any]:
-    from tempo.api.planning import PlaceIn as RestPlace
-    from tempo.api.planning import put_place
-
-    put_place(
-        body.place_id,
-        RestPlace(
-            name=body.name, latitude=body.latitude, longitude=body.longitude, aliases=body.aliases
-        ),
-        ctx.session,
-    )
+    row = ctx.session.get(PlaceRow, body.place_id) or PlaceRow(id=body.place_id)
+    row.name, row.latitude, row.longitude = body.name, body.latitude, body.longitude
+    ctx.session.add(row)
+    ctx.session.flush()
+    ctx.session.execute(delete(PlaceAliasRow).where(PlaceAliasRow.place_id == body.place_id))
+    for alias in {" ".join(a.split()).casefold() for a in body.aliases if a.strip()}:
+        existing = ctx.session.get(PlaceAliasRow, alias)
+        if existing is not None and existing.place_id != body.place_id:
+            raise OpError(f"alias « {alias} » déjà utilisé par {existing.place_id}")
+        ctx.session.add(PlaceAliasRow(alias=alias, place_id=body.place_id))
     return {"place_id": body.place_id}
 
 
@@ -1156,9 +1209,12 @@ class PlaceIdIn(Strict):
 
 @operation("delete_place", "Delete a known place.", PlaceIdIn, mutates=True, replan=True)
 def delete_place(ctx: OpContext, body: PlaceIdIn) -> dict[str, Any]:
-    from tempo.api.planning import delete_place as rest_delete
-
-    rest_delete(body.place_id, ctx.session)
+    if get_setting(ctx.session, "home_place_id") == body.place_id:
+        raise OpError("ce lieu est le domicile configuré")
+    row = ctx.session.get(PlaceRow, body.place_id)
+    if row is None:
+        raise OpError("lieu introuvable")
+    ctx.session.delete(row)
     return {"deleted": body.place_id}
 
 
@@ -1187,16 +1243,13 @@ class SettingsChangeIn(Strict):
     replan=True,
 )
 def update_settings(ctx: OpContext, body: SettingsChangeIn) -> dict[str, Any]:
-    from tempo.api.planning import SettingsIn, patch_settings
-
     values = body.model_dump(exclude_none=True)
     if "departure_reminder_minutes" in values:
         values["reminder_minutes"] = values.pop("departure_reminder_minutes")
     if "study_preferences" in values:
         current = get_setting(ctx.session, "study_preferences", {}) or {}
         values["study_preferences"] = {**current, **values["study_preferences"]}
-    patch_settings(SettingsIn(**values), ctx.session)
-    return {"updated": sorted(values)}
+    return {"updated": apply_settings(ctx.session, SettingsIn(**values), actor=ctx.actor)}
 
 
 class WindowIn(Strict):
@@ -1219,11 +1272,20 @@ class WeeklyIn(Strict):
     replan=True,
 )
 def set_weekly_availability(ctx: OpContext, body: WeeklyIn) -> dict[str, Any]:
-    from tempo.api.planning import WindowIn as RestWindow
-    from tempo.api.planning import put_availability
-
-    put_availability([RestWindow(**w.model_dump()) for w in body.windows], ctx.session)
-    return {"windows": len(body.windows)}
+    rows = []
+    for window in body.windows:
+        start, end = _minute(window.start), _minute(window.end)
+        if end <= start:
+            raise OpError("fin avant début")
+        _place_exists(ctx, window.place_id)
+        rows.append(
+            AvailabilityRow(
+                weekday=window.weekday, start_minute=start, end_minute=end, place_id=window.place_id
+            )
+        )
+    ctx.session.execute(delete(AvailabilityRow))
+    ctx.session.add_all(rows)
+    return {"windows": len(rows)}
 
 
 class CategoryWindowIn(Strict):
@@ -1483,9 +1545,15 @@ class DecideIn(Strict):
     replan=True,
 )
 def decide_proposal(ctx: OpContext, body: DecideIn) -> dict[str, Any]:
-    from tempo.api.planning import _decide
-
-    return {"proposal": _decide(ctx.session, _uuid(body.proposal_id, "proposal"), body.approve)}
+    return {
+        "proposal": decide(
+            ctx.session,
+            _uuid(body.proposal_id, "proposal"),
+            body.approve,
+            actor=ctx.actor,
+            now=ctx.now,
+        )
+    }
 
 
 @operation("acknowledge_notification", "Mark a notification as read.", IdIn, mutates=True)

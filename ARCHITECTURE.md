@@ -151,9 +151,10 @@ supplémentaire.
 |---|---|
 | `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) ; **unique surface de mutation** pour l'IA et l'API (`/v1/operations`). |
 | `assistant/agent.py` | Boucle d'appels d'outils Claude (Messages API, `claude-opus-5-5`, prompt système mis en cache, repli serveur `fallbacks`) ; bornée à 16 étapes. |
-| `api/` | FastAPI : `/v1/conversation`, `/v1/operations`, lectures pour HA (`/v1/schedule`, `/v1/summary`, `/v1/tasks`, …), `/v1/location`, `/v1/interpret` (analyseur déterministe, repli sans LLM). |
+| `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`ai/actions.py`, `ai/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. |
+| `api/` | FastAPI : `/v1/conversation`, `/v1/operations`, lectures pour l'affichage passif HA (`/v1/schedule`, `/v1/summary`, `/v1/tasks`, `/v1/places`, `/v1/activities`, `/v1/proposals`, `/v1/notifications`), `/v1/location` (GPS réel), réglages techniques (`/v1/settings`), accusé de notification. **Aucune route REST de mutation métier.** |
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
-| `planning/` | Chargement des entrées, moteur (`engine.py`), publication versionnée (`service.py`), vues. |
+| `planning/` | Chargement des entrées, moteur (`engine.py`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), réglages validés (`settings.py`), vues. |
 | `scheduler/` | CP-SAT : étude (`solver.py`), activités flexibles (`activities.py`), validateur indépendant (`validate.py`). |
 | `transport/` | Lieux, position, client MOTIS, trajets obligatoires, contrôle de départ, relais GTFS-RT, flux belges, STIB temps réel, mise à jour GTFS. |
 | `sync/` | iCal (`ics.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
@@ -204,8 +205,9 @@ Contrat (implémenté) :
 - Contexte LLM : prompt système stable, 12 derniers tours de la conversation (6 h), date et
   fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
   shell, Docker ou secret.
-- Sans LLM (pas de clé, panne, refus) : `/v1/conversation` répond via l'analyseur déterministe
-  (`ai/text_parser.py`, `ai/questions.py`, `ai/actions.py`) et l'indique (`used_llm: false`).
+- Sans LLM (pas de clé, panne, refus) : `/v1/conversation` répond via le repli déterministe
+  (`assistant/fallback.py`) qui exécute les mêmes opérations du catalogue et l'indique
+  (`used_llm: false`, `fallback: true`) ; ses tours restent dans l'historique de la conversation.
 
 | Domaine | Opérations |
 |---|---|
@@ -673,7 +675,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente, séance unique située. |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures. **Flux iCal réel de l'université non testé** (URL non fournie). |
 | B05 Études | Vérifié | 15 h, blocs de 90 min, souple/stricte, correction sans double comptage. |
-| B06 Sport | Partiel | DOCX, mise à jour sans doublon, durée inconnue, protections testés (fixtures + vrai serveur IMAP local). **Adresse réelle du coach et boîte réelle non configurées.** |
+| B06 Sport | Partiel | Entraînements (flexibles) et compétitions (fixes) créés en conversation (`create_event` avec `kind`) ; DOCX, mise à jour sans doublon, durée inconnue, protections testés (fixtures + vrai serveur IMAP local). **Adresse réelle du coach et boîte réelle non configurées.** |
 | B07 Règles | Vérifié | Fenêtres hebdomadaires d'étude + exceptions datées + préférences ; fenêtres par catégorie d'activité flexible (`set_category_windows` : entraînement, personnel, tâche située), contrainte dure dans CP-SAT et revérifiée par le moteur (`test_activities.py`, `test_operations.py`). |
 | B08 Lieux | Vérifié | GPS frais/périmé/imprécis, lieu prévu sans altérer le GPS, origine inconnue ⇒ question. |
 | B09 Transport | Vérifié | `search_journey` vérifié sur un **vrai MOTIS** (région de Bruxelles) : arrivée avant, départ après, plage, aucun candidat (`test_motis_live.py`) ; panne et origine inconnue testées avec MOTIS simulé ; client MOTIS vérifié aussi sur le graphe national. Exploration paginée (jusqu'à 5 requêtes, vers l'avant depuis le départ minimal ou vers l'arrière depuis l'arrivée limite, 2 h sans seconde borne ; une panne après la première page garde les candidats déjà explorés et le signale) testée avec un fournisseur paginé simulé et exécutée sur le vrai MOTIS. Le résultat reste « meilleur parmi les candidats explorés ». |
@@ -686,10 +688,10 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
 | B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
 
-Dernière exécution locale (24/11/2026) : backend 483 tests réussis (PostgreSQL 16 réel, MOTIS
+Dernière exécution locale (24/11/2026) : backend 495 tests réussis (PostgreSQL 16 réel, MOTIS
 Bruxelles réel, contrat avec le vrai client HA), 13 ignorés avec leur raison (MOTIS national,
 portail Belgian Mobility et IMAP réel non lancés dans cette session), couverture 91 %, Ruff et
-mypy strict propres ; intégration HA 63 tests réussis (HA 2026.2.3), mypy strict et Ruff propres.
+mypy strict propres ; intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres.
 
 Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), URL iCal de
 l'université, entité `device_tracker`, adresse de l'expéditeur du coach + accès IMAP, clé
@@ -711,6 +713,7 @@ autorisation de déploiement Swarm.
 - Image de routage : binaire officiel MOTIS v2.11.4 épinglé par SHA-256 ; reconstruction des
   graphes dans un volume séparé avec bascule atomique et conservation de la version précédente.
 - Les e-mails libres interprétés par LLM ne sont jamais appliqués sans approbation.
-- Les routes REST de mutation historiques (`/v1/tasks` POST/PATCH, `/v1/places`, `/v1/blocks`,
-  `/v1/activities`, `/v1/proposals/{id}/approve|reject`, `/v1/replan`) restent comme
-  implémentation interne des opérations correspondantes ; l'intégration HA ne les appelle plus.
+- Les routes REST de mutation historiques et `/v1/interpret` ont été supprimées (24/11/2026) :
+  toute modification métier passe par le catalogue (`/v1/conversation` ou `/v1/operations`).
+  L'interpréteur LLM `ai/llm.py` ne sert plus qu'aux e-mails libres du coach (proposition à
+  approuver).

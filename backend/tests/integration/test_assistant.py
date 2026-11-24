@@ -215,7 +215,8 @@ def test_conversation_route_keeps_context_and_falls_back(
         assert "300" in third.json()["reply"] or "5" in third.json()["reply"]
         assert api.post("/v1/conversation", json={"text": "x"}).status_code == 401
     with sessions() as s:
-        assert len(list(s.scalars(select(ConversationTurnRow)))) == 4
+        # 2 LLM exchanges + 1 fallback exchange: the fallback turns are kept as context too
+        assert len(list(s.scalars(select(ConversationTurnRow)))) == 6
 
 
 def test_operations_api_catalogue_and_idempotency(

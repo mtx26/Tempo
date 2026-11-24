@@ -105,7 +105,12 @@ def test_coach_change_on_protected_session_becomes_a_proposal(
         kept = s.get(ActivityRow, row_id)
         assert kept is not None and kept.notes == "ma version"  # not overwritten
     with TestClient(create_app(Settings(api_token=TOKEN, database_url=database_url))) as api:
-        assert api.post(f"/v1/proposals/{proposal.id}/approve", headers=AUTH).status_code == 200
+        decided = api.post(
+            "/v1/operations/decide_proposal",
+            json={"proposal_id": str(proposal.id), "approve": True},
+            headers=AUTH,
+        )
+        assert decided.status_code == 200, decided.text
     with sessions() as s:
         updated = s.get(ActivityRow, row_id)
         assert updated is not None and updated.duration_minutes == 65
@@ -173,13 +178,13 @@ def test_conversational_approve_and_done(
 
         def say(phrase: str) -> dict[str, object]:
             result: dict[str, object] = api.post(
-                "/v1/interpret", json={"text": phrase}, headers=AUTH
+                "/v1/conversation", json={"text": phrase}, headers=AUTH
             ).json()
             return result
 
         approved = say("approuve")
-        assert approved["applied"] and approved["action"] == "approve"
-        assert not say("refuse")["applied"]  # nothing pending any more
+        assert approved["changed"] and approved["operations"] == ["decide_proposal"]
+        assert not say("refuse")["changed"]  # nothing pending any more
     with sessions() as s:
         assert s.scalars(select(ProposalRow)).one().status == "approved"
         # "c'est fait" relies on the real clock: mark the earliest block as under way now.
@@ -189,7 +194,8 @@ def test_conversational_approve_and_done(
         block.start_at, block.end_at = now - timedelta(minutes=10), now + timedelta(minutes=80)
         s.commit()
     with TestClient(create_app(Settings(api_token=TOKEN, database_url=database_url))) as api:
-        done = api.post("/v1/interpret", json={"text": "c'est fait !"}, headers=AUTH).json()
-    assert done["applied"] and "marquée comme faite" in done["summary"]
+        done = api.post("/v1/conversation", json={"text": "c'est fait !"}, headers=AUTH).json()
+    assert done["changed"] and "marquée comme faite" in done["reply"]
+    assert done["operations"] == ["log_work"]
     with sessions() as s:
         assert s.get(StudyBlockRow, first.id).state == "done"  # type: ignore[union-attr]

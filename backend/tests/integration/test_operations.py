@@ -736,3 +736,55 @@ def test_alternatives_when_everything_fits(session: Session) -> None:
     seed(session)
     ok(session, "plan_now")
     assert ok(session, "propose_alternatives")["status"] == "nothing_to_resolve"
+
+
+def test_trainings_and_races_are_created_through_the_conversation(session: Session) -> None:
+    """B06: a race is fixed; a training is flexible in its window with a preferred start."""
+    seed(session)
+    race = ok(
+        session,
+        "create_event",
+        kind="race",
+        title="Cross",
+        scheduling="fixed",
+        start="2026-12-13T10:00",
+        duration_minutes=45,
+        place_id="club",
+    )["activity"]
+    assert race["kind"] == "race" and race["scheduling"] == "fixed"
+    training = ok(
+        session,
+        "create_event",
+        kind="training",
+        title="Footing",
+        scheduling="flexible",
+        window_start="2026-12-10T00:00",
+        window_end="2026-12-11T23:59",
+        preferred_start="2026-12-10T17:00",
+        duration_minutes=40,
+        notes="40 min EF",
+    )["activity"]
+    assert training["kind"] == "training"
+    row = session.get(ActivityRow, __import__("uuid").UUID(training["id"]))
+    assert row is not None and row.preferred_start_at == at(10, 17)
+    assert "fixe" in err(
+        session,
+        "create_event",
+        kind="race",
+        title="10 km",
+        scheduling="flexible",
+        window_start="2026-12-12T00:00",
+        window_end="2026-12-12T23:00",
+        duration_minutes=60,
+    )
+    assert "fenêtre" in err(
+        session,
+        "create_event",
+        kind="training",
+        title="x",
+        scheduling="flexible",
+        window_start="2026-12-10T00:00",
+        window_end="2026-12-10T12:00",
+        preferred_start="2026-12-11T17:00",
+        duration_minutes=40,
+    )

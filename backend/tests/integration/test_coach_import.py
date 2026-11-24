@@ -4,6 +4,7 @@ and planned with order/recovery constraints (synthetic fixtures)."""
 import itertools
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -123,25 +124,19 @@ def test_confirm_api_and_planning_respects_order_and_recovery(
             a for a in api.get("/v1/activities", headers=AUTH).json() if a["status"] == "to_confirm"
         )
         assert vma["preferred_day"] == "2026-11-25"
-        assert (
-            api.patch(
-                f"/v1/activities/{vma['id']}", json={"status": "active"}, headers=AUTH
-            ).status_code
-            == 409
-        )
-        bad = api.post(
-            f"/v1/activities/{vma['id']}/confirm", json={"duration_minutes": 0}, headers=AUTH
-        )
-        assert bad.status_code == 422
-        ok = api.post(
-            f"/v1/activities/{vma['id']}/confirm", json={"duration_minutes": 50}, headers=AUTH
-        )
-        assert ok.status_code == 200 and ok.json()["status"] == "active"
-        assert ok.json()["user_modified"] is True
-        again = api.post(
-            f"/v1/activities/{vma['id']}/confirm", json={"duration_minutes": 50}, headers=AUTH
-        )
-        assert again.status_code == 409
+
+        def confirm(minutes: int) -> Any:
+            return api.post(
+                "/v1/operations/confirm_activity",
+                json={"activity_id": vma["id"], "duration_minutes": minutes},
+                headers=AUTH,
+            )
+
+        assert confirm(0).status_code == 422  # never a guessed or empty duration
+        ok = confirm(50)
+        assert ok.status_code == 200 and ok.json()["result"]["activity"]["status"] == "active"
+        again = confirm(50)
+        assert again.status_code == 422 and "déjà" in again.json()["detail"]
     with sessions() as s:
         now = datetime(2026, 11, 22, 18, tzinfo=TZ).astimezone(UTC)
         version = replan(s, FakeRouting(), now, TZ, reason="coach plan")

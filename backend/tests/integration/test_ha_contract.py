@@ -112,7 +112,8 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
                     ]
                 },
             )
-            assert len(await client.availability()) == 7
+            rules = await op("get_rules", {})
+            assert len(rules["result"]["weekly_windows"]) == 7
             await op("update_settings", {"home_place_id": "home"})
             # technical setting pushed by the options flow
             await client.patch_settings({"tracker_entity_id": "device_tracker.phone"})

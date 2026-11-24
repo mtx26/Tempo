@@ -1,4 +1,5 @@
-"""Natural-language requests and training e-mails on a REAL PostgreSQL (LLM faked)."""
+"""Deterministic conversation fallback and training e-mails on a REAL PostgreSQL (LLM
+faked for e-mails)."""
 
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
@@ -66,63 +67,59 @@ def api(database_url: str, clean: sessionmaker[Session]) -> Iterator[TestClient]
 
 
 def say(api: TestClient, phrase: str) -> dict[str, object]:
-    response = api.post("/v1/interpret", json={"text": phrase}, headers=AUTH)
+    """No API key: the conversation answers with the deterministic fallback."""
+    response = api.post("/v1/conversation", json={"text": phrase}, headers=AUTH)
     assert response.status_code == 200, response.text
     result: dict[str, object] = response.json()
+    assert result["fallback"] is True and result["used_llm"] is False
     return result
 
 
-def test_interpret_adds_a_soft_task_without_any_llm(
+def test_fallback_adds_a_soft_task_through_the_catalogue(
     api: TestClient, clean: sessionmaker[Session]
 ) -> None:
     answer = say(api, f"ajoute 5h de maths pour le {dmy(ahead(20))}")
-    assert answer["applied"] and answer["action"] == "add" and not answer["used_llm"]
+    assert answer["changed"] and answer["operations"] == ["create_task"]
     with clean() as s:
         task = s.scalars(select(StudyTaskRow)).one()
         assert (task.subject, task.effort_minutes, task.target_kind.value) == ("maths", 300, "soft")
 
 
-def test_interpret_unknown_text_without_llm_explains_supported_phrasings(api: TestClient) -> None:
+def test_fallback_unknown_text_explains_supported_phrasings(api: TestClient) -> None:
     answer = say(api, "organise ma vie")
-    assert not answer["applied"] and not answer["understood"]
-    assert "Exemples" in str(answer["summary"])
+    assert not answer["changed"]
+    assert "Exemples" in str(answer["reply"])
 
 
-def test_interpret_past_or_far_dates_are_rejected_not_fixed(api: TestClient) -> None:
-    assert "passée" in str(say(api, "ajoute 2h de chimie pour le 01/01/2020")["summary"])
+def test_fallback_past_or_far_dates_are_rejected_not_fixed(api: TestClient) -> None:
+    assert "passée" in str(say(api, "ajoute 2h de chimie pour le 01/01/2020")["reply"])
     far = say(api, f"ajoute 2h de chimie pour le {dmy(ahead(400))}")
-    assert not far["applied"] and "plus d'un an" in str(far["summary"])
+    assert not far["changed"] and "plus d'un an" in str(far["reply"])
 
 
-def test_interpret_uses_the_llm_only_when_needed_and_validates_it(
+def test_fallback_adds_trainings_and_races_through_the_catalogue(
     api: TestClient, clean: sessionmaker[Session]
 ) -> None:
-    fake = FakeInterpreter(
-        Extraction(
-            items=[
-                ExtractedItem(
-                    kind="study_task", title="statistiques", minutes=120, day=ahead(10).isoformat()
-                ),
-                ExtractedItem(kind="race", title="trail", minutes=90, day=ahead(12).isoformat()),
-            ]
-        )
-    )
-    api.app.state.interpreter = fake  # type: ignore[attr-defined]
-    say(api, f"ajoute 1h de maths pour le {dmy(ahead(20))}")
-    assert fake.calls == []  # deterministic parser was enough
-    answer = say(api, "il faudrait que je bosse les stats deux heures avant dix jours")
-    assert answer["used_llm"] and answer["applied"]
-    assert "heure de départ" in str(answer["summary"])  # the race was rejected by validation
     with clean() as s:
-        subjects = sorted(t.subject for t in s.scalars(select(StudyTaskRow)))
-        assert subjects == ["maths", "statistiques"]
-        assert s.scalars(select(ActivityRow)).first() is None
+        s.add(PlaceRow(id="club", name="Club", latitude=50.7, longitude=4.6))
+        s.commit()
+    answer = say(
+        api,
+        f"{dmy(ahead(3))} 18:30 : fractionné 60 min @club - 6 x 800 m\n"
+        f"course {dmy(ahead(9))} 10:00 : 10 km 60 min @club",
+    )
+    assert answer["changed"] and answer["operations"] == ["create_event", "create_event"]
+    with clean() as s:
+        rows = {a.kind: a for a in s.scalars(select(ActivityRow))}
+    assert rows["race"].scheduling == "fixed" and rows["race"].duration_minutes == 60
+    assert rows["training"].scheduling == "flexible" and rows["training"].notes == "6 x 800 m"
+    assert rows["training"].preferred_start_at is not None
 
 
 def test_too_many_items_are_refused(api: TestClient) -> None:
     lines = "\n".join(f"ajoute 1h de sujet{i} pour le {dmy(ahead(30))}" for i in range(21))
     answer = say(api, lines)
-    assert not answer["applied"] and "plus de 20" in str(answer["summary"])
+    assert not answer["changed"] and "plus de 20" in str(answer["reply"])
 
 
 def test_training_mail_import_is_narrow_idempotent_and_protects_races(
@@ -151,7 +148,9 @@ def test_training_mail_import_is_narrow_idempotent_and_protects_races(
         assert kinds == ["training_added", "training_unparsed"]
     proposals = api.get("/v1/proposals", headers=AUTH).json()
     assert len(proposals) == 1 and proposals[0]["kind"] == "training_import"
-    assert api.post(f"/v1/proposals/{proposals[0]['id']}/approve", headers=AUTH).status_code == 200
+    approve = {"proposal_id": proposals[0]["id"], "approve": True}
+    decided = api.post("/v1/operations/decide_proposal", json=approve, headers=AUTH)
+    assert decided.status_code == 200, decided.text
     with clean() as s:
         race = s.scalars(select(ActivityRow).where(ActivityRow.kind == "race")).one()
         assert race.earliest_start_at.astimezone(TZ).hour == 10

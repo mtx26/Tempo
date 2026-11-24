@@ -1,4 +1,5 @@
-"""HTTP API used by the Home Assistant integration (tasks and phone position).
+"""HTTP API used by the Home Assistant integration (read-only tasks, phone position) and
+task changes through the operation catalogue.
 
 Runs the real FastAPI app against the per-session PostgreSQL test database.
 """
@@ -29,74 +30,84 @@ def api(database_url: str, engine: Engine) -> Iterator[TestClient]:
     with Session(engine) as s:
         s.execute(delete(StudyTaskRow))
         s.execute(delete(PhonePositionRow))
-        s.execute(delete(AuditEntry).where(AuditEntry.actor == "home_assistant"))
+        s.execute(delete(AuditEntry).where(AuditEntry.actor.in_(("home_assistant", "api"))))
         s.commit()
 
 
 def create_task(api: TestClient, **overrides: object) -> dict[str, object]:
-    body = {"subject": "Analyse", "effort_minutes": 600, "target_date": "2027-01-15", **overrides}
-    response = api.post("/v1/tasks", json=body, headers=AUTH)
-    assert response.status_code == 201, response.text
-    result: dict[str, object] = response.json()
+    """Tasks are created through the operation catalogue (never a dedicated REST route)."""
+    body = {"title": "Analyse", "estimated_minutes": 600, "target_date": "2027-01-15", **overrides}
+    response = api.post("/v1/operations/create_task", json=body, headers=AUTH)
+    assert response.status_code == 200, response.text
+    result: dict[str, object] = response.json()["result"]["task"]
     return result
 
 
-def test_task_endpoints_require_the_token(api: TestClient) -> None:
+def test_task_routes_require_the_token_and_are_read_only(api: TestClient) -> None:
     assert api.get("/v1/tasks").status_code == 401
-    assert api.post("/v1/tasks", json={}).status_code == 401
+    assert api.post("/v1/operations/create_task", json={}).status_code == 401
+    assert api.post("/v1/tasks", json={}, headers=AUTH).status_code == 405
 
 
 def test_created_task_has_soft_target_by_default(api: TestClient) -> None:
     task = create_task(api)
-    assert task["target_kind"] == "soft"
+    assert task["hard_deadline"] is False
     assert task["remaining_minutes"] == 600
-    assert task["completed_minutes"] == 0
+    assert task["done_minutes"] == 0
 
 
 def test_hard_deadline_must_be_explicit(api: TestClient) -> None:
-    task = create_task(api, target_kind="hard")
-    assert task["target_kind"] == "hard"
+    listed = api.get("/v1/tasks", headers=AUTH).json()
+    assert listed == []
+    task = create_task(api, hard_deadline=True)
+    assert task["hard_deadline"] is True
+    assert api.get("/v1/tasks", headers=AUTH).json()[0]["target_kind"] == "hard"
 
 
 def test_tasks_are_listed(api: TestClient) -> None:
-    create_task(api, subject="Analyse")
-    create_task(api, subject="Chimie")
+    create_task(api, title="Analyse")
+    create_task(api, title="Chimie")
     subjects = [t["subject"] for t in api.get("/v1/tasks", headers=AUTH).json()]
     assert subjects == ["Analyse", "Chimie"]
 
 
 def test_progress_update_changes_remaining_effort(api: TestClient) -> None:
     task = create_task(api)
-    response = api.patch(f"/v1/tasks/{task['id']}", json={"completed_minutes": 150}, headers=AUTH)
-    assert response.status_code == 200
-    assert response.json()["remaining_minutes"] == 450
+    response = api.post(
+        "/v1/operations/log_work", json={"task_id": task["id"], "minutes": 150}, headers=AUTH
+    )
+    assert response.status_code == 200, response.text
+    listed = api.get("/v1/tasks", headers=AUTH).json()
+    assert listed[0]["remaining_minutes"] == 450
 
 
 @pytest.mark.parametrize(
     "body",
     [
-        {"subject": "", "effort_minutes": 60, "target_date": "2027-01-15"},
-        {"subject": "A", "effort_minutes": 0, "target_date": "2027-01-15"},
-        {"subject": "A", "effort_minutes": 60, "target_date": "not-a-date"},
-        {"subject": "A", "effort_minutes": 60, "target_date": "2027-01-15", "target_kind": "x"},
-        {"subject": "A" * 201, "effort_minutes": 60, "target_date": "2027-01-15"},
+        {"title": "", "estimated_minutes": 60, "target_date": "2027-01-15"},
+        {"title": "A", "estimated_minutes": 0, "target_date": "2027-01-15"},
+        {"title": "A", "estimated_minutes": 60, "target_date": "not-a-date"},
+        {"title": "A", "estimated_minutes": 60, "target_date": "2027-01-15", "priority": 9},
+        {"title": "A" * 201, "estimated_minutes": 60, "target_date": "2027-01-15"},
     ],
 )
 def test_invalid_tasks_are_rejected(api: TestClient, body: dict[str, object]) -> None:
-    assert api.post("/v1/tasks", json=body, headers=AUTH).status_code == 422
+    assert api.post("/v1/operations/create_task", json=body, headers=AUTH).status_code == 422
 
 
-def test_unknown_task_returns_404(api: TestClient) -> None:
+def test_unknown_task_is_rejected(api: TestClient) -> None:
     missing = "00000000-0000-0000-0000-000000000000"
-    response = api.patch(f"/v1/tasks/{missing}", json={"completed_minutes": 1}, headers=AUTH)
-    assert response.status_code == 404
+    response = api.post(
+        "/v1/operations/log_work", json={"task_id": missing, "minutes": 1}, headers=AUTH
+    )
+    assert response.status_code == 422
 
 
 def test_task_creation_is_audited(api: TestClient, engine: Engine) -> None:
-    task = create_task(api)
+    create_task(api)
     with Session(engine) as s:
-        entries = s.query(AuditEntry).filter(AuditEntry.entity_id == str(task["id"])).all()
-    assert [e.action for e in entries] == ["task_created"]
+        entries = s.query(AuditEntry).filter(AuditEntry.actor == "api").all()
+    assert [e.action for e in entries] == ["op:create_task"]
 
 
 POSITION = {

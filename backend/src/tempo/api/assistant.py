@@ -2,7 +2,7 @@
 
 - ``POST /v1/conversation``: the natural-language interface used by Home Assistant (text or
   voice). The LLM assistant runs catalogue operations; without LLM (no key, outage, refusal)
-  the deterministic parser of ``/v1/interpret`` answers instead.
+  the deterministic fallback (``assistant.fallback``) answers through the same operations.
 - ``GET /v1/operations`` / ``POST /v1/operations/{name}``: the typed operation catalogue for
   authenticated clients (same validation and rules as the assistant). An ``Idempotency-Key``
   header makes a mutation safe to retry.
@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 
 from tempo.api.ha import SessionDep
-from tempo.api.interpret import InterpretIn, interpret
+from tempo.assistant import fallback
 from tempo.assistant.agent import Assistant, LLMUnavailableError
 from tempo.assistant.catalog import CATALOG, OpContext, run_operation
 from tempo.db.models import ConversationTurnRow
@@ -143,12 +143,15 @@ def conversation(body: ConversationIn, request: Request, session: SessionDep) ->
                 "operations": reply.operations,
                 "changed": bool(ctx.changed),
             }
-    result = interpret(InterpretIn(text=body.text[:2000]), request, session)
+    ctx = _context(request, session, "assistant")
+    result = fallback.reply(ctx, body.text[:2000])
+    _remember(session, body.conversation_id, "user", body.text)
+    _remember(session, body.conversation_id, "assistant", result["reply"])
     return {
-        "reply": result["summary"],
+        "reply": result["reply"],
         "used_llm": False,
-        "operations": [],
-        "changed": bool(result.get("applied")),
+        "operations": ctx.changed,
+        "changed": result["changed"],
         "fallback": True,
     }
 
