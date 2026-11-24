@@ -155,3 +155,48 @@ def test_key_is_never_forwarded_to_a_redirect_target_and_http_is_refused(tmp_pat
     client = httpx2.Client(transport=httpx2.MockTransport(downgrade))
     report = update_inputs(tmp_path / "x", client, key="k", clock=lambda: NOW, only=SOURCES[:1])
     assert report.failed == {"stib.gtfs.zip": "refusing non-https URL"}
+
+
+def test_repaired_feed_with_frequencies_is_rejected() -> None:
+    """The TEC realtime repair (drop start_time) is only valid without frequencies.txt."""
+    with_frequencies = gtfs(extra={"frequencies.txt": "trip_id,start_time\nT1,06:00:00\n"})
+    assert validate_gtfs(with_frequencies, NOW.date(), None) == date(2027, 1, 31)
+    with pytest.raises(InvalidGtfsError, match="frequencies"):
+        validate_gtfs(with_frequencies, NOW.date(), None, forbid_frequencies=True)
+
+
+def test_sources_per_region() -> None:
+    from tempo.transport.gtfs_update import sources
+
+    national = {s.name: s for s in sources()}
+    assert set(national) == {
+        "tec.gtfs.zip",
+        "sncb.gtfs.zip",
+        "delijn.gtfs.zip",
+        "stib.gtfs.zip",
+        "osm.pbf",
+    }
+    assert national["tec.gtfs.zip"].forbid_frequencies
+    assert not national["stib.gtfs.zip"].forbid_frequencies
+    brussels = {s.name for s in sources("brussels")}
+    assert brussels == {"stib.gtfs.zip", "sncb.gtfs.zip", "osm.pbf"}
+    with pytest.raises(ValueError, match="region"):
+        sources("mars")
+
+
+def test_entry_point_reports_json_and_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tempo.transport import gtfs_update
+
+    seen: dict[str, object] = {}
+
+    def fake(folder: Path, client: object, **kwargs: object) -> object:
+        seen.update(folder=folder, **kwargs)
+        return gtfs_update.UpdateReport([], [], [], {"stib.gtfs.zip": "timeout"}, None)
+
+    monkeypatch.setattr(gtfs_update, "update_inputs", fake)
+    assert gtfs_update.main([str(tmp_path), "brussels"]) == 1  # nothing usable: job fails
+    assert seen["region"] == "brussels" and seen["folder"] == tmp_path
+    assert json.loads(capsys.readouterr().out)["failed"] == {"stib.gtfs.zip": "timeout"}
+    assert gtfs_update.main([str(tmp_path), "mars"]) == 2

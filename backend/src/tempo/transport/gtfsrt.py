@@ -5,7 +5,7 @@ TEC publishes ``trip.start_time`` shifted by 12 h for afternoon trips, so MOTIS 
 about half of the trip updates and a quarter of the alert selectors (measured 2026-11-23).
 The GTFS-RT reference says that for trips not defined in ``frequencies.txt`` ``start_time``
 "should either be omitted or be equal to the value in the GTFS feed". TEC's static feed has no
-``frequencies.txt`` (checked 2026-11-23, re-checked by ``routing/fetch_data.py`` on every
+``frequencies.txt`` (checked 2026-11-23, re-checked by ``gtfs_update`` on every
 download), so dropping ``start_time`` of SCHEDULED/CANCELED trips identified by ``trip_id`` is
 spec-compliant and lets MOTIS match on ``trip_id`` + ``start_date`` (100 % resolved in a live
 MOTIS test). Nothing else is altered; delays and cancellations are kept as published.

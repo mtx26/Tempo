@@ -17,7 +17,7 @@ encore pu être vérifié (LLM réel, Home Assistant réel, HACS, Swarm, sources
 | Chemin | Contenu |
 |---|---|
 | `backend/` | Paquet Python `tempo` (API FastAPI, worker, planificateur, transport, synchronisations), tests, `Dockerfile`. |
-| `routing/` | Image MOTIS (`Dockerfile`), configurations `config/brussels.yml` (test) et `config/belgium.yml` (national), `fetch_data.py`, `scripts/supervisor.sh` (reconstruction atomique des graphes). |
+| `routing/` | Image MOTIS (`Dockerfile`), configurations `config/brussels.yml` (test) et `config/belgium.yml` (national), `scripts/supervisor.sh` (reconstruction atomique des graphes). |
 | `deploy/` | `stack.yml` (Swarm), `compose.dev.yml` (pile locale), rôles PostgreSQL, sauvegarde et exercice de restauration. |
 | `../tempo-homeassistant` | Intégration `custom_components/tempo` (dépôt séparé). |
 
@@ -78,7 +78,7 @@ Intégration Home Assistant (Linux ou WSL uniquement) : voir le README de `tempo
 
 ```bash
 export PATH="$LOCALAPPDATA/Programs/DockerDesktop/resources/bin:$PATH"
-python routing/fetch_data.py brussels          # ou belgium (957 Mo)
+(cd backend && uv run python -m tempo.transport.gtfs_update ../routing/data/brussels brussels)  # ou belgium
 docker build -t tempo-routing:v2.11.4 routing
 W="$(cygpath -w "$PWD/routing")"
 MSYS_NO_PATHCONV=1 docker run --rm --memory 6g \
@@ -89,7 +89,8 @@ MSYS_NO_PATHCONV=1 docker run -d --name tempo-motis-brussels --memory 4g \
 ```
 
 Les données expirent (le GTFS STIB du 23/11/2026 est valable jusqu'au 20/12/2026) : relancer
-`fetch_data.py` puis l'import ; hors fenêtre, MOTIS répond 400 et Tempo signale « routage
+`gtfs_update` (le même outil que la mise à jour nocturne de production : ETag, validation,
+remplacement atomique) puis l'import ; hors fenêtre, MOTIS répond 400 et Tempo signale « routage
 indisponible ». Pour le national, `config/belgium.yml` lit le temps réel via le relais
 (`python -m tempo.transport.rt_relay`, port 8090, à ne jamais publier : il consomme le quota du
 portail).

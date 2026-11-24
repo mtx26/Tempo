@@ -21,7 +21,7 @@ import logging
 import sys
 import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx2
 
-from tempo.transport.feeds import FEEDS, KEY_HEADER, FeedKind
+from tempo.transport.feeds import FEEDS, KEY_HEADER, FeedKind, Operator
 
 logger = logging.getLogger(__name__)
 
@@ -52,18 +52,46 @@ class Source:
     url: str
     gtfs: bool
     min_interval: timedelta = timedelta(0)
+    forbid_frequencies: bool = False
+    """The operator's realtime is repaired by dropping ``start_time`` (``gtfsrt``): only valid
+    while its static GTFS has no ``frequencies.txt``."""
 
 
-def sources() -> list[Source]:
+REGIONS: dict[str, tuple[frozenset[Operator], str]] = {
+    "belgium": (frozenset(Operator), OSM_URL),
+    # Small development region (MOTIS test instance): STIB + SNCB over the Brussels extract.
+    "brussels": (
+        frozenset({Operator.STIB, Operator.SNCB}),
+        "https://download.bbbike.org/osm/bbbike/Bruessel/Bruessel.osm.pbf",
+    ),
+}
+
+
+def sources(region: str = "belgium") -> list[Source]:
+    if region not in REGIONS:
+        raise ValueError(f"unknown region {region!r}; choose from {sorted(REGIONS)}")
+    operators, osm = REGIONS[region]
+    repaired = {f.operator for f in FEEDS if f.needs_repair}
     static = [
-        Source(f"{feed.operator.name.lower().replace('_', '')}.gtfs.zip", feed.url, True)
+        Source(
+            f"{feed.operator.name.lower().replace('_', '')}.gtfs.zip",
+            feed.url,
+            True,
+            forbid_frequencies=feed.operator in repaired,
+        )
         for feed in FEEDS
-        if feed.kind is FeedKind.STATIC
+        if feed.kind is FeedKind.STATIC and feed.operator in operators
     ]
-    return [*static, Source("osm.pbf", OSM_URL, False, OSM_REFRESH)]
+    return [*static, Source("osm.pbf", osm, False, OSM_REFRESH)]
 
 
-def validate_gtfs(data: bytes | Path, today: date, previous_size: int | None) -> date | None:
+def validate_gtfs(
+    data: bytes | Path,
+    today: date,
+    previous_size: int | None,
+    *,
+    forbid_frequencies: bool = False,
+) -> date | None:
     """Raise ``InvalidGtfsError`` unless the feed is usable; returns its last service date."""
     size = data.stat().st_size if isinstance(data, Path) else len(data)
     if previous_size and size < MIN_SIZE_RATIO * previous_size:
@@ -78,6 +106,11 @@ def validate_gtfs(data: bytes | Path, today: date, previous_size: int | None) ->
     missing = [n for n in REQUIRED_GTFS if n not in names]
     if missing or not ({"calendar.txt", "calendar_dates.txt"} & names):
         raise InvalidGtfsError(f"missing GTFS files: {missing or ['calendar*.txt']}")
+    if forbid_frequencies and "frequencies.txt" in names:
+        raise InvalidGtfsError(
+            "frequencies.txt present: the realtime start_time repair is no longer valid "
+            "(disable needs_repair in transport/feeds.py and re-check realtime resolution)"
+        )
     last = _last_service_date(archive, names)
     if last is not None and last < today + COVERAGE:
         raise InvalidGtfsError(f"calendar ends on {last}, less than a week ahead")
@@ -178,13 +211,14 @@ def update_inputs(
     key: str | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     only: list[Source] | None = None,
+    region: str = "belgium",
 ) -> UpdateReport:
     folder.mkdir(parents=True, exist_ok=True)
     state_path = folder / "update-state.json"
     state = _load(state_path)
     now = clock()
     report = UpdateReport([], [], [], {}, None)
-    for source in only or sources():
+    for source in only or sources(region):
         entry = state.get(source.name, {})
         last_check = entry.get("checked_at")
         if last_check and now - datetime.fromisoformat(last_check) < source.min_interval:
@@ -214,7 +248,12 @@ def update_inputs(
                 continue
             if source.gtfs:
                 try:
-                    last = validate_gtfs(part, now.date(), entry.get("bytes"))
+                    last = validate_gtfs(
+                        part,
+                        now.date(),
+                        entry.get("bytes"),
+                        forbid_frequencies=source.forbid_frequencies,
+                    )
                 except InvalidGtfsError as exc:
                     report.failed[source.name] = f"rejected: {exc}"
                     continue
@@ -239,19 +278,24 @@ def update_inputs(
     return report
 
 
-def main(argv: list[str]) -> int:  # pragma: no cover - process entry point
+def main(argv: list[str]) -> int:
     import os
 
     logging.basicConfig(level=logging.INFO)
-    if len(argv) != 1:
-        print("usage: python -m tempo.transport.gtfs_update <input-folder>", file=sys.stderr)
+    if len(argv) not in (1, 2) or (len(argv) == 2 and argv[1] not in REGIONS):
+        print(
+            "usage: python -m tempo.transport.gtfs_update <input-folder> [belgium|brussels]",
+            file=sys.stderr,
+        )
         return 2
     key_file = Path("/run/secrets/tempo_bmc_partner_key")
     key = key_file.read_text(encoding="utf-8").strip() if key_file.exists() else None
     key = key or os.environ.get("TEMPO_BMC_PARTNER_KEY")
     with httpx2.Client(timeout=600.0) as client:
-        report = update_inputs(Path(argv[0]), client, key=key)
-    print(json.dumps(report.__dict__, indent=2))
+        report = update_inputs(
+            Path(argv[0]), client, key=key, region=argv[1] if len(argv) == 2 else "belgium"
+        )
+    print(json.dumps(asdict(report), indent=2))
     return 1 if report.failed and not (report.changed or report.unchanged) else 0
 
 
