@@ -252,7 +252,7 @@ def test_inconsistent_preferences_are_rejected() -> None:
         Preferences(preferred_block_minutes=100)  # not a multiple of 15
 
 
-# --- Regression tests from the adversarial review (milestone 3) ---------------------------
+# --- Regression tests from the adversarial review ---------------------------
 
 
 def test_soft_target_long_past_still_plans_everything() -> None:

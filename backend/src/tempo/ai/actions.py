@@ -7,7 +7,6 @@
 """
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -17,11 +16,11 @@ from sqlalchemy.orm import Session
 
 from tempo.db.models import ProposalRow, StudyBlockRow, StudyTaskRow
 from tempo.planning.service import active_version
+from tempo.text import plain
 
 
 def _plain(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold().strip()
+    return plain(text).strip()
 
 
 @dataclass(frozen=True, slots=True)

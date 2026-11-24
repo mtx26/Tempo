@@ -1,8 +1,8 @@
-"""Background jobs (milestone 7). Each job is a plain function over a session factory so it can
+"""Background jobs. Each job is a plain function over a session factory so it can
 be tested against a real PostgreSQL without the scheduling loop.
 
 - ``ics_sync``: download the university feed (URL is a secret, never stored), parse window +
-  margin (D017), reconcile, notify near-term changes and request a re-plan when anything changed.
+  margin, reconcile, notify near-term changes and request a re-plan when anything changed.
   Protected commitments are never moved here: the re-plan turns conflicts into proposals.
 - ``replan``: run the planning pipeline when requested, nightly, or when the plan is stale.
 - ``departure_check``: re-check the next outbound trip from the phone's CURRENT position with live
@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 ICS_PAST = timedelta(days=1)
 ICS_FUTURE = timedelta(days=60)
 ICS_MARGIN = timedelta(days=7)
-"""Parsed beyond the reconciled window so events moving out of it are seen as changed (D017)."""
+"""Parsed beyond the reconciled window so events moving out of it are seen as changed."""
 MAX_ICS_BYTES = 10 * 1024 * 1024
 NEAR_TERM_CHANGE = timedelta(days=7)
 DEPARTURE_LOOKAHEAD = timedelta(hours=2)

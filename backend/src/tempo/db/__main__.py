@@ -3,7 +3,7 @@
 
 Reads only the database URL (env ``TEMPO_DATABASE_URL`` or Docker secret
 ``/run/secrets/tempo_database_url``), never the API token: the migration role is separate from
-the runtime role (README.md). Concurrent runs are serialised by an advisory lock (D018).
+the runtime role (README.md). Concurrent runs are serialised by an advisory lock.
 """
 
 import re

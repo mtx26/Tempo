@@ -1,4 +1,4 @@
-"""Automatic refresh of the routing inputs (milestone 13): Belgian GTFS + OpenStreetMap.
+"""Automatic refresh of the routing inputs: Belgian GTFS + OpenStreetMap.
 
 Runs as a one-shot job (``python -m tempo.transport.gtfs_update /routing-input``, nightly in the
 stack) writing into the volume shared with the routing service:

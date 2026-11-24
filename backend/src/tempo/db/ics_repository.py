@@ -138,7 +138,7 @@ def _pair_moves(
 ) -> list[tuple[FixedEventRow, FixedEvent]]:
     """Occurrences whose key changed because the series moved (new RECURRENCE-ID) or a single
     event became recurring: pair vanished and new occurrences of the same UID so they are
-    reported as CHANGED rows (D012), not removed + added.
+    reported as CHANGED rows, not removed + added.
 
     Same count for a UID: chronological one-to-one pairing (the whole series shifted).
     Otherwise: pairing only when an old and a new occurrence fall on the same local date."""

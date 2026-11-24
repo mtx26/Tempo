@@ -9,7 +9,6 @@ Answers are built only from stored data; nothing is invented ("rien de prévu" w
 """
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from tempo.ai.text_parser import resolve_day
 from tempo.planning.views import schedule_items, summary
+from tempo.text import plain
 
 TYPE_LABELS = {
     "class": "cours",
@@ -30,8 +30,7 @@ TYPE_LABELS = {
 
 
 def _plain(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold().strip()
+    return plain(text).strip()
 
 
 @dataclass(frozen=True, slots=True)

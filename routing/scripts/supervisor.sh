@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tempo routing supervisor (milestone 13): serves MOTIS from /data/current and rebuilds the graph
+# Tempo routing supervisor: serves MOTIS from /data/current and rebuilds the graph
 # when the input updater (backend: python -m tempo.transport.gtfs_update /input) publishes a new
 # version in /input/READY. No Docker socket needed.
 #

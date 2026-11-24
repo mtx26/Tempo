@@ -19,9 +19,10 @@ Anything else is reported as not understood: nothing is guessed.
 """
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+
+from tempo.text import plain as _plain
 
 WEEKDAYS = {
     "lundi": 0,
@@ -34,11 +35,6 @@ WEEKDAYS = {
 }
 HARD_WORDS = ("strict", "stricte", "imperatif", "imperative", "obligatoire", "deadline")
 RACE_WORDS = ("course", "competition", "compet", "race")
-
-
-def _plain(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,4 @@
-"""Apply a parsed coach plan (``coach_plan.WeeklyPlan``) to the database (M5b).
+"""Apply a parsed coach plan (``coach_plan.WeeklyPlan``) to the database.
 
 Update rules (ARCHITECTURE.md):
 - one row per (week, suggested weekday): ``source='coach_plan'``, ``source_ref='<monday>:<wd>'``;

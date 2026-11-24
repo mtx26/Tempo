@@ -1,4 +1,4 @@
-"""Weekly training plan from the coach's ``.docx`` attachment (M5b, ARCHITECTURE.md).
+"""Weekly training plan from the coach's ``.docx`` attachment (ARCHITECTURE.md §6).
 
 Format: a date range ``Semaine du 23 au 29/11/2026`` and one table whose header row holds the
 weekdays (Monday..Sunday) and whose other rows (objective, theme, detailed instructions) hold the
@@ -18,7 +18,6 @@ Rules implemented here (deterministic, nothing invented):
 
 import io
 import re
-import unicodedata
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -26,6 +25,8 @@ from typing import Any
 
 from docx import Document
 from docx.table import Table
+
+from tempo.text import plain as _plain
 
 MAX_DOCX_BYTES = 2_000_000
 MAX_TABLES = 10
@@ -58,11 +59,6 @@ _WEEK = re.compile(
 
 class PlanFormatError(ValueError):
     """The attachment is not a readable weekly plan (reported to the user, nothing imported)."""
-
-
-def _plain(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
 @dataclass(frozen=True, slots=True)

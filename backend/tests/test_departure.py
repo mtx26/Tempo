@@ -1,4 +1,4 @@
-"""Departure re-check from the current phone position (M4d)."""
+"""Departure re-check from the current phone position."""
 
 from datetime import UTC, datetime, timedelta
 

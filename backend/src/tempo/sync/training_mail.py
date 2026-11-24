@@ -1,4 +1,4 @@
-"""Training e-mails from ONE explicitly authorised sender (milestone 5).
+"""Training e-mails from ONE explicitly authorised sender.
 
 Access is narrow by construction (ARCHITECTURE.md: never the whole mailbox):
 - the mailbox is opened read-only (``EXAMINE``) and searched server-side with

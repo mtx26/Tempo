@@ -1,4 +1,4 @@
-"""Regression tests from the adversarial transport review (milestone 4)."""
+"""Regression tests from the adversarial transport review."""
 
 from datetime import UTC, datetime, timedelta
 

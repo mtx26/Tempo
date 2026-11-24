@@ -353,7 +353,7 @@ class _Builder:
             # constant and does not influence the choice.
 
     def warm_start(self) -> int:
-        """Greedy initial solution given to CP-SAT as hints (milestone 12).
+        """Greedy initial solution given to CP-SAT as hints.
 
         Day by day, tasks by urgency (hard first, earliest target): place preferred-length
         blocks at the earliest free time that keeps the same-subject gap, the daily cap and

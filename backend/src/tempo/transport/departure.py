@@ -1,6 +1,6 @@
 """Departure re-check from the user's CURRENT position (HA phone tracker) with live routing.
 
-Used shortly before a mandatory trip (worker, M7): "can I still make it, and when must I leave?".
+Used shortly before a mandatory trip (worker): "can I still make it, and when must I leave?".
 Rules (ARCHITECTURE.md "Departure re-check"):
 - Only a FRESH and accurate phone position is used; otherwise UNKNOWN_POSITION (never stale GPS,
   never a guessed home).
