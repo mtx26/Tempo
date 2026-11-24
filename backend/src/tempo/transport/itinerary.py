@@ -191,6 +191,58 @@ def find_trips(provider: RoutingProvider, query: TripQuery) -> TripResult:
     return result
 
 
+REPORTED_DELAY = timedelta(minutes=2)
+STATIC_ONLY = (
+    "horaire théorique pour une partie du trajet : pas de temps réel, ponctualité non confirmée"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class JourneyNotes:
+    """What the user must know about a chosen journey (informative, never blocking)."""
+
+    specific: tuple[str, ...]
+    """Live delays and severe disruptions active during this trip."""
+    general: tuple[str, ...]
+    """Operator notices without a date, and legs without realtime (static timetable: NOT a
+    confirmation of punctuality) — the same for every journey, reported once."""
+
+    @property
+    def all(self) -> list[str]:
+        return [*self.specific, *self.general]
+
+
+def journey_notes(journey: Journey) -> JourneyNotes:
+    specific: list[str] = []
+    for leg in journey.legs:
+        late = max(leg.delay, leg.arrival_delay)
+        if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
+            minutes = int(late.total_seconds() // 60)
+            specific.append(f"retard en temps réel +{minutes} min sur {leg.line or leg.mode}")
+    specific += [
+        f"perturbation {alert.effect} : {alert.header}"
+        for alert in journey.timed_disruptions
+        if alert.severe
+    ]
+    general: list[str] = []
+    if any(alert.severe for alert in journey.untimed_disruptions):
+        agencies = sorted(
+            {
+                leg.agency or leg.mode
+                for leg in journey.legs
+                for alert in leg.alerts
+                if not alert.impact_periods
+            }
+        )
+        general.append(
+            f"avis d'exploitant sans période d'impact ({', '.join(agencies)}) : non vérifiés "
+            "pour les trajets prévus"
+        )
+    if journey.static_transit_legs:
+        general.append(STATIC_ONLY)
+    return JourneyNotes(tuple(dict.fromkeys(specific)), tuple(general))
+
+
 class CachedRouting:
     """Provider wrapper for one planning run: identical requests reach MOTIS once."""
 

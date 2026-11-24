@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from tempo.transport.itinerary import Objective, TripQuery, find_trips
+from tempo.transport.itinerary import Objective, TripQuery, find_trips, journey_notes
 from tempo.transport.location import (
     LocatedEvent,
     PhonePosition,
@@ -28,7 +28,6 @@ from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailable
 DEFAULT_BUFFER = timedelta(minutes=10)
 LEAVE_NOW_WINDOW = timedelta(minutes=5)
 ARRIVED_RADIUS_M = 150.0
-REPORTED_DELAY = timedelta(minutes=2)
 
 
 class DepartureStatus(StrEnum):
@@ -59,26 +58,6 @@ def _u(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("datetimes must be timezone-aware")
     return value.astimezone(UTC)
-
-
-def _warnings(journey: Journey) -> list[str]:
-    found: list[str] = []
-    for leg in journey.legs:
-        late = max(leg.delay, leg.arrival_delay)
-        if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
-            minutes = int(late.total_seconds() // 60)
-            found.append(f"retard en temps réel +{minutes} min sur {leg.line or leg.mode}")
-    found.extend(
-        f"perturbation {alert.effect} : {alert.header}"
-        for alert in journey.timed_disruptions
-        if alert.severe
-    )
-    if journey.static_transit_legs:
-        found.append(
-            "horaire théorique pour une partie du trajet : pas de temps réel, ponctualité "
-            "non confirmée"
-        )
-    return found
 
 
 def check_departure(
@@ -130,7 +109,7 @@ def check_departure(
                 advice = DepartureStatus.LEAVE_NOW
             else:
                 advice = DepartureStatus.ON_TIME
-            return DepartureAdvice(advice, best, leave_at, warnings=_warnings(best))
+            return DepartureAdvice(advice, best, leave_at, warnings=journey_notes(best).all)
 
         earliest = find_trips(
             provider,
@@ -154,7 +133,7 @@ def check_departure(
             _u(earliest.departure),
             reason=f"arrives {int((start - arrival).total_seconds() // 60)} min before the "
             f"start, less than the {int(buffer.total_seconds() // 60)} min margin",
-            warnings=_warnings(earliest),
+            warnings=journey_notes(earliest).all,
         )
     return DepartureAdvice(
         DepartureStatus.LATE,
@@ -162,5 +141,5 @@ def check_departure(
         _u(earliest.departure),
         minutes_late=-(-int((arrival - start).total_seconds()) // 60),
         reason="earliest possible arrival is after the start",
-        warnings=_warnings(earliest),
+        warnings=journey_notes(earliest).all,
     )

@@ -21,7 +21,13 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from tempo.scheduler.model import Interval
-from tempo.transport.itinerary import Objective, TripQuery, TripResult, find_trips
+from tempo.transport.itinerary import (
+    Objective,
+    TripQuery,
+    TripResult,
+    find_trips,
+    journey_notes,
+)
 from tempo.transport.location import LocatedEvent
 from tempo.transport.places import Place
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
@@ -105,32 +111,11 @@ def _label(origin: Place, destination: Place, when: datetime) -> str:
     return f"{origin.name} -> {destination.name} ({when.isoformat()})"
 
 
-REPORTED_DELAY = timedelta(minutes=2)
-
-
-def _warn(plan: TravelPlan, message: str) -> None:
-    if message not in plan.warnings:
-        plan.warnings.append(message)
-
-
 def _journey_warnings(plan: TravelPlan, journey: Journey, label: str) -> None:
-    for leg in journey.legs:
-        late = max(leg.delay, leg.arrival_delay)
-        if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
-            minutes = int(late.total_seconds() // 60)
-            _warn(plan, f"retard en temps réel +{minutes} min sur {leg.line or leg.mode} ({label})")
-    for alert in journey.timed_disruptions:
-        if alert.severe:
-            _warn(plan, f"perturbation {alert.effect} : {alert.header} ({label})")
-    agencies = sorted(
-        {leg.agency or leg.mode for leg in journey.legs for a in leg.alerts if not a.impact_periods}
-    )
-    if any(alert.severe for alert in journey.untimed_disruptions):
-        _warn(
-            plan,
-            f"operator notices without impact period ({', '.join(agencies)}) were not checked "
-            "against the planned journeys",
-        )
+    notes = journey_notes(journey)
+    for message in [*(f"{note} ({label})" for note in notes.specific), *notes.general]:
+        if message not in plan.warnings:
+            plan.warnings.append(message)
 
 
 def _outbound(

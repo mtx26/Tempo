@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx2
 
+from tempo.transport.itinerary import STATIC_ONLY
 from tempo.transport.location import LocatedEvent
 from tempo.transport.motis import MotisClient, _alert
 from tempo.transport.places import Coordinates, Place
@@ -135,7 +136,8 @@ def test_alerts_break_ties_but_never_exclude_a_journey() -> None:
     assert only_disrupted.blocks[0].journey is disrupted
     assert not only_disrupted.issues
     assert only_disrupted.warnings == [
-        "perturbation NO_SERVICE : Ligne interrompue (Kot -> Campus (2026-12-01T08:50:00+00:00))"
+        "perturbation NO_SERVICE : Ligne interrompue (Kot -> Campus (2026-12-01T08:50:00+00:00))",
+        STATIC_ONLY,
     ]
 
 
@@ -185,7 +187,8 @@ def test_untimed_severe_notices_are_summarised_once_per_plan() -> None:
     back = journey(11, 5, alerts=(UNTIMED,))
     plan = plan_day_travel([lecture()], Fixed([there, back]), start_place=HOME, end_place=HOME)
     assert plan.warnings == [
-        "operator notices without impact period (BUS) were not checked against the planned journeys"
+        "avis d'exploitant sans période d'impact (BUS) : non vérifiés pour les trajets prévus",
+        STATIC_ONLY,
     ]
 
 
