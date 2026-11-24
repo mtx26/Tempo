@@ -691,10 +691,11 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
 | B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification ; image backend construite et pile de développement Docker (postgres, migrate, api) utilisée par la recette Home Assistant réelle. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
 
-Dernière exécution locale (24/11/2026) : backend 492 tests réussis (PostgreSQL 16 réel, MOTIS
-Bruxelles réel, contrat avec le vrai client HA), 13 ignorés avec leur raison (MOTIS national,
-portail Belgian Mobility et IMAP réel non lancés dans cette session), couverture 91 %, Ruff et
-mypy strict propres ; intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres.
+Dernière exécution locale (24/11/2026) : backend **505 tests réussis, 0 ignoré** (PostgreSQL 16
+réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
+portail Belgian Mobility réel en anonyme), couverture 93 %, Ruff et mypy strict propres ;
+intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres ; recette dans un vrai
+Home Assistant 2026.11.2 (`scripts/ha_e2e.py`) 15/15.
 
 Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), URL iCal de
 l'université, entité `device_tracker`, adresse de l'expéditeur du coach + accès IMAP, clé
