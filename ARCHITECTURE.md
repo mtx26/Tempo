@@ -673,7 +673,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 
 | Besoin | État | Preuve / écart |
 |---|---|---|
-| B01 Conversation | Partiel | Agent Claude à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend. **Jamais exécuté avec un vrai LLM** (aucune clé) ni dans un Home Assistant réel. |
+| B01 Conversation | Partiel | Agent Claude à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend ; **recette dans un vrai Home Assistant 2026.11.2** (Docker, `scripts/ha_e2e.py`, 15/15) : flux de configuration, agent de conversation Assist, ajout de tâche et question par la conversation (repli déterministe), refus de deviner, GPS du téléphone transmis et jugé fiable, liste de tâches à jour, aucun service métier. **Jamais exécuté avec un vrai LLM** (aucune clé). |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente, séance unique située. |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures. **Flux iCal réel de l'université non testé** (URL non fournie). |
@@ -689,7 +689,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B14 Notifications | Vérifié | Rappel relatif qui suit sa cible, sans doublon, annulé avec la cible ; plusieurs rappels de départ. |
 | B15 Autonomie | Vérifié | Jobs testés individuellement, sans LLM ; endurance : la vraie fonction `tick` du worker sur 7 jours simulés (1 008 cycles de 10 min, PostgreSQL réel) avec un cours déplacé par l'iCal, une panne de routage de 4 h et du travail déclaré chaque soir : tous les jobs sains à la fin, rappels émis une seule fois par échéance, replanification au moins nocturne, aucune séance sur un cours, croissance bornée, cycle p95 0,03 s / max 0,4 s (`test_soak.py`). Pas encore mesuré en temps réel sur le serveur. |
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
-| B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
+| B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification ; image backend construite et pile de développement Docker (postgres, migrate, api) utilisée par la recette Home Assistant réelle. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
 
 Dernière exécution locale (24/11/2026) : backend 492 tests réussis (PostgreSQL 16 réel, MOTIS
 Bruxelles réel, contrat avec le vrai client HA), 13 ignorés avec leur raison (MOTIS national,

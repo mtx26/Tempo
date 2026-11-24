@@ -101,6 +101,23 @@ python deploy/make_dev_secrets.py              # secrets dans deploy/secrets/ (i
 docker compose -f deploy/compose.dev.yml up -d # postgres -> migrate -> api (127.0.0.1:18000), relais, MOTIS (127.0.0.1:18081)
 ```
 
+### Recette Home Assistant réelle
+
+Vrai Home Assistant jetable (jamais votre instance) relié à la pile de développement : flux de
+configuration, entités, conversation Assist, GPS du téléphone, liste de tâches.
+
+```bash
+export PATH="$LOCALAPPDATA/Programs/DockerDesktop/resources/bin:$PATH"
+docker build -t tempo-backend:dev backend
+docker compose -f deploy/compose.dev.yml up -d postgres migrate api
+CFG=/tmp/tempo-ha && mkdir -p $CFG/custom_components/tempo
+cp -r ../tempo-homeassistant/custom_components/tempo/. $CFG/custom_components/tempo/
+printf 'default_config:\n' > $CFG/configuration.yaml
+MSYS_NO_PATHCONV=1 docker run -d --name tempo-ha-e2e --network tempo-dev_front \
+  -p 127.0.0.1:18123:8123 -v "$(cygpath -w $CFG):/config" ghcr.io/home-assistant/home-assistant:2026.11.2
+cd backend && uv run python scripts/ha_e2e.py ../deploy/secrets/tempo_api_token  # 15 contrôles
+```
+
 ## Configuration
 
 Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou des variables
