@@ -1770,6 +1770,14 @@ class JourneyIn(Strict):
     depart_after: datetime | None = None
     arrive_before: datetime | None = None
     objective: Literal["shortest", "earliest_arrival", "latest_departure"] = "shortest"
+    max_transfers: int | None = Field(default=None, ge=0, le=10)
+    max_walk_minutes: int | None = Field(default=None, ge=0, le=180, description="Walking total")
+    return_depart_after: datetime | None = Field(
+        default=None, description="Also search the way back, leaving the destination after"
+    )
+    return_arrive_before: datetime | None = Field(
+        default=None, description="Way back: arrive at the origin before"
+    )
 
 
 def _journey_out(journey: Journey) -> dict[str, Any]:
@@ -1858,7 +1866,8 @@ def _explore_journeys(
 
 @operation(
     "search_journey",
-    "Public-transport itinerary via MOTIS: arrive before, depart after, or both (a range). "
+    "Public-transport itinerary via MOTIS: arrive before, depart after, or both (a range); "
+    "objective, criteria (max transfers, max walking) and optionally the way back. "
     "Distinguishes results, no candidate, and routing outage. Never invents a journey.",
     JourneyIn,
     mutates=False,
@@ -1884,29 +1893,76 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
         origin = Coordinates(place.latitude, place.longitude)
     if ctx.routing is None:
         return {"status": "unavailable", "detail": "aucun moteur de routage configuré"}
-    lower = None if body.depart_after is None else _local(body.depart_after, ctx.tz)
-    upper = None if body.arrive_before is None else _local(body.arrive_before, ctx.tz)
+    target = Coordinates(destination.latitude, destination.longitude)
+    result = _search(
+        ctx.routing, origin, target, body, body.depart_after, body.arrive_before, ctx.tz
+    )
+    if body.return_depart_after is not None or body.return_arrive_before is not None:
+        result["return"] = _search(
+            ctx.routing,
+            target,
+            origin,
+            body,
+            body.return_depart_after,
+            body.return_arrive_before,
+            ctx.tz,
+        )
+    return result
+
+
+def _walk_minutes(journey: Journey) -> float:
+    return sum(
+        (leg.end - leg.start).total_seconds() / 60 for leg in journey.legs if leg.mode == "WALK"
+    )
+
+
+def _search(
+    routing: RoutingProvider,
+    origin: Coordinates,
+    target: Coordinates,
+    body: JourneyIn,
+    depart_after: datetime | None,
+    arrive_before: datetime | None,
+    tz: ZoneInfo,
+) -> dict[str, Any]:
+    """One direction: paged exploration, bounds, criteria, then the objective's ranking."""
+    if depart_after is None and arrive_before is None:
+        raise OpError("indiquez au moins un départ minimal ou une arrivée maximale")
+    lower = None if depart_after is None else _local(depart_after, tz)
+    upper = None if arrive_before is None else _local(arrive_before, tz)
     if lower is not None and upper is not None and upper <= lower:
         raise OpError("plage horaire vide")
-    target = Coordinates(destination.latitude, destination.longitude)
     try:
-        found, pages, incomplete = _explore_journeys(ctx.routing, origin, target, lower, upper)
+        found, pages, incomplete = _explore_journeys(routing, origin, target, lower, upper)
     except RoutingUnavailableError as exc:
         return {"status": "error", "detail": f"routage indisponible : {exc}"}
+
+    # One bound only: stay within OPEN_SEARCH_SPAN of it (leaving 3 h early for a 09:00
+    # appointment, or 3 h after the requested departure, is not an answer).
+    def acceptable(j: Journey) -> bool:
+        if lower is not None and upper is not None:
+            return j.departure >= lower and j.arrival <= upper
+        if upper is not None:
+            return upper - OPEN_SEARCH_SPAN <= j.arrival <= upper
+        assert lower is not None  # noqa: S101 - one bound is required above
+        return lower <= j.departure <= lower + OPEN_SEARCH_SPAN
+
+    in_range = [j for j in found if acceptable(j)]
     candidates = [
         j
-        for j in found
-        if (lower is None or j.departure >= lower) and (upper is None or j.arrival <= upper)
+        for j in in_range
+        if (body.max_transfers is None or j.transfers <= body.max_transfers)
+        and (body.max_walk_minutes is None or _walk_minutes(j) <= body.max_walk_minutes)
     ]
+    interrupted = " (exploration interrompue par une panne de routage)" if incomplete else ""
+    explored = {"explored": len(found), "pages": pages, "exploration_incomplete": incomplete}
     if not candidates:
-        return {
-            "status": "no_candidate",
-            "explored": len(found),
-            "pages": pages,
-            "exploration_incomplete": incomplete,
-            "detail": "aucun trajet dans la plage explorée"
-            + (" (exploration interrompue par une panne de routage)" if incomplete else ""),
-        }
+        reason = (
+            "aucun trajet ne respecte les critères demandés dans la plage explorée"
+            if in_range
+            else "aucun trajet dans la plage explorée"
+        )
+        return {"status": "no_candidate", **explored, "detail": reason + interrupted}
     keys: dict[str, Callable[[Journey], Any]] = {
         "shortest": lambda j: (j.duration, j.arrival, j.departure),
         "earliest_arrival": lambda j: (j.arrival, j.duration),
@@ -1918,11 +1974,8 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
         "objective": body.objective,
         "best": _journey_out(ranked[0]),
         "alternatives": [_journey_out(j) for j in ranked[1:4]],
-        "explored": len(found),
-        "pages": pages,
-        "exploration_incomplete": incomplete,
-        "note": "meilleur parmi les candidats effectivement explorés"
-        + (" (exploration interrompue par une panne de routage)" if incomplete else ""),
+        **explored,
+        "note": "meilleur parmi les candidats effectivement explorés" + interrupted,
     }
 
 

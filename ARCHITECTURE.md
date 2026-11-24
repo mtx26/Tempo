@@ -483,8 +483,10 @@ Faits vérifiés le 23/11/2026 par requêtes réelles :
 - MOTIS national : import 3 min 29 s, 1,8 Go, serveur 0,7–0,9 Go, requête médiane 100–130 ms.
 
 Contrat de recherche (`search_journey`) : origine (lieu connu ou GPS fiable), destination, au
-moins une borne (arrivée avant, départ après, ou les deux = plage), objectif (durée minimale
-par défaut, arrivée au plus tôt, départ au plus tard), départage déterministe. La recherche pagine : plusieurs requêtes
+moins une borne (arrivée avant, départ après, ou les deux = plage ; une seule borne = fenêtre
+de 2 h autour d'elle), objectif (durée minimale par défaut, arrivée au plus tôt, départ au plus
+tard), critères (correspondances maximales, marche maximale), retour facultatif (départ après /
+arrivée avant pour le chemin inverse, même critères), départage déterministe. La recherche pagine : plusieurs requêtes
 successives (au plus 5) couvrent la plage, ou 2 h avant l'arrivée limite / après le départ
 minimal. Statuts : `ok`
 (meilleur + alternatives, « meilleur parmi les candidats explorés », `exploration_incomplete`
@@ -681,7 +683,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B06 Sport | Partiel | Entraînements (flexibles) et compétitions (fixes) créés en conversation (`create_event` avec `kind`) ; DOCX, mise à jour sans doublon, durée inconnue, protections testés (fixtures + vrai serveur IMAP local). **Adresse réelle du coach et boîte réelle non configurées.** |
 | B07 Règles | Vérifié | Fenêtres hebdomadaires d'étude + exceptions datées + préférences ; fenêtres par catégorie d'activité flexible (`set_category_windows` : entraînement, personnel, tâche située), contrainte dure dans CP-SAT et revérifiée par le moteur (`test_activities.py`, `test_operations.py`). |
 | B08 Lieux | Vérifié | GPS frais/périmé/imprécis, lieu prévu sans altérer le GPS, origine inconnue ⇒ question. |
-| B09 Transport | Vérifié | `search_journey` vérifié sur un **vrai MOTIS** (région de Bruxelles) : arrivée avant, départ après, plage, aucun candidat (`test_motis_live.py`) ; panne et origine inconnue testées avec MOTIS simulé ; client MOTIS vérifié aussi sur le graphe national. Exploration paginée (jusqu'à 5 requêtes, vers l'avant depuis le départ minimal ou vers l'arrière depuis l'arrivée limite, 2 h sans seconde borne ; une panne après la première page garde les candidats déjà explorés et le signale) testée avec un fournisseur paginé simulé et exécutée sur le vrai MOTIS. Le résultat reste « meilleur parmi les candidats explorés ». |
+| B09 Transport | Vérifié | `search_journey` sur un **vrai MOTIS** (Bruxelles et national) : arrivée avant, départ après, plage, aucun candidat (`test_motis_live.py`) ; exploration paginée (jusqu'à 5 requêtes, panne après la première page signalée sans perdre les candidats) ; critères (correspondances, marche) et retour dans la même recherche, testés avec des fournisseurs simulés et exécutés sur le MOTIS national (aller et retour, 5 pages chacun) ; une borne seule reste dans une fenêtre de 2 h. Résultat : « meilleur parmi les candidats explorés ». |
 | B10 Planning mixte | Vérifié | Cours, étude, entraînements, compétition, activités personnelles, trajets ; validateur indépendant. |
 | B11 Stabilité | Vérifié | Ajout en créneau libre sans déplacement ; conflit local avec changements minimaux ; mode global sur demande. Poids bornés, pas d'optimisation lexicographique stricte. |
 | B12 Conflits | Vérifié | Manque de temps, reliquat, échéance stricte manquée, panne de routage, version invalide rejetée ; diagnostic par échéance stricte manquée (`deadline_capacity` : travail nécessaire vs minutes d'étude libres avant l'échéance, après engagements, trajets et entraînements) ; alternatives simulées automatiquement (`propose_alternatives`, rien publié). Le diagnostic n'est pas un noyau minimal calculé par le solveur : la capacité libre est partagée entre les tâches (borne supérieure). |
@@ -689,7 +691,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B14 Notifications | Vérifié | Rappel relatif qui suit sa cible, sans doublon, annulé avec la cible ; plusieurs rappels de départ. |
 | B15 Autonomie | Vérifié | Jobs testés individuellement, sans LLM ; endurance : la vraie fonction `tick` du worker sur 7 jours simulés (1 008 cycles de 10 min, PostgreSQL réel) avec un cours déplacé par l'iCal, une panne de routage de 4 h et du travail déclaré chaque soir : tous les jobs sains à la fin, rappels émis une seule fois par échéance, replanification au moins nocturne, aucune séance sur un cours, croissance bornée, cycle p95 0,03 s / max 0,4 s (`test_soak.py`). Pas encore mesuré en temps réel sur le serveur. |
 | B16 Explication | Vérifié | `explain_plan`, `get_sources_status`, `get_history`. |
-| B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification ; image backend construite et pile de développement Docker (postgres, migrate, api) utilisée par la recette Home Assistant réelle. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm (non autorisé), exercice de restauration sur le serveur. |
+| B17 Fiabilité | Partiel | PostgreSQL 16 réel, migrations montantes/descendantes, rôles, authentification ; pile Docker complète (postgres, migrate, api, worker, relais temps réel, MOTIS national) démarrée et utilisée : jobs du worker sains, replanification et recherche d'itinéraire réelles ; `scripts/backup.sh` et `restore_drill.sh` exécutés contre le PostgreSQL de la pile (6 tables identiques, schéma à jour) ; mise à jour des données de routage (`gtfs_update`) exécutée contre le portail réel. **Non fait** : installation HACS réelle (dépôt non publié), déploiement Swarm et exercice de restauration sur le serveur (non autorisés). |
 
 Dernière exécution locale : backend **505 tests réussis, 0 ignoré** (PostgreSQL 16
 réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,

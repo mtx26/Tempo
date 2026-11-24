@@ -793,3 +793,104 @@ def test_trainings_and_races_are_created_through_the_conversation(session: Sessi
         preferred_start="2026-12-11T17:00",
         duration_minutes=40,
     )
+
+
+class TransferTimetable(PagedTimetable):
+    """Every 15 min: odd slots are direct (0 transfer, 60 min), even slots faster but with
+    2 transfers and 25 min of walking (40 min)."""
+
+    def _journey(self, start: datetime) -> Journey:
+        index = int((start - at(8, 6)).total_seconds() // 900)
+        if index % 2:
+            leg = Leg(
+                "BUS",
+                "a",
+                "b",
+                start,
+                start + timedelta(minutes=60),
+                start,
+                start + timedelta(minutes=60),
+                realtime=False,
+            )
+            return Journey((leg,), start, leg.end, 0, "fake")
+        walk = Leg(
+            "WALK",
+            "a",
+            "s",
+            start,
+            start + timedelta(minutes=25),
+            start,
+            start + timedelta(minutes=25),
+            realtime=False,
+        )
+        ride = Leg(
+            "TRAM",
+            "s",
+            "b",
+            walk.end,
+            walk.end + timedelta(minutes=15),
+            walk.end,
+            walk.end + timedelta(minutes=15),
+            realtime=False,
+        )
+        return Journey((walk, ride), start, ride.end, 2, "fake")
+
+
+def test_journey_search_criteria_and_return_trip(session: Session) -> None:
+    """B09: criteria (max transfers, max walking) and the way back in one search."""
+    seed(session)
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=TransferTimetable())
+    base = {
+        "origin_place_id": "home",
+        "destination_place_id": "campus",
+        "depart_after": "2026-12-08T09:00",
+        "arrive_before": "2026-12-08T11:00",
+    }
+    fastest = run_operation(ctx, "search_journey", base)["result"]
+    assert fastest["best"]["transfers"] == 2
+    direct = run_operation(ctx, "search_journey", {**base, "max_transfers": 0})["result"]
+    assert direct["best"]["transfers"] == 0
+    short_walk = run_operation(ctx, "search_journey", {**base, "max_walk_minutes": 10})["result"]
+    assert short_walk["best"]["transfers"] == 0
+    both = run_operation(
+        ctx,
+        "search_journey",
+        {**base, "return_depart_after": "2026-12-08T17:00", "max_transfers": 0},
+    )["result"]
+    back = both["return"]
+    assert back["status"] == "ok"
+    assert datetime.fromisoformat(back["best"]["departure"]) >= at(8, 17)
+    assert back["best"]["transfers"] == 0
+    impossible = run_operation(
+        ctx,
+        "search_journey",
+        {**base, "max_transfers": 0, "max_walk_minutes": 0, "arrive_before": "2026-12-08T10:00"},
+    )["result"]
+    assert impossible["status"] == "no_candidate" and "critères" in impossible["detail"]
+
+
+def test_single_bound_search_stays_near_the_requested_time(session: Session) -> None:
+    """Arrive before 14:00: a fast journey arriving at 10:05 is not a useful answer."""
+    seed(session)
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="t", routing=PagedTimetable())
+    found = run_operation(
+        ctx,
+        "search_journey",
+        {
+            "origin_place_id": "home",
+            "destination_place_id": "campus",
+            "arrive_before": "2026-12-08T14:00",
+        },
+    )["result"]
+    assert found["status"] == "ok"
+    assert datetime.fromisoformat(found["best"]["arrival"]) >= at(8, 12)
+    later = run_operation(
+        ctx,
+        "search_journey",
+        {
+            "origin_place_id": "home",
+            "destination_place_id": "campus",
+            "depart_after": "2026-12-08T06:00",
+        },
+    )["result"]
+    assert datetime.fromisoformat(later["best"]["departure"]) <= at(8, 8)
