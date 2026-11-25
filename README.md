@@ -17,7 +17,7 @@ encore pu être vérifié (LLM réel, Home Assistant réel, HACS, Swarm, sources
 | Chemin | Contenu |
 |---|---|
 | `backend/` | Paquet Python `tempo` (API FastAPI, worker, planificateur, transport, synchronisations), tests, `Dockerfile`. |
-| `routing/` | Image MOTIS (`Dockerfile`), configurations `config/brussels.yml` (test) et `config/belgium.yml` (national), `scripts/supervisor.sh` (reconstruction atomique des graphes). |
+| `routing/` | Image MOTIS (`Dockerfile`), configurations `config/brussels.yml` (test) et `config/belgium.yml` (national), `scripts/supervisor.sh` (reconstruction atomique des graphes quand les données ou la configuration changent ; le graphe en service répond pendant l'import). Le géocodage local (`geocoding: true`) sert à la recherche d'adresse. |
 | `deploy/` | `stack.yml` (Swarm), `compose.dev.yml` (pile locale), rôles PostgreSQL, sauvegarde et exercice de restauration. |
 | `../tempo-homeassistant` | Intégration `custom_components/tempo` (dépôt séparé). |
 
@@ -35,8 +35,9 @@ normalement. Exemples :
 - « J'alterne entre chez maman et chez papa chaque vendredi : ce vendredi soir je vais chez
   papa » ; « Cette semaine je reste chez maman » (exception) ; « Où je dors la semaine
   prochaine ? ».
-- « Depuis chez maman, on me dépose à l'arrêt de bus du village en 10 minutes » (point d'accès aux
-  transports) ; « Ne me propose pas de trajet de plus de 2 h 30 ».
+- « Ajoute le lieu Chez papa : rue de l'Exemple 12, 7000 Mons » (adresse cherchée dans le géocodeur
+  local, à confirmer) ; « Depuis chez maman, on me dépose à l'arrêt de bus du village en
+  10 minutes » (point d'accès aux transports) ; « Ne me propose pas de trajet de plus de 2 h 30 ».
 - « Comment j'arrive au campus pour 8 h ? » ; « Rappelle-moi 30 min avant le médecin » ;
   « Préviens-moi 60 et 15 minutes avant chaque départ ».
 - « Qu'est-ce qui a changé cette nuit ? » ; « Pourquoi la chimie n'est pas planifiée ? » ;

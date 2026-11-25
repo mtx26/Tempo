@@ -21,5 +21,5 @@ timetable:
         - url: http://tempo-rt-relay:8090/feeds/nmbssncb/alerts.pbf
 street_routing: true
 osr_footpath: true
-geocoding: false
+geocoding: true   # address search for places (find_address), local OSM data
 reverse_geocoding: false

@@ -161,3 +161,56 @@ def test_max_travel_is_sent_as_motis_max_travel_time() -> None:
     motis.plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True)
     assert seen[0].url.params["maxTravelTime"] == "180"
     assert "maxTravelTime" not in seen[1].url.params
+
+
+GEOCODE = [
+    {
+        "type": "ADDRESS",
+        "name": "Rue de la Station 12",
+        "id": "a1",
+        "lat": 50.4,
+        "lon": 4.2,
+        "street": "Rue de la Station",
+        "houseNumber": "12",
+        "zip": "6500",
+        "tokens": [],
+        "score": 1.0,
+        "areas": [{"name": "Exempleville", "adminLevel": 8, "matched": True, "default": True}],
+    },
+    {
+        "type": "STOP",
+        "name": "Exempleville Gare",
+        "id": "s1",
+        "lat": 50.41,
+        "lon": 4.21,
+        "tokens": [],
+        "score": 0.8,
+        "areas": [],
+    },
+]
+
+
+def test_geocode_asks_the_local_motis_geocoder_and_labels_matches() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json=GEOCODE)
+
+    matches = client(handler).geocode("rue de la station 12", near=ORIGIN)
+    (request,) = seen
+    assert request.url.path == "/api/v1/geocode"
+    assert request.url.params["text"] == "rue de la station 12"
+    assert request.url.params["place"] == "50.668000,4.612000"
+    assert [m.kind for m in matches] == ["ADDRESS", "STOP"]
+    assert matches[0].label == "Rue de la Station 12, 6500 Exempleville"
+    assert (matches[0].coordinates.lat, matches[0].coordinates.lon) == (50.4, 4.2)
+    assert matches[1].label == "Exempleville Gare"
+
+
+def test_geocode_errors_are_routing_unavailable() -> None:
+    def disabled(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, text="geocoding not enabled")
+
+    with pytest.raises(RoutingUnavailableError, match="404"):
+        client(disabled).geocode("x y z")

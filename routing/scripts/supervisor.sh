@@ -1,9 +1,11 @@
 #!/bin/sh
 # Tempo routing supervisor: serves MOTIS from /data/current and rebuilds the graph
 # when the input updater (backend: python -m tempo.transport.gtfs_update /input) publishes a new
-# version in /input/READY. No Docker socket needed.
+# version in /input/READY, or when the MOTIS configuration changed (MOTIS reads the configuration
+# copied at import time, e.g. enabling geocoding needs a new import). No Docker socket needed.
 #
-#   build   : motis import -> /data/build-<version>; success requires exit 0 and tt.bin
+#   build   : motis import -> /data/build-<version>-<config hash>; success requires exit 0 and
+#             tt.bin
 #   switch  : atomic symlink rename current -> build-<version>, then server restart (~1-2 min)
 #   failure : the current graph keeps serving; the version is recorded in /data/FAILED and not
 #             retried until a newer version appears; import log kept in /data/import-<v>.log
@@ -19,6 +21,8 @@ PID=""
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor: $*"; }
 
 read_file() { [ -f "$1" ] && cat "$1" || echo ""; }
+
+config_hash() { sha256sum "$CONFIG" | cut -c1-12; }
 
 # Strict single-token check (a multi-line READY must never reach a path such as rm -rf).
 valid_version() {
@@ -47,20 +51,24 @@ prune() {
 build() {
   version="$1"
   valid_version "$version" || { log "ignoring malformed version '$version'"; return 1; }
-  dir="$DATA/build-$version"
+  cfg="$(config_hash)"
+  name="build-$version-$cfg"
+  dir="$DATA/$name"
+  [ "$name" = "$(readlink "$DATA/current" 2>/dev/null || echo "")" ] && return 1  # never the live graph
   rm -rf -- "$dir"
-  log "importing version $version"
+  log "importing version $version (configuration $cfg)"
   if "$MOTIS" import -c "$CONFIG" -d "$dir" > "$DATA/import-$version.log" 2>&1 && [ -f "$dir/tt.bin" ]; then
     echo "$version" > "$dir/.version"
-    ln -sfn "build-$version" "$DATA/current.new"
+    echo "$cfg" > "$dir/.config"
+    ln -sfn "$name" "$DATA/current.new"
     mv -T "$DATA/current.new" "$DATA/current"
     rm -f "$DATA/FAILED"
-    log "switched to version $version"
+    log "switched to version $version (configuration $cfg)"
     prune
     return 0
   fi
   log "import of version $version FAILED; keeping the current graph"
-  echo "$version" > "$DATA/FAILED"
+  echo "$version-$cfg" > "$DATA/FAILED"
   rm -rf -- "$dir"
   return 1
 }
@@ -83,7 +91,7 @@ trap 'log "stopping"; stop_server; exit 0' TERM INT
 
 while [ ! -e "$DATA/current" ]; do
   ready="$(read_file "$INPUT/READY")"
-  if [ -n "$ready" ] && [ "$ready" != "$(read_file "$DATA/FAILED")" ] && build "$ready"; then
+  if [ -n "$ready" ] && [ "$ready-$(config_hash)" != "$(read_file "$DATA/FAILED")" ] && build "$ready"; then
     break
   fi
   log "waiting for valid routing inputs ($INPUT/READY)"
@@ -99,9 +107,10 @@ while true; do
     continue
   fi
   ready="$(read_file "$INPUT/READY")"
-  current="$(read_file "$DATA/current/.version")"
+  current="$(read_file "$DATA/current/.version")-$(read_file "$DATA/current/.config")"
+  wanted="$ready-$(config_hash)"
   failed="$(read_file "$DATA/FAILED")"
-  if [ -n "$ready" ] && [ "$ready" != "$current" ] && [ "$ready" != "$failed" ]; then
+  if [ -n "$ready" ] && [ "$wanted" != "$current" ] && [ "$wanted" != "$failed" ]; then
     if build "$ready"; then
       stop_server
       start_server

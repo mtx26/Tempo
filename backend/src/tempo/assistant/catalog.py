@@ -1312,7 +1312,8 @@ class PlaceIn(Strict):
 
 @operation(
     "upsert_place",
-    "Create or update a known place with coordinates the user gave (never guessed) and "
+    "Create or update a known place with coordinates the user gave or confirmed from "
+    "find_address (never guessed) and "
     "aliases (e.g. iCal location texts).",
     PlaceIn,
     mutates=True,
@@ -1354,6 +1355,54 @@ def upsert_place(ctx: OpContext, body: PlaceIn) -> dict[str, Any]:
             raise OpError(f"alias « {alias} » déjà utilisé par {existing.place_id}")
         ctx.session.add(PlaceAliasRow(alias=alias, place_id=body.place_id))
     return {"place_id": body.place_id}
+
+
+class AddressIn(Strict):
+    text: str = Field(
+        min_length=3, max_length=200, description="Address or place exactly as the user said it"
+    )
+    near_place_id: str | None = Field(
+        default=None, description="Known place to favour nearby matches (default: home)"
+    )
+
+
+@operation(
+    "find_address",
+    "Coordinates of an address the user gave, from the local OpenStreetMap geocoder of the "
+    "routing engine (nothing sent elsewhere). Read the matches back and call upsert_place only "
+    "with the one the user confirms; no match: ask for a more precise address (street, number, "
+    "town). Never guess coordinates.",
+    AddressIn,
+    mutates=False,
+)
+def find_address(ctx: OpContext, body: AddressIn) -> dict[str, Any]:
+    geocode = getattr(ctx.routing, "geocode", None)
+    if geocode is None:
+        return {"status": "unavailable", "detail": "recherche d'adresse indisponible"}
+    directory = place_directory(ctx.session)
+    near = directory.get(body.near_place_id) if body.near_place_id else None
+    near = near or residence_base(ctx.session, directory)
+    try:
+        matches = geocode(body.text, near=None if near is None else near.coordinates)
+    except RoutingUnavailableError as exc:
+        return {"status": "unavailable", "detail": f"recherche d'adresse indisponible : {exc}"}
+    if not matches:
+        return {
+            "status": "not_found",
+            "detail": "aucune correspondance : demandez une adresse plus précise",
+        }
+    return {
+        "status": "ok",
+        "matches": [
+            {
+                "label": m.label,
+                "kind": m.kind,
+                "latitude": m.coordinates.lat,
+                "longitude": m.coordinates.lon,
+            }
+            for m in matches
+        ],
+    }
 
 
 class PlaceIdIn(Strict):

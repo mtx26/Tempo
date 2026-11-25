@@ -222,7 +222,7 @@ Contrat (implémenté) :
 | Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_location`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
 | Événements | `create_event` (fixe/flexible, journée entière occupée/informative, plusieurs jours, RRULE, distanciel), `update_event` (portée occurrence / suivantes / série), `cancel_event`, `set_lock`, `report_activity`, `confirm_activity` |
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
-| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `clear_residence_alternation`, `get_residence_schedule` |
+| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `clear_residence_alternation`, `get_residence_schedule`, `find_address` |
 | Rappels et validation | `create_reminder`, `cancel_reminder`, `decide_proposal`, `acknowledge_notification` |
 | Planning et transport | `plan_now` (local / global, simulation `dry_run`), `propose_alternatives`, `search_journey` |
 
@@ -500,7 +500,10 @@ Résidences multiples (générique, rien de personnel dans le code) :
   (180 par défaut, réglable en conversation), transmise à MOTIS (`maxTravelTime`) et
   revérifiée accès compris. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,
 sessions de tâches situées, études hors base) reçoivent leurs trajets. Un texte de lieu iCal inconnu
-bloque le temps sans trajet et est signalé (ajouter un alias). Coordonnées jamais devinées.
+bloque le temps sans trajet et est signalé (ajouter un alias). Coordonnées jamais devinées. Une
+adresse dite par l'utilisateur est cherchée par `find_address` dans le géocodeur local de MOTIS
+(`geocoding: true`, données OpenStreetMap du graphe, rien n'est envoyé ailleurs) ; l'assistant
+relit les correspondances et ne crée le lieu qu'avec celle que l'utilisateur confirme.
 
 ### D08 — Données et moteur de transport
 

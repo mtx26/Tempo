@@ -130,3 +130,38 @@ def test_alternation_refuses_unknown_or_repeated_residences(session: Session) ->
         {"residences": ["home", "home"], "from_date": "2026-12-04"},
     )
     assert not twice["ok"]
+
+
+class Geocoding(FakeRouting):
+    def __init__(self, matches: list[Any]) -> None:
+        super().__init__()
+        self.matches = matches
+        self.queries: list[tuple[str, Any]] = []
+
+    def geocode(self, text: str, *, near: Any = None) -> list[Any]:
+        self.queries.append((text, near))
+        return self.matches
+
+
+def test_find_address_returns_matches_to_confirm(session: Session) -> None:
+    from tempo.transport.motis import AddressMatch
+    from tempo.transport.places import Coordinates
+
+    seed(session)
+    found = AddressMatch("Rue X 1, 6500 Ville", Coordinates(50.2, 4.3), "ADDRESS")
+    routing = Geocoding([found])
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=routing)
+    result = run_operation(ctx, "find_address", {"text": "rue x 1 ville"})["result"]
+    assert result["status"] == "ok"
+    assert result["matches"] == [
+        {"label": "Rue X 1, 6500 Ville", "kind": "ADDRESS", "latitude": 50.2, "longitude": 4.3}
+    ]
+    assert routing.queries[0][1] is not None  # biased toward the home place
+    nothing = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=Geocoding([]))
+    assert run_operation(nothing, "find_address", {"text": "nulle part"})["result"]["status"] == (
+        "not_found"
+    )
+    plain = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
+    assert run_operation(plain, "find_address", {"text": "rue x 1"})["result"]["status"] == (
+        "unavailable"
+    )

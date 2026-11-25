@@ -5,6 +5,7 @@ against a REAL MOTIS v2.11.4 (Brussels and nationwide data, recorded fixtures, l
 transport or format problem raises ``RoutingUnavailableError`` — never partial data.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -15,6 +16,20 @@ from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError, ServiceAlert
 
 PLAN_PATH = "/api/v6/plan"
+GEOCODE_PATH = "/api/v1/geocode"
+MAX_ADDRESS_MATCHES = 5
+
+
+@dataclass(frozen=True, slots=True)
+class AddressMatch:
+    """One result of MOTIS's local geocoder (OpenStreetMap data of the routing graph)."""
+
+    label: str
+    coordinates: Coordinates
+    kind: str
+    """ADDRESS, PLACE or STOP."""
+
+
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
@@ -100,6 +115,15 @@ def _error_text(response: httpx2.Response) -> str:
     return " ".join(text.split())[:MAX_ERROR_TEXT] or "no error message"
 
 
+def _match(item: dict[str, Any]) -> AddressMatch:
+    street = " ".join(p for p in (item.get("street"), item.get("houseNumber")) if p)
+    areas = [a["name"] for a in item.get("areas", []) if a.get("default") or a.get("matched")]
+    locality = " ".join(p for p in (item.get("zip"), areas[0] if areas else None) if p)
+    parts = [item["name"], street if street and street != item["name"] else None, locality]
+    label = ", ".join(dict.fromkeys(p for p in parts if p))
+    return AddressMatch(label, Coordinates(float(item["lat"]), float(item["lon"])), item["type"])
+
+
 class MotisClient:
     accepts_max_travel = True
     """``plan`` takes ``max_travel`` (MOTIS ``maxTravelTime``): see ``transport.access``."""
@@ -116,6 +140,26 @@ class MotisClient:
             raise ValueError("MOTIS base URL must be an absolute http(s) URL")
         self._base_url = base_url.rstrip("/")
         self._http = http_client or httpx2.Client(timeout=timeout_seconds)
+
+    def geocode(self, text: str, *, near: Coordinates | None = None) -> list[AddressMatch]:
+        """Addresses, places or stops matching ``text`` (best first), from the local geocoder.
+
+        Needs ``geocoding: true`` in the MOTIS configuration; nothing is sent elsewhere."""
+        params = {"text": text, "language": "fr", "numResults": str(MAX_ADDRESS_MATCHES)}
+        if near is not None:
+            params["place"] = near.as_motis()
+        try:
+            response = self._http.get(self._base_url + GEOCODE_PATH, params=params)
+        except httpx2.HTTPError as exc:
+            raise RoutingUnavailableError(f"MOTIS request failed: {type(exc).__name__}") from exc
+        if response.status_code != 200:
+            raise RoutingUnavailableError(
+                f"MOTIS geocoding returned HTTP {response.status_code}: {_error_text(response)}"
+            )
+        try:
+            return [_match(item) for item in response.json()][:MAX_ADDRESS_MATCHES]
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise RoutingUnavailableError("malformed MOTIS geocoding response") from exc
 
     def plan(
         self,
