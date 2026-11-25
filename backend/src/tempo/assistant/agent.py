@@ -9,6 +9,8 @@ parser: essential functions never depend on it.
 
 import json
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
@@ -23,6 +25,11 @@ MODEL = "claude-opus-5-5"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_STEPS = 16
 MAX_RESULT_CHARS = 30_000
+CONVERSATION_BUDGET_SECONDS = 60.0
+"""Wall-clock budget of one request: no new model call starts after it. Home Assistant waits
+longer (its conversation timeout covers this budget plus one re-plan), so the user always gets
+the real outcome instead of a client-side timeout while changes are being applied."""
+MIN_CALL_SECONDS = 5.0
 
 SYSTEM = """Tu es Tempo, l'assistant de planification personnelle d'un étudiant (Belgique). \
 La conversation (texte ou voix via Home Assistant) est sa seule interface : tu gères tout \
@@ -102,22 +109,27 @@ class ClaudeAssistant:
         *,
         model: str = MODEL,
         messages: MessagesClient | None = None,
-        timeout: float = 90.0,
+        timeout: float = CONVERSATION_BUDGET_SECONDS,
+        budget_seconds: float = CONVERSATION_BUDGET_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if messages is None:
             if api_key is None:
                 raise ValueError("api_key or messages client required")
             client = anthropic.Anthropic(
-                api_key=api_key.get_secret_value(), timeout=timeout, max_retries=2
+                api_key=api_key.get_secret_value(), timeout=timeout, max_retries=1
             )
             messages = cast(MessagesClient, client.beta.messages)
         self._messages: MessagesClient = messages
         self._model = model
         self._tools = tool_definitions()
+        self._budget = budget_seconds
+        self._clock = clock
 
-    def _call(self, conversation: list[dict[str, Any]]) -> Any:
+    def _call(self, conversation: list[dict[str, Any]], seconds: float) -> Any:
         try:
             return self._messages.create(
+                timeout=seconds,
                 model=self._model,
                 max_tokens=16000,
                 system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
@@ -148,8 +160,21 @@ class ClaudeAssistant:
             }
         )
         operations: list[dict[str, Any]] = []
+        deadline = self._clock() + self._budget
         for _ in range(MAX_STEPS):
-            response = self._call(conversation)
+            remaining = deadline - self._clock()
+            if remaining < MIN_CALL_SECONDS:
+                return AgentReply(_partial("Je manque de temps pour finir", operations), operations)
+            try:
+                response = self._call(conversation, remaining)
+            except LLMUnavailableError as exc:
+                if not ctx.changed:
+                    raise  # nothing changed yet: the deterministic path may answer instead
+                # Changes are already applied: never re-run the request another way.
+                return AgentReply(
+                    _partial(f"L'assistant est devenu indisponible ({exc})", operations),
+                    operations,
+                )
             if response.stop_reason == "refusal":
                 if operations:
                     return AgentReply(
@@ -183,13 +208,18 @@ class ClaudeAssistant:
                     }
                 )
             conversation.append({"role": "user", "content": results})
-        done = [o["name"] for o in operations if o["ok"]]
         return AgentReply(
-            "Demande trop longue à traiter en une fois ; opérations effectuées : "
-            + (", ".join(done) or "aucune")
-            + ". Reformulez la suite.",
-            operations,
+            _partial("Demande trop longue à traiter en une fois", operations), operations
         )
+
+
+def _partial(reason: str, operations: list[dict[str, Any]]) -> str:
+    """Honest end of an unfinished request: what was really done, nothing more."""
+    done = [o["name"] for o in operations if o["ok"]]
+    return (
+        f"{reason} ; opérations effectuées : {', '.join(done) or 'aucune'}. "
+        "Demandez-moi la suite ou l'état du planning."
+    )
 
 
 def build_assistant(api_key: SecretStr | None) -> Assistant | None:

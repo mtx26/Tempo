@@ -274,3 +274,35 @@ def test_concurrent_replans_never_overwrite_each_other(sessions: sessionmaker[Se
     with sessions() as s:
         states = [v.state for v in s.scalars(select(ScheduleVersion))]
     assert states.count("active") == 1 and states.count("superseded") == 2
+
+
+def test_llm_outage_after_a_change_never_replays_the_request(session: Session) -> None:
+    """The deterministic path must not run the same text again over applied changes."""
+    seed(session)
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    llm = ScriptedMessages(
+        response(
+            "tool_use",
+            tool_use("create_task", {"title": "Chimie", "estimated_minutes": 60}),
+        ),
+        anthropic.APIConnectionError(request=request),
+    )
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
+    reply = ClaudeAssistant(messages=llm).reply(ctx, "ajoute 1 h de chimie", [])
+    assert "indisponible" in reply.text and "create_task" in reply.text
+    assert ctx.changed == ["create_task"]
+
+
+def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
+    seed(session)
+    ticks = iter([0.0, 0.0, 58.0, 58.0])
+    llm = ScriptedMessages(
+        response("tool_use", tool_use("create_task", {"title": "Bio", "estimated_minutes": 30})),
+        response("end_turn", say("jamais atteint")),
+    )
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
+    assistant = ClaudeAssistant(messages=llm, budget_seconds=60, clock=lambda: next(ticks))
+    reply = assistant.reply(ctx, "ajoute bio", [])
+    assert "manque de temps" in reply.text and "create_task" in reply.text
+    assert len(llm.requests) == 1
+    assert llm.requests[0]["timeout"] == 60
