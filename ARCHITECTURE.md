@@ -767,14 +767,16 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution locale : backend **537 tests réussis, 0 ignoré** (PostgreSQL 16
+Dernière exécution complète : backend **536 tests réussis, 0 ignoré** (PostgreSQL 16
 réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
 portail Belgian Mobility réel en anonyme), couverture 94 %, Ruff et mypy strict propres ;
 intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres. Recettes rejouées
 le 25/11/2026 après la réorganisation en couches (`timeutil`, `db/store`, conflits
 centralisés), base de développement vide : vrai Home Assistant 2026.11.2 (`scripts/ha_e2e.py`)
 15/15 et pile complète avec worker, relais et MOTIS national (`scripts/live_scenario.py`)
-15/15 ; jobs du worker sains.
+15/15 ; jobs du worker sains. Après le correctif iCal (repères de durée nulle) : 537 tests, dont 514
+réussis sur PostgreSQL et 23 ignorés faute des services Docker (MOTIS, IMAP, contrat HA,
+portail), que ce correctif ne touche pas.
 
 Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de
