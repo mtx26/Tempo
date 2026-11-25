@@ -63,10 +63,10 @@ services:
     environment:
       # The assistant searches journeys and re-plans synchronously (ARCHITECTURE.md §3).
       TEMPO_MOTIS_URL: http://routing:8080
-    secrets: [tempo_api_token, tempo_database_url]
-    # Optional LLM (Gemini on Vertex AI): TEMPO_VERTEX_PROJECT_ID + secret tempo_gcp_credentials
-    # (TEMPO_LLM_MODEL defaults to gemini-3.5-flash-lite; without them the deterministic parser
-    # answers). During a token rotation add: tempo_api_token_previous.
+      # Gemini on Vertex AI (TEMPO_LLM_MODEL defaults to gemini-3.5-flash-lite).
+      TEMPO_VERTEX_PROJECT_ID: ${TEMPO_VERTEX_PROJECT_ID:?set TEMPO_VERTEX_PROJECT_ID}
+    secrets: [tempo_api_token, tempo_database_url, tempo_gcp_credentials]
+    # During a token rotation add: tempo_api_token_previous.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
@@ -85,13 +85,17 @@ services:
     command: ["python", "-m", "tempo.worker"]
     environment:
       TEMPO_MOTIS_URL: http://routing:8080
-      # Coach e-mails stay disabled until these are set (README.md, configuration):
-      # TEMPO_TRAINING_IMAP_HOST, TEMPO_TRAINING_IMAP_USER, TEMPO_TRAINING_ALLOWED_SENDER,
-      # TEMPO_TRAINING_AUTHSERV_ID (receiving server whose DMARC/DKIM verdict is trusted)
+      TEMPO_VERTEX_PROJECT_ID: ${TEMPO_VERTEX_PROJECT_ID:?set TEMPO_VERTEX_PROJECT_ID}
+      # Coach e-mails (read-only, one sender, DMARC/DKIM verified by TEMPO_TRAINING_AUTHSERV_ID).
+      TEMPO_TRAINING_IMAP_HOST: ${TEMPO_TRAINING_IMAP_HOST:?set TEMPO_TRAINING_IMAP_HOST}
+      TEMPO_TRAINING_IMAP_USER: ${TEMPO_TRAINING_IMAP_USER:?set TEMPO_TRAINING_IMAP_USER}
+      TEMPO_TRAINING_ALLOWED_SENDER: ${TEMPO_TRAINING_ALLOWED_SENDER:?set TEMPO_TRAINING_ALLOWED_SENDER}
+      TEMPO_TRAINING_AUTHSERV_ID: ${TEMPO_TRAINING_AUTHSERV_ID:?set TEMPO_TRAINING_AUTHSERV_ID}
     secrets:
       - tempo_database_url
       - tempo_ics_url
-      # Optional: tempo_gcp_credentials, tempo_training_imap_password
+      - tempo_gcp_credentials
+      - tempo_training_imap_password
     # Alive = one scheduling round finished in the last 5 minutes (a round includes a re-plan).
     healthcheck:
       test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/tempo-worker.alive') > 300)"]
@@ -207,6 +211,8 @@ secrets:
   tempo_api_token: {external: true}
   tempo_ics_url: {external: true}
   tempo_bmc_partner_key: {external: true}
+  tempo_gcp_credentials: {external: true}
+  tempo_training_imap_password: {external: true}
 
 volumes:
   pgdata: {}

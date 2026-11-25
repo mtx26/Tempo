@@ -160,11 +160,15 @@ coordonnées d'un lieu sont fournies par l'utilisateur, jamais devinées.
    (`docker node update --label-add tempo.routing=true <nœud>`) ; `postgres` reste sur un seul
    nœud (volume local). Le volume de routage est construit par `routing-update` + `routing`
    (~1,8 Go, ~3,5 min d'import), puis rafraîchi chaque nuit à 02:30 UTC.
-2. **Secrets** (`docker secret create <nom> -`) : `tempo_owner_db_password`,
-   `tempo_app_db_password`, `tempo_owner_database_url`, `tempo_database_url`,
-   `tempo_api_token`, `tempo_ics_url`, et les secrets facultatifs ci-dessus.
-3. **Déployer** :
-   `TEMPO_REGISTRY=... TEMPO_VERSION=x.y.z docker stack deploy -c deploy/stack.yml tempo`.
+2. **Secrets** (`docker secret create <nom> <fichier>`, depuis `deploy/secrets/`) :
+   `tempo_owner_db_password`, `tempo_app_db_password`, `tempo_owner_database_url`,
+   `tempo_database_url`, `tempo_api_token`, `tempo_ics_url`, `tempo_bmc_partner_key`,
+   `tempo_gcp_credentials`, `tempo_training_imap_password`.
+3. **Réglages** dans `deploy/.env` (ignoré par git, jamais commité) : `TEMPO_REGISTRY`,
+   `TEMPO_VERSION`, `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_TRAINING_IMAP_HOST`,
+   `TEMPO_TRAINING_IMAP_USER`, `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID`
+   (une valeur manquante bloque le déploiement avec son nom). **Déployer** :
+   `set -a; . deploy/.env; set +a; docker stack deploy -c deploy/stack.yml tempo`.
    Le job `migrate` met le schéma à jour (rôle propriétaire) puis redonne les droits au rôle
    applicatif ; api et worker attendent le schéma.
 4. **Mettre à jour** : sauvegarde d'abord, puis même commande avec la nouvelle version
