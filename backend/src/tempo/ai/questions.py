@@ -25,6 +25,8 @@ TYPE_LABELS = {
     "study": "étude",
     "training": "entraînement",
     "race": "compétition",
+    "personal": "rendez-vous",
+    "task": "tâche",
     "travel": "trajet",
 }
 

@@ -2224,7 +2224,7 @@ def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[
         return {"ok": False, "error": str(exc.detail)}
     if savepoint.is_active:
         savepoint.commit()
-    if op.mutates:
+    if op.mutates and not arguments.get("dry_run"):
         ctx.changed.append(name)
         entity, entity_id = _audit_target(result)
         audit(ctx.session, ctx.actor, f"op:{name}", entity, entity_id, fields=sorted(arguments))

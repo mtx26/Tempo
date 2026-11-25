@@ -428,3 +428,62 @@ def test_conversation_retention_purges_old_turns_and_idempotency_keys(
         assert len(list(s.scalars(select(ConversationTurnRow)))) == 1
         assert get_setting(s, "idem:1") is not None
         assert get_setting(s, "idem:9") is None
+
+
+def test_retention_runs_once_per_local_day(sessions: sessionmaker[Session]) -> None:
+    from tempo.worker.jobs import retention_due
+
+    early = datetime(2026, 12, 8, 3, 0, tzinfo=TZ)
+    assert not retention_due(sessions, early, TZ)
+    assert retention_due(sessions, early.replace(hour=4, minute=7), TZ)
+    assert not retention_due(sessions, early.replace(hour=9), TZ)
+    assert retention_due(sessions, early + timedelta(days=1, hours=2), TZ)
+
+
+def test_skipped_ics_items_are_notified(sessions: sessionmaker[Session]) -> None:
+    feed = (
+        b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"
+        b"BEGIN:VEVENT\r\nUID:allday@u\r\nDTSTART;VALUE=DATE:20261209\r\n"
+        b"SUMMARY:Session d'examens\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    ics_sync(sessions, feed, NOW, TZ)
+    with sessions() as s:
+        warnings = [
+            n.message for n in s.scalars(select(NotificationRow)) if n.kind == "ics_warning"
+        ]
+    assert any("allday@u" in w for w in warnings)
+
+
+def test_relative_reminder_ends_after_its_target(sessions: sessionmaker[Session]) -> None:
+    from tempo.assistant.catalog import OpContext, run_operation
+    from tempo.db.models import ReminderRow
+    from tempo.worker.jobs import reminders_job
+
+    configure(sessions)
+    with sessions() as s:
+        ctx = OpContext(session=s, now=NOW, tz=TZ, actor="test")
+        event = run_operation(
+            ctx,
+            "create_event",
+            {
+                "title": "Médecin",
+                "scheduling": "fixed",
+                "start": "2026-12-08T09:00",
+                "duration_minutes": 30,
+                "remote": True,
+            },
+        )["result"]["activity"]
+        run_operation(
+            ctx,
+            "create_reminder",
+            {
+                "message": "Carte vitale",
+                "target_id": f"activity:{event['id']}",
+                "offset_minutes": 30,
+            },
+        )
+        s.commit()
+    assert reminders_job(sessions, datetime(2026, 12, 8, 8, 31, tzinfo=TZ), TZ) == 1
+    reminders_job(sessions, datetime(2026, 12, 8, 16, 0, tzinfo=TZ), TZ)
+    with sessions() as s:
+        assert s.scalars(select(ReminderRow)).one().status == "done"

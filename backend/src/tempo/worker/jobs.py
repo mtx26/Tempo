@@ -23,7 +23,7 @@ from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx2
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -32,6 +32,7 @@ from tempo.db.ics_repository import apply_ics_sync, get_or_create_source
 from tempo.db.models import (
     ActivityRow,
     ConversationTurnRow,
+    FixedEventRow,
     JobRunRow,
     NotificationRow,
     PhonePositionRow,
@@ -203,12 +204,16 @@ def ics_sync(
                 f"ics_suspect:{now.date()}",
             )
         elif changed:
-            near = [
-                e
-                for e in imported.events
-                if now <= e.start.astimezone(UTC) <= now + NEAR_TERM_CHANGE
-            ]
-            if near or run.removed:
+            near = session.scalar(
+                select(func.count())
+                .select_from(FixedEventRow)
+                .where(
+                    FixedEventRow.updated_at == now,
+                    FixedEventRow.start_at >= now,
+                    FixedEventRow.start_at <= now + NEAR_TERM_CHANGE,
+                )
+            )
+            if near:
                 notify(
                     session,
                     "ics_changed",
@@ -219,7 +224,8 @@ def ics_sync(
                     f"ics_changed:{run.id}",
                 )
             set_setting(session, "replan_requested", now.isoformat())
-        for warning in imported.warnings:
+        for warning in [*imported.warnings, *imported.skipped]:
+            # Skipped items (all-day or invalid events) are never dropped silently.
             notify(
                 session,
                 "ics_warning",
@@ -505,6 +511,24 @@ def _deleted(session: Session, statement: Any) -> int:
     return int(getattr(result, "rowcount", 0) or 0)
 
 
+RETENTION_HOUR = 4
+"""Local hour from which the daily purge runs (quiet time, after the nightly re-plan)."""
+
+
+def retention_due(sessions: Sessions, now: datetime, tz: ZoneInfo) -> bool:
+    """True once per local day, at or after ``RETENTION_HOUR``: the day is claimed in a
+    setting, so a restart or an irregular tick never skips nor repeats the purge."""
+    local = now.astimezone(tz)
+    if local.hour < RETENTION_HOUR:
+        return False
+    with sessions() as session:
+        if get_setting(session, "retention_day") == local.date().isoformat():
+            return False
+        set_setting(session, "retention_day", local.date().isoformat())
+        session.commit()
+    return True
+
+
 def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
     """Purge personal data that is no longer useful. ``audit_entry`` is append-only for the
     runtime role and is pruned only by the owner role (README.md)."""
@@ -567,6 +591,8 @@ def _reminder_due(session: Session, row: Any, now: datetime, tz: ZoneInfo) -> li
     if start is None:
         return []
     due = start - timedelta(minutes=row.offset_minutes)
+    if now >= start + REMINDER_GRACE:
+        row.status = "done"  # the target is long past: nothing left to remind
     return [due] if due <= now < start + timedelta(minutes=1) else []
 
 

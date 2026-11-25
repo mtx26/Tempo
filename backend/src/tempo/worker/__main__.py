@@ -28,6 +28,7 @@ from tempo.worker.jobs import (
     ics_sync,
     reminders_job,
     replan_job,
+    retention_due,
     retention_job,
     run_job,
     series_job,
@@ -102,7 +103,7 @@ def tick(
     run_job(sessions, "reminders", lambda: reminders_job(sessions, now, tz))
     if due_departure:
         run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now, tz))
-    if due_ics and now.astimezone(tz).hour == 4 and now.astimezone(tz).minute < 31:
+    if retention_due(sessions, now, tz):
         run_job(sessions, "retention", lambda: retention_job(sessions, now))
         run_job(
             sessions, "conversation_retention", lambda: conversation_retention_job(sessions, now)

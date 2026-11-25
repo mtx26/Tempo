@@ -1,4 +1,5 @@
-# Tempo backend image (API, GTFS-RT relay; worker later). Multi-stage, non-root, pinned digests.
+# Tempo backend image (API, worker, migrations, GTFS-RT relay, routing-data updater).
+# Multi-stage, non-root, pinned digests.
 #   docker build -t tempo-backend:dev backend
 #   docker run ... tempo-backend:dev                                  # API (python -m tempo.api)
 #   docker run ... tempo-backend:dev python -m tempo.transport.rt_relay   # relay
