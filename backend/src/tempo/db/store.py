@@ -179,10 +179,13 @@ def residence_base(session: Session, directory: PlaceDirectory | None = None) ->
     return directory.get(first) if first else None
 
 
-def access_routing(session: Session, routing: RoutingProvider) -> AccessRouting:
-    """The routing provider with the user's transport access points and journey limit."""
+def access_routing(
+    session: Session, routing: RoutingProvider, temporary: list[Access] | None = None
+) -> AccessRouting:
+    """The routing provider with the user's default transport access points and journey limit.
+    ``temporary`` accesses (stated for one journey only, never saved) take precedence."""
     directory = place_directory(session)
-    accesses = []
+    accesses = list(temporary or [])
     for row in session.scalars(select(PlaceRow).where(PlaceRow.access_place_id.is_not(None))):
         place, point = directory.get(row.id), directory.get(row.access_place_id or "")
         if place is not None and point is not None and row.access_minutes:

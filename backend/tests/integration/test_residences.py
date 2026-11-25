@@ -165,3 +165,36 @@ def test_find_address_returns_matches_to_confirm(session: Session) -> None:
     assert run_operation(plain, "find_address", {"text": "rue x 1"})["result"]["status"] == (
         "unavailable"
     )
+
+
+class Recording(FakeRouting):
+    def __init__(self) -> None:
+        super().__init__()
+        self.origins: list[Any] = []
+
+    def plan(self, origin: Any, destination: Any, time: Any, *, arrive_by: bool) -> Any:
+        self.origins.append(origin)
+        return super().plan(origin, destination, time, arrive_by=arrive_by)
+
+
+def test_one_off_access_point_for_a_single_journey_is_never_saved(session: Session) -> None:
+    from tempo.transport.places import Coordinates
+
+    seed(session)  # home has no default access point
+    place(session, "other_stop", 50.60, 4.55)
+    routing = Recording()
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=routing)
+    journey = {
+        "origin": "place:home",
+        "destination": "place:campus",
+        "arrive_before": "2026-12-08T09:00",
+        "access_place_id": "other_stop",
+        "access_minutes": 15,
+    }
+    result = run_operation(ctx, "search_journey", journey)
+    assert result["ok"], result
+    assert routing.origins[0] == Coordinates(50.60, 4.55)  # routed from the one-off stop
+    listed = {p["id"]: p for p in op(session, "list_places")["result"]["places"]}
+    assert listed["home"]["access_place_id"] is None  # nothing saved
+    no_duration = run_operation(ctx, "search_journey", {**journey, "access_minutes": None})
+    assert not no_duration["ok"] and "inconnue" in no_duration["error"]

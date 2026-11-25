@@ -54,6 +54,7 @@ class AccessRouting:
         self._max = max_journey
 
     def _access_at(self, point: Coordinates) -> Access | None:
+        # min() keeps the first of equally near accesses: temporary ones are listed first.
         nearest = min(
             self._accesses,
             key=lambda a: a.place.coordinates.distance_m(point),

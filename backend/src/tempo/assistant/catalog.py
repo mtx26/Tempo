@@ -72,6 +72,7 @@ from tempo.planning.proposals import decide, proposal_out
 from tempo.planning.service import PlanningNotConfiguredError, lock_block, release_block, replan
 from tempo.planning.views import schedule_items, summary
 from tempo.scheduler.model import Preferences
+from tempo.transport.access import Access
 from tempo.transport.itinerary import Objective, TripQuery, find_trips
 from tempo.transport.location import (
     AmbiguousLocationError,
@@ -80,7 +81,7 @@ from tempo.transport.location import (
     assess_position,
     planned_place,
 )
-from tempo.transport.places import Coordinates
+from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
 
 MAX_SPAN = timedelta(days=62)
@@ -2187,6 +2188,15 @@ class JourneyIn(Strict):
     return_arrive_before: datetime | None = Field(
         default=None, description="Way back: arrive at the origin before"
     )
+    access_place_id: str | None = Field(
+        default=None,
+        description="FOR THIS SEARCH ONLY (never saved): known place where public transport is "
+        "reached instead of the default access point of access_side",
+    )
+    access_minutes: int | None = Field(
+        default=None, ge=1, le=240, description="Duration to reach it, as stated (never guessed)"
+    )
+    access_side: Literal["origin", "destination"] = "origin"
 
 
 def _journey_out(journey: Journey) -> dict[str, Any]:
@@ -2239,7 +2249,9 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
     arrive_before = body.arrive_before or destination.start
     if depart_after is None and arrive_before is None:
         raise OpError("indiquez au moins un départ minimal ou une arrivée maximale")
-    routing = access_routing(ctx.session, ctx.routing)
+    routing = access_routing(
+        ctx.session, ctx.routing, _temporary_access(ctx, body, origin, destination)
+    )
     result = _search(
         routing,
         origin.coordinates,
@@ -2261,6 +2273,24 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
             ctx.tz,
         )
     return result
+
+
+def _temporary_access(
+    ctx: OpContext, body: JourneyIn, origin: "_Endpoint", destination: "_Endpoint"
+) -> list[Access]:
+    """A one-off access point stated for this journey (the saved default stays unchanged)."""
+    if body.access_place_id is None:
+        if body.access_minutes is not None:
+            raise OpError("durée d'accès donnée sans point d'accès")
+        return []
+    point = place_directory(ctx.session).get(body.access_place_id)
+    if point is None:
+        raise OpError(f"point d'accès inconnu : {body.access_place_id} (créez le lieu d'abord)")
+    if body.access_minutes is None:
+        raise OpError("durée pour rejoindre ce point d'accès inconnue : demandez-la")
+    side = origin if body.access_side == "origin" else destination
+    here = Place(f"journey_{body.access_side}", side.name, side.coordinates)
+    return [Access(here, point, timedelta(minutes=body.access_minutes))]
 
 
 @dataclass(frozen=True, slots=True)

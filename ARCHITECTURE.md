@@ -85,10 +85,18 @@ M -- T
   explicite. Les dates cibles sont **souples** par défaut, strictes seulement si l'utilisateur
   le dit.
 - Les entraînements sont flexibles (jour et heure), leur contenu prescrit est conservé mot pour
-  mot ; les compétitions sont fixes.
+  mot ; sans lieu précisé, ils ont lieu à la résidence en vigueur et seulement quand
+  l'utilisateur y est (trajets obligatoires faisables) ; les compétitions sont fixes.
 - La position réelle vient uniquement du `device_tracker` du téléphone configuré dans Home
-  Assistant ; une intention future ne la remplace jamais. Pas de bascule automatique entre
-  domiciles.
+  Assistant ; fraîche et précise, elle prime sur la résidence prévue pour un trajet immédiat,
+  sans modifier l'alternance des résidences ; une intention future ne la remplace jamais.
+- **Clarification** : une information manquante, ambiguë ou contradictoire avec une information
+  confirmée fait l'objet d'une question dans Home Assistant (conversation ou notification) ;
+  rien n'est supposé et le planning valide existant reste en place tant que la question
+  bloque. Avec assez d'informations, Tempo agit sans question inutile. Les informations déjà
+  confirmées sont réutilisées. Consigne **ponctuelle** (lieu prévu, point d'accès pour un seul
+  trajet) et réglage **permanent** (alternance, point d'accès par défaut d'un lieu,
+  préférences) sont distingués ; une portée incertaine se demande.
 - Les trajets nécessaires sont obligatoires (marche, correspondances, marges, retours).
 - Préférences d'étude (blocs de 90 min, alternance des matières, disponibilités) : souples,
   jamais plus fortes que la faisabilité.
@@ -490,8 +498,11 @@ Résidences multiples (générique, rien de personnel dans le code) :
   `get_residence_schedule` la montre avec ses exceptions. Les **lieux prévus**
   (`set_planned_location`) sont des exceptions temporaires : ils priment sans décaler la
   récurrence. Chaque déclaration replanifie (plan local, stabilité préservée).
-- **Point d'accès aux transports** par lieu (`access_place_id` + `access_minutes`, les deux ou
-  aucun, contrainte en base ; durée donnée par l'utilisateur, jamais devinée) : un seul
+- **Point d'accès aux transports** par lieu, un seul par défaut et persistant
+  (`access_place_id` + `access_minutes`, les deux ou aucun, contrainte en base ; durée donnée
+  par l'utilisateur, jamais devinée). Un point d'accès différent pour **un seul** trajet se
+  donne en conversation (`search_journey` : `access_place_id`, `access_minutes`,
+  `access_side`) et n'est jamais enregistré. Un seul
   adaptateur de routage (`transport/access.py`, `db.store.access_routing`) interroge MOTIS
   depuis/vers le point d'accès et ajoute une étape `ACCESS` de durée fixe ; il sert à la
   planification, aux trajets du jour, au contrôle de départ (GPS à moins de 300 m du lieu
