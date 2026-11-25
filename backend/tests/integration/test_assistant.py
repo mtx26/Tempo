@@ -1,9 +1,8 @@
-"""Conversational assistant on a REAL PostgreSQL with a scripted LLM client.
+"""Conversational assistant on a REAL PostgreSQL with a scripted Gemini client.
 
-The scripted client stands in for Claude (no network, no cost): it proves the harness runs
-the operations the model asks for, returns their real results, keeps going until the model
-answers, and falls back to the deterministic parser when the LLM is unavailable. A real
-model is exercised only by ``test_assistant_live.py`` (needs an API key)."""
+The scripted client stands in for Gemini on Vertex AI (no network, no cost): it proves the
+harness runs the operations the model asks for, returns their real results, keeps going until
+the model answers, and falls back to the deterministic parser when the LLM is unavailable."""
 
 import uuid
 from collections.abc import Iterator
@@ -11,17 +10,16 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
-import anthropic
-import httpx2
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from google.genai import types
 from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from tempo.ai.llm import LlmClient
 from tempo.api.app import create_app
-from tempo.assistant.agent import ClaudeAssistant, LLMUnavailableError
+from tempo.assistant.agent import SYSTEM, GeminiChat, LLMUnavailableError, ToolLoopAssistant
 from tempo.assistant.catalog import OpContext
 from tempo.config import Settings
 from tempo.db.models import ActivityRow, Base, ConversationTurnRow, StudyTaskRow
@@ -33,56 +31,64 @@ TOKEN = "Hq8Wm2Zr5Tx9Lb3Nc7Vd1Kf4Gs6Pj0YeUa"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
-def tool_use(name: str, arguments: dict[str, Any]) -> SimpleNamespace:
-    return SimpleNamespace(
-        type="tool_use", id=f"tu_{uuid.uuid4().hex[:8]}", name=name, input=arguments
+def tool_use(name: str, arguments: dict[str, Any]) -> types.Part:
+    return types.Part(
+        function_call=types.FunctionCall(id=f"fc_{uuid.uuid4().hex[:8]}", name=name, args=arguments)
     )
 
 
-def say(words: str) -> SimpleNamespace:
-    return SimpleNamespace(type="text", text=words)
+def say(words: str) -> types.Part:
+    return types.Part.from_text(text=words)
 
 
-def response(stop: str, *blocks: SimpleNamespace) -> SimpleNamespace:
-    return SimpleNamespace(stop_reason=stop, content=list(blocks))
+def response(*parts: types.Part, finish: str = "STOP") -> SimpleNamespace:
+    candidate = SimpleNamespace(
+        content=types.Content(role="model", parts=list(parts)),
+        finish_reason=types.FinishReason(finish),
+    )
+    return SimpleNamespace(candidates=[candidate], prompt_feedback=None)
 
 
-class ScriptedMessages:
+def blocked() -> SimpleNamespace:
+    return SimpleNamespace(candidates=[], prompt_feedback=SimpleNamespace(block_reason="SAFETY"))
+
+
+class ScriptedModels:
     """Returns scripted responses in order and records every request."""
 
     def __init__(self, *script: SimpleNamespace | Exception) -> None:
         self.script = list(script)
         self.requests: list[dict[str, Any]] = []
 
-    def create(self, **kwargs: Any) -> SimpleNamespace:
-        self.requests.append({**kwargs, "messages": list(kwargs["messages"])})  # snapshot
+    def generate_content(self, **kwargs: Any) -> SimpleNamespace:
+        self.requests.append({**kwargs, "contents": list(kwargs["contents"])})  # snapshot
         step = self.script.pop(0)
         if isinstance(step, Exception):
             raise step
         return step
 
 
-def assistant(messages: Any, **options: Any) -> ClaudeAssistant:
-    """The agent over scripted Claude API messages (server-side fallbacks on)."""
-    return ClaudeAssistant(
-        LlmClient(messages, "anthropic", server_fallbacks=True),
-        model="claude-sonnet-5-5",
-        **options,
-    )
+def assistant(models: ScriptedModels, **options: Any) -> ToolLoopAssistant:
+    client = SimpleNamespace(models=models)
+    return ToolLoopAssistant(GeminiChat(client, "gemini-model-under-test"), **options)
 
 
 def tool_results(request: dict[str, Any]) -> list[dict[str, Any]]:
-    last = request["messages"][-1]
-    assert last["role"] == "user"
-    return list(last["content"])
+    """Function responses sent back in the last user turn, as plain dicts."""
+    last = request["contents"][-1]
+    assert last.role == "user"
+    return [p.function_response.response for p in last.parts if p.function_response]
+
+
+def outage() -> httpx.ConnectError:
+    return httpx.ConnectError("Vertex AI unreachable")
 
 
 def test_compound_request_runs_operations_and_reports_real_results(session: Session) -> None:
     seed(session)
-    llm = ScriptedMessages(
-        response("tool_use", say("Je regarde."), tool_use("get_context", {})),
+    llm = ScriptedModels(
+        response(say("Je regarde."), tool_use("get_context", {})),
         response(
-            "tool_use",
             tool_use(
                 "create_task",
                 {"title": "Physique", "estimated_minutes": 900, "target_date": "2026-12-11"},
@@ -98,8 +104,8 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
                 },
             ),
         ),
-        response("tool_use", tool_use("plan_now", {})),
-        response("end_turn", say("C'est noté : 15 h de physique et le dentiste jeudi.")),
+        response(tool_use("plan_now", {})),
+        response(say("C'est noté : 15 h de physique et le dentiste jeudi.")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
     reply = assistant(llm).reply(ctx, "15 h de physique avant vendredi et dentiste jeudi 21h", [])
@@ -113,23 +119,24 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
     assert all(o["ok"] for o in reply.operations)
     # the two parallel calls were answered in ONE user message, with real results
     results = tool_results(llm.requests[2])
-    assert len(results) == 2 and not any(r["is_error"] for r in results)
-    plan = tool_results(llm.requests[3])[0]["content"]
-    assert '"published": true' in plan
+    assert len(results) == 2 and all(r["ok"] for r in results)
+    plan = tool_results(llm.requests[3])[0]
+    assert plan["result"]["published"] is True
     assert session.scalars(select(StudyTaskRow).where(StudyTaskRow.subject == "Physique")).one()
     # the request carries the stable cached system prompt, tools and today's date
     first = llm.requests[0]
-    assert first["system"][0]["cache_control"] == {"type": "ephemeral"}
-    assert any(t["name"] == "create_event" for t in first["tools"])
-    assert "2026" in first["messages"][-1]["content"]
+    assert first["config"].system_instruction == SYSTEM
+    declarations = first["config"].tools[0].function_declarations
+    assert any(d.name == "create_event" for d in declarations)
+    assert first["config"].automatic_function_calling.disable is True
+    assert "2026" in first["contents"][-1].parts[0].text
     assert ctx.changed == ["create_task", "create_event", "plan_now"]
 
 
 def test_failed_operation_is_reported_to_the_model_and_rolled_back(session: Session) -> None:
     seed(session)
-    llm = ScriptedMessages(
+    llm = ScriptedModels(
         response(
-            "tool_use",
             tool_use(
                 "create_event",
                 {
@@ -140,31 +147,30 @@ def test_failed_operation_is_reported_to_the_model_and_rolled_back(session: Sess
                 },
             ),
         ),
-        response("end_turn", say("Combien de temps dure la sortie ?")),
+        response(say("Combien de temps dure la sortie ?")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     reply = assistant(llm).reply(ctx, "ajoute une sortie vendredi soir", [])
     assert reply.text.endswith("?")
     result = tool_results(llm.requests[1])[0]
-    assert result["is_error"] and "durée inconnue" in result["content"]
+    assert not result["ok"] and "durée inconnue" in result["error"]
     assert session.scalars(select(ActivityRow).where(ActivityRow.title == "Sortie")).first() is None
     assert ctx.changed == []
 
 
 def test_unavailable_llm_raises_for_fallback(session: Session) -> None:
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    llm = ScriptedMessages(anthropic.APIConnectionError(request=request))
+    llm = ScriptedModels(outage())
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     with pytest.raises(LLMUnavailableError):
         assistant(llm).reply(ctx, "bonjour", [])
-    refused = ScriptedMessages(response("refusal"))
+    refused = ScriptedModels(blocked())
     with pytest.raises(LLMUnavailableError):
         assistant(refused).reply(ctx, "bonjour", [])
 
 
 def test_runaway_loop_is_bounded(session: Session) -> None:
     seed(session)
-    llm = ScriptedMessages(*[response("tool_use", tool_use("get_summary", {})) for _ in range(20)])
+    llm = ScriptedModels(*[response(tool_use("get_summary", {})) for _ in range(20)])
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     reply = assistant(llm).reply(ctx, "boucle", [])
     assert "trop longue" in reply.text and len(llm.requests) == 16
@@ -184,13 +190,11 @@ def test_conversation_route_keeps_context_and_falls_back(
     with sessions() as s:
         seed(s)
         s.commit()
-    llm = ScriptedMessages(
-        response("tool_use", tool_use("list_tasks", {})),
-        response("end_turn", say("Vous avez une tâche : maths.")),
-        response("end_turn", say("Elle compte 300 minutes.")),
-        anthropic.APIConnectionError(
-            request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-        ),
+    llm = ScriptedModels(
+        response(tool_use("list_tasks", {})),
+        response(say("Vous avez une tâche : maths.")),
+        response(say("Elle compte 300 minutes.")),
+        outage(),
     )
     app = create_app(Settings(api_token=TOKEN, database_url=database_url))
     with TestClient(app) as api:
@@ -209,9 +213,9 @@ def test_conversation_route_keeps_context_and_falls_back(
         )
         assert second.json()["reply"] == "Elle compte 300 minutes."
         # the reference "elle" is resolvable: previous turns were sent back
-        history = llm.requests[2]["messages"]
-        assert history[0] == {"role": "user", "content": "quelles tâches ?"}
-        assert history[1]["role"] == "assistant"
+        history = llm.requests[2]["contents"]
+        assert history[0].role == "user" and history[0].parts[0].text == "quelles tâches ?"
+        assert history[1].role == "model"
         # LLM outage: the deterministic parser still answers, nothing is invented
         third = api.post(
             "/v1/conversation",
@@ -287,13 +291,9 @@ def test_concurrent_replans_never_overwrite_each_other(sessions: sessionmaker[Se
 def test_llm_outage_after_a_change_never_replays_the_request(session: Session) -> None:
     """The deterministic path must not run the same text again over applied changes."""
     seed(session)
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    llm = ScriptedMessages(
-        response(
-            "tool_use",
-            tool_use("create_task", {"title": "Chimie", "estimated_minutes": 60}),
-        ),
-        anthropic.APIConnectionError(request=request),
+    llm = ScriptedModels(
+        response(tool_use("create_task", {"title": "Chimie", "estimated_minutes": 60})),
+        outage(),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     reply = assistant(llm).reply(ctx, "ajoute 1 h de chimie", [])
@@ -304,13 +304,13 @@ def test_llm_outage_after_a_change_never_replays_the_request(session: Session) -
 def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
     seed(session)
     ticks = iter([0.0, 0.0, 58.0, 58.0])
-    llm = ScriptedMessages(
-        response("tool_use", tool_use("create_task", {"title": "Bio", "estimated_minutes": 30})),
-        response("end_turn", say("jamais atteint")),
+    llm = ScriptedModels(
+        response(tool_use("create_task", {"title": "Bio", "estimated_minutes": 30})),
+        response(say("jamais atteint")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     agent = assistant(llm, budget_seconds=60, clock=lambda: next(ticks))
     reply = agent.reply(ctx, "ajoute bio", [])
     assert "manque de temps" in reply.text and "create_task" in reply.text
     assert len(llm.requests) == 1
-    assert llm.requests[0]["timeout"] == 60
+    assert llm.requests[0]["config"].http_options.timeout == 60_000

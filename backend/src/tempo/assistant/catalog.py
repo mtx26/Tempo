@@ -2152,7 +2152,7 @@ def _search(
 
 
 def tool_definitions() -> list[dict[str, Any]]:
-    """Anthropic tool definitions (deterministic order: stable prompt cache prefix)."""
+    """Tool definitions: name, description, JSON input schema (deterministic order)."""
     return [
         {
             "name": op.name,

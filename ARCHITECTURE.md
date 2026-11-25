@@ -110,7 +110,7 @@ M -- T
 flowchart TD
  U[Utilisateur] <-->|Langage naturel| H[Conversation Home Assistant / HACS]
  H <-->|POST /v1/conversation| A[Assistant et contexte]
- A <--> L[Claude - LLM facultatif]
+ A <--> L[Gemini - LLM facultatif]
  A <--> T[Catalogue d'opérations typées]
  T <--> API[FastAPI authentifiée]
  H <-->|Lecture et GPS| API
@@ -150,7 +150,7 @@ supplémentaire.
 | Module | Responsabilité |
 |---|---|
 | `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) : **unique surface métier**, lectures comprises, pour l'IA, Home Assistant et tout client (`/v1/operations`). |
-| `assistant/agent.py` | Boucle d'appels d'outils Claude (Messages API, modèle réglable `TEMPO_LLM_MODEL`, `claude-sonnet-5-5` par défaut, prompt système mis en cache) ; fournisseur au choix (`ai/llm.py`, partagé avec l'interprète des e-mails) : API Claude (repli serveur `fallbacks` en cas de refus) ou Claude sur Google Cloud Vertex AI (compte de service ; pas de repli serveur, un refus suit le chemin déterministe) ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
+| `assistant/agent.py` | Boucle d'appels d'outils (`ToolLoopAssistant`) sur Gemini via Google Cloud Vertex AI (`GeminiChat`, SDK `google-genai`, compte de service, modèle `TEMPO_LLM_MODEL` obligatoire, appel automatique de fonctions désactivé : chaque appel passe par `run_operation`) ; client partagé avec l'interprète des e-mails (`ai/llm.py`, sortie JSON contrainte par schéma) ; un blocage de sécurité suit le chemin déterministe ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
 | `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`assistant/actions.py`, `assistant/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. `ai/` ne fait qu'interpréter (analyseur déterministe, LLM facultatif, application validée des imports). |
 | `api/` | FastAPI, cinq routes : `/health` (public), `/v1/status`, `/v1/conversation`, `/v1/operations` (liste et exécution), `/v1/location` (GPS réel poussé par HA : télémétrie, jamais une opération accessible au LLM). |
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
@@ -208,7 +208,7 @@ Contrat (implémenté) :
 - Contexte LLM : prompt système stable, 12 derniers tours de la conversation (6 h), date et
   fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
   shell, Docker ou secret.
-- Sans LLM (pas de clé, panne, refus) : `/v1/conversation` répond via le repli déterministe
+- Sans LLM (non configuré, panne, blocage) : `/v1/conversation` répond via le repli déterministe
   (`assistant/fallback.py`) qui exécute les mêmes opérations du catalogue et l'indique
   (`used_llm: false`, `fallback: true`) ; ses tours restent dans l'historique de la conversation.
   Si le LLM tombe après avoir modifié quelque chose, la demande n'est jamais rejouée par le
@@ -711,7 +711,7 @@ flowchart TD
  BK --> DB
  end
  HA <-->|Réseau overlay privé, jeton| API
- API <--> L[Claude facultatif : API Anthropic ou Vertex AI]
+ API <--> L[Gemini facultatif : Google Cloud Vertex AI]
  I[iCal et IMAP autorisé] --> W
  G[GTFS et OSM] --> UP
  R[GTFS-RT Belgian Mobility] --> RT
@@ -742,7 +742,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 
 | Besoin | État | Preuve / écart |
 |---|---|---|
-| B01 Conversation | Partiel | Agent Claude à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend ; **recette dans un vrai Home Assistant 2026.11.2** (Docker, `scripts/ha_e2e.py`, 15/15) : flux de configuration, agent de conversation Assist, ajout de tâche et question par la conversation (repli déterministe), refus de deviner, GPS du téléphone transmis et jugé fiable, liste de tâches à jour, aucun service métier ; budget de 60 s, panne du LLM après une modification sans rejeu, délai de 150 s côté HA (`test_assistant.py`). **Jamais exécuté avec un vrai LLM** (aucune clé). |
+| B01 Conversation | Partiel | Agent Gemini à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend ; **recette dans un vrai Home Assistant 2026.11.2** (Docker, `scripts/ha_e2e.py`, 15/15) : flux de configuration, agent de conversation Assist, ajout de tâche et question par la conversation (repli déterministe), refus de deviner, GPS du téléphone transmis et jugé fiable, liste de tâches à jour, aucun service métier ; budget de 60 s, panne du LLM après une modification sans rejeu, délai de 150 s côté HA (`test_assistant.py`). **Jamais exécuté avec un vrai LLM** (aucune clé). |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente, séance unique située ; échéance stricte d'une séance située en heure locale, jamais repoussée, manquée signalée (`test_domain_rules.py`). |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, repères, invalides) notifiés. **Flux réel de l'université validé localement** le 25/11/2026 (secret `tempo_ics_url`) : téléchargement sécurisé, 36 cours importés dans une base jetable, seconde synchronisation sans changement ; ses congés codés en durée nulle ont révélé un défaut corrigé (`test_ics.py`). Pas encore en service continu (worker non déployé). |
@@ -778,7 +778,7 @@ centralisés), base de développement vide : vrai Home Assistant 2026.11.2 (`scr
 réussis sur PostgreSQL et 23 ignorés faute des services Docker (MOTIS, IMAP, contrat HA,
 portail), que ce correctif ne touche pas.
 
-Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), installation de
+Bloquants nécessitant l'utilisateur : compte de service Vertex AI et choix du modèle Gemini (tester B01 réellement), installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de
 l'expéditeur du coach + accès IMAP, clé
 Belgian Mobility Standard, création et visibilité des dépôts GitHub, licence de l'intégration,
@@ -790,7 +790,9 @@ autorisation de déploiement Swarm.
   `tempo-homeassistant` (HACS exige `custom_components/<domaine>/` à la racine d'un dépôt
   public). Aucun des deux n'est publié sans accord.
 - Python 3.13 + `uv` (verrou `backend/uv.lock`), Ruff, mypy `--strict`, pytest ; `tzdata`
-  explicite ; client HTTP `httpx2` ; SDK `anthropic` avec l'extra `vertex` ; modèle par défaut `claude-sonnet-5-5` (choix de coût : la conversation et les e-mails n'ont pas besoin d'Opus), fournisseur API Anthropic ou Vertex AI selon `TEMPO_LLM_PROVIDER`.
+  explicite ; client HTTP `httpx2` ; LLM : uniquement Gemini sur Google Cloud Vertex AI (SDK
+  `google-genai`, facturé au projet Google Cloud, éligible à ses crédits) ; aucun modèle par
+  défaut : `TEMPO_LLM_MODEL` est choisi parmi les modèles réellement accessibles au projet.
 - iCal : `icalendar` + `recurring-ical-events`, avec pré-analyse de la source car la
   bibliothèque ajoute un RECURRENCE-ID aux événements non récurrents et inverse silencieusement
   DTSTART/DTEND incohérents.

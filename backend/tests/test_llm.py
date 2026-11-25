@@ -1,4 +1,4 @@
-"""LLM access: provider choice, request shape and failure handling (SDK replaced, no network)."""
+"""Gemini access on Vertex AI: configuration, request shape and failure handling (no network)."""
 
 import json
 from datetime import date
@@ -6,61 +6,27 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import anthropic
-import httpx2
+import httpx
 import pytest
-from pydantic import SecretStr
 
 from tempo.ai.llm import (
-    FALLBACK_BETA,
     MAX_INPUT_CHARS,
-    ClaudeInterpreter,
     Extraction,
-    LlmClient,
+    GeminiInterpreter,
+    build_gemini_client,
     build_interpreter,
-    build_llm_client,
 )
 from tempo.config import LlmSettings
 
 TODAY = date(2026, 12, 7)
+MODEL = "gemini-model-under-test"
 
 
 def settings(**values: Any) -> LlmSettings:
     return LlmSettings(_env_file=None, **values)
 
 
-def interpreter_with(
-    behaviour: Any, *, server_fallbacks: bool = True
-) -> tuple[ClaudeInterpreter, list[dict[str, Any]]]:
-    calls: list[dict[str, Any]] = []
-
-    def parse(**kwargs: Any) -> Any:
-        calls.append(kwargs)
-        return behaviour(kwargs)
-
-    llm = LlmClient(SimpleNamespace(parse=parse), "test", server_fallbacks=server_fallbacks)
-    return ClaudeInterpreter(llm, model="claude-sonnet-5-5"), calls
-
-
-def test_default_model_is_sonnet_and_no_key_means_no_llm() -> None:
-    assert settings().llm_model == "claude-sonnet-5-5"
-    assert build_interpreter(settings()) is None
-    keyed = build_llm_client(settings(anthropic_api_key=SecretStr("sk-test")), timeout=5)
-    assert keyed is not None and keyed.provider == "anthropic" and keyed.server_fallbacks
-
-
-def test_vertex_needs_a_project_and_a_credentials_file(tmp_path: Path) -> None:
-    missing = tmp_path / "absent.json"
-    assert build_llm_client(settings(llm_provider="vertex"), timeout=5) is None
-    incomplete = settings(
-        llm_provider="vertex", vertex_project_id="tempo-project", vertex_credentials_file=missing
-    )
-    assert build_llm_client(incomplete, timeout=5) is None
-
-
-def test_vertex_client_has_no_server_fallback(tmp_path: Path) -> None:
-    """Vertex AI rejects ``fallbacks``: never sent; a refusal takes the deterministic path."""
-    key = tmp_path / "sa.json"
+def service_account_file(folder: Path) -> Path:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -73,6 +39,7 @@ def test_vertex_client_has_no_server_fallback(tmp_path: Path) -> None:
         )
         .decode()
     )
+    key = folder / "sa.json"
     key.write_text(
         json.dumps(
             {
@@ -87,61 +54,84 @@ def test_vertex_client_has_no_server_fallback(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    llm = build_llm_client(
-        settings(
-            llm_provider="vertex", vertex_project_id="tempo-project", vertex_credentials_file=key
-        ),
-        timeout=5,
+    return key
+
+
+def interpreter_with(behaviour: Any) -> tuple[GeminiInterpreter, list[dict[str, Any]]]:
+    calls: list[dict[str, Any]] = []
+
+    def generate_content(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return behaviour(kwargs)
+
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    return GeminiInterpreter(client, model=MODEL), calls
+
+
+def test_incomplete_settings_mean_no_llm(tmp_path: Path) -> None:
+    key = service_account_file(tmp_path)
+    assert build_interpreter(settings()) is None
+    no_model = settings(vertex_project_id="tempo-project", vertex_credentials_file=key)
+    assert build_gemini_client(no_model) is None
+    no_key = settings(
+        vertex_project_id="tempo-project",
+        llm_model=MODEL,
+        vertex_credentials_file=tmp_path / "absent.json",
     )
-    assert llm is not None and llm.provider == "vertex"
-    assert not llm.server_fallbacks and llm.extra() == {}
-    interp, calls = interpreter_with(
-        lambda _: SimpleNamespace(stop_reason="end_turn", parsed_output=None),
-        server_fallbacks=False,
+    assert build_gemini_client(no_key) is None
+
+
+def test_complete_settings_build_a_vertex_client(tmp_path: Path) -> None:
+    complete = settings(
+        vertex_project_id="tempo-project",
+        llm_model=MODEL,
+        vertex_credentials_file=service_account_file(tmp_path),
     )
-    interp.extract("x", TODAY, [])
-    assert "fallbacks" not in calls[0] and "betas" not in calls[0]
+    client = build_gemini_client(complete)
+    assert client is not None and client.vertexai
+    assert isinstance(build_interpreter(complete), GeminiInterpreter)
 
 
 def test_request_shape_and_parsed_output() -> None:
     expected = Extraction(items=[], replan=True)
-    interp, calls = interpreter_with(
-        lambda _: SimpleNamespace(stop_reason="end_turn", parsed_output=expected)
-    )
-    assert interp.extract("replanifie tout", TODAY, ["home", "club"]) is expected
+    interp, calls = interpreter_with(lambda _: SimpleNamespace(text=expected.model_dump_json()))
+    assert interp.extract("replanifie tout", TODAY, ["home", "club"]) == expected
     call = calls[0]
-    assert call["model"] == "claude-sonnet-5-5"
-    assert call["output_format"] is Extraction
-    assert call["betas"] == [FALLBACK_BETA] and call["fallbacks"] == "default"
-    assert call["output_config"] == {"effort": "low"}
-    content = call["messages"][0]["content"]
-    assert "2026-12-07" in content and "home, club" in content
+    assert call["model"] == MODEL
+    config = call["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == Extraction.model_json_schema()
+    assert config.http_options.timeout == 60_000
+    assert "2026-12-07" in call["contents"] and "home, club" in call["contents"]
 
 
-def test_refusal_returns_none() -> None:
-    interp, _ = interpreter_with(
-        lambda _: SimpleNamespace(stop_reason="refusal", parsed_output=None)
-    )
+def test_declined_or_malformed_answer_returns_none() -> None:
+    interp, _ = interpreter_with(lambda _: SimpleNamespace(text=None))
     assert interp.extract("x", TODAY, []) is None
-
-
-def _error(cls: type[anthropic.APIStatusError], status: int) -> anthropic.APIStatusError:
-    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    return cls("boom", response=httpx2.Response(status, request=request), body=None)
+    interp, _ = interpreter_with(lambda _: SimpleNamespace(text='{"not": "the schema"}'))
+    assert interp.extract("x", TODAY, []) is None
 
 
 @pytest.mark.parametrize(
     "error",
     [
-        _error(anthropic.AuthenticationError, 401),
-        _error(anthropic.RateLimitError, 429),
-        _error(anthropic.InternalServerError, 500),
-        anthropic.APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.com")),
+        httpx.ConnectError("down"),
+        httpx.ReadTimeout("slow"),
     ],
 )
 def test_api_failures_degrade_to_none(error: Exception) -> None:
     def fail(_: Any) -> Any:
         raise error
+
+    interp, _ = interpreter_with(fail)
+    assert interp.extract("x", TODAY, []) is None
+
+
+def test_api_error_degrades_to_none() -> None:
+    from google.genai import errors
+
+    def fail(_: Any) -> Any:
+        raise errors.ClientError(403, {"error": {"message": "denied", "status": "DENIED"}})
 
     interp, _ = interpreter_with(fail)
     assert interp.extract("x", TODAY, []) is None

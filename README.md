@@ -135,9 +135,7 @@ Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou de
 | `tempo_api_token` (secret) | api | Jeton de service saisi dans Home Assistant : `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 | `tempo_api_token_previous` (secret, temporaire) | api | Ancien jeton accepté pendant une rotation. |
 | `tempo_database_url` (secret) | api, worker | `postgresql+psycopg://tempo_app:<mdp>@postgres:5432/tempo`. |
-| `TEMPO_LLM_PROVIDER` (`anthropic` par défaut, ou `vertex`), `TEMPO_LLM_MODEL` (`claude-sonnet-5-5` par défaut) | api, worker | Fournisseur et modèle de l'assistant conversationnel et de l'interprète des e-mails du coach. Sans fournisseur complet : mode déterministe. |
-| `tempo_anthropic_api_key` (secret, facultatif) | api, worker | Fournisseur `anthropic` : clé de l'API Claude (`platform.claude.com`). |
-| `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_VERTEX_REGION` (`global` par défaut), secret `tempo_gcp_credentials` | api, worker | Fournisseur `vertex` : projet Google Cloud où le modèle est activé (Model Garden) et clé JSON d'un compte de service ayant le rôle Vertex AI User. |
+| `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_LLM_MODEL`, `TEMPO_VERTEX_REGION` (`global` par défaut), secret `tempo_gcp_credentials` | api, worker | LLM facultatif (assistant conversationnel et e-mails du coach) : Gemini sur Google Cloud Vertex AI. Projet Google Cloud (API Vertex AI / Agent Platform activée), identifiant d'un modèle Gemini accessible au projet et clé JSON d'un compte de service ayant le rôle Vertex AI User. Sans ces trois éléments : mode déterministe. |
 | `TEMPO_MOTIS_URL` | api, worker | `http://routing:8080`. |
 | `TEMPO_TIMEZONE` | api, worker | `Europe/Brussels` par défaut. |
 | `tempo_ics_url` (secret) | worker | URL iCal de l'université (contient souvent un jeton personnel). |

@@ -4,7 +4,6 @@ Secrets are typed ``SecretStr`` so they never appear in ``repr`` or logs.
 """
 
 from pathlib import Path
-from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -16,18 +15,13 @@ DOCKER_SECRETS_DIR = Path("/run/secrets")
 
 
 class LlmSettings(BaseSettings):
-    """Optional LLM access, shared by the API (conversation) and the worker (coach e-mails).
+    """Optional LLM, shared by the API (conversation) and the worker (coach e-mails): Gemini on
+    Google Cloud Vertex AI, billed by the Google Cloud project. Needs the project id, a model
+    and a service-account key file (Docker secret ``tempo_gcp_credentials``) with the Vertex AI
+    User role. Without complete settings, no LLM is used: Tempo works fully without one."""
 
-    ``anthropic``: Claude API, key in the Docker secret ``tempo_anthropic_api_key``.
-    ``vertex``: Claude on Google Cloud Vertex AI, billed by the Google Cloud project; a service
-    account key file (Docker secret ``tempo_gcp_credentials``) with the Vertex AI User role.
-    Without complete settings, no LLM is used: Tempo works fully without one."""
-
-    llm_provider: Literal["anthropic", "vertex"] = "anthropic"
-    llm_model: str = Field(default="claude-sonnet-5-5", pattern=r"^claude-[a-z0-9-]{3,60}$")
-    """Same identifier on the Claude API and on Vertex AI (enable it in the Model Garden)."""
-    anthropic_api_key: SecretStr | None = None
-    """Optional (Docker secret ``tempo_anthropic_api_key``), provider ``anthropic``."""
+    llm_model: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9.-]{2,60}$")
+    """Gemini model identifier available in the project (Model Garden)."""
     vertex_project_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
     vertex_region: str = Field(default="global", pattern=r"^[a-z0-9-]{2,40}$")
     vertex_credentials_file: Path = DOCKER_SECRETS_DIR / "tempo_gcp_credentials"

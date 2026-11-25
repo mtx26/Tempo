@@ -64,14 +64,13 @@ services:
       # The assistant searches journeys and re-plans synchronously (ARCHITECTURE.md §3).
       TEMPO_MOTIS_URL: http://routing:8080
     secrets: [tempo_api_token, tempo_database_url]
-    # Optional LLM: TEMPO_LLM_PROVIDER=anthropic + secret tempo_anthropic_api_key, or
-    # TEMPO_LLM_PROVIDER=vertex + TEMPO_VERTEX_PROJECT_ID + secret tempo_gcp_credentials (without it the deterministic
-    # parser answers). During a token rotation add: tempo_api_token_previous.
+    # Optional LLM (Gemini on Vertex AI): TEMPO_VERTEX_PROJECT_ID + TEMPO_LLM_MODEL + secret
+    # tempo_gcp_credentials (without them the deterministic parser answers). During a token rotation add: tempo_api_token_previous.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
       retries: 3
-    # egress: only needed for the LLM provider (Anthropic API or Vertex AI).
+    # egress: only needed for the LLM (Vertex AI).
     networks: [backend, ha, routing, egress]
     deploy:
       replicas: 1  # in-memory auth limiter: exactly one replica
@@ -91,7 +90,7 @@ services:
     secrets:
       - tempo_database_url
       - tempo_ics_url
-      # Optional: tempo_anthropic_api_key or tempo_gcp_credentials, tempo_training_imap_password
+      # Optional: tempo_gcp_credentials, tempo_training_imap_password
     # Alive = one scheduling round finished in the last 5 minutes (a round includes a re-plan).
     healthcheck:
       test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/tempo-worker.alive') > 300)"]

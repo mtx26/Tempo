@@ -1,30 +1,29 @@
-"""Optional LLM interpretation (Claude) for text the deterministic parser does not understand.
+"""Optional LLM access: Gemini on Google Cloud Vertex AI (the only provider).
 
 Principles (ARCHITECTURE.md, CLAUDE.md): the AI only INTERPRETS; deterministic code then
 validates every field (dates in range, positive durations, known places...) exactly like a
-user request, and the planner decides feasibility. Tempo works fully without it: when no API
-key is configured, ``build_interpreter`` returns ``None`` and callers report "not understood".
+user request, and the planner decides feasibility. Tempo works fully without it: when Vertex
+AI is not configured, ``build_gemini_client`` / ``build_interpreter`` return ``None`` and
+callers use the deterministic path.
 
-Uses the official Anthropic SDK with structured outputs (``messages.parse`` + a Pydantic
-schema). Provider (``build_llm_client``, shared with the conversational agent): the Claude API,
-with the server-side refusal fallback (``fallbacks="default"``), or Claude on Google Cloud
-Vertex AI, which has no server-side fallback: a refusal there takes the deterministic path.
+``build_gemini_client`` is shared with the conversational agent: Google Gen AI SDK, Vertex AI,
+service-account credentials (``tempo_gcp_credentials``), billed by the Google Cloud project.
+``GeminiInterpreter`` reads free-text coach e-mails with a JSON-schema structured output.
 """
 
 import logging
-from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal, Protocol
 
-import anthropic
+import httpx
 from pydantic import BaseModel, Field
 
 from tempo.config import LlmSettings
 
 logger = logging.getLogger(__name__)
 
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_INPUT_CHARS = 20_000
+VERTEX_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 
 
 class ExtractedItem(BaseModel):
@@ -67,97 +66,83 @@ SYSTEM = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class LlmClient:
-    """The configured provider's ``messages`` resource and what that provider supports."""
-
-    messages: Any
-    provider: str
-    server_fallbacks: bool
-    """Claude API only: refusals are re-run server-side (``fallbacks="default"``)."""
-
-    def extra(self) -> dict[str, Any]:
-        """Provider-specific request arguments."""
-        return {"betas": [FALLBACK_BETA], "fallbacks": "default"} if self.server_fallbacks else {}
-
-
-VERTEX_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
-
-
-def build_llm_client(settings: LlmSettings, *, timeout: float) -> LlmClient | None:
-    """The configured LLM client, or None when the provider is not fully configured (Tempo
-    then works without LLM; the missing piece is logged, never guessed)."""
-    if settings.llm_provider == "vertex":
-        path = settings.vertex_credentials_file
-        if settings.vertex_project_id is None or not path.is_file():
-            logger.warning(
-                "LLM disabled: Vertex AI needs TEMPO_VERTEX_PROJECT_ID and the service-account "
-                "key file (secret tempo_gcp_credentials)"
-            )
-            return None
-        from google.oauth2 import service_account  # vertex extra of the SDK
-
-        credentials = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
-            str(path), scopes=list(VERTEX_SCOPES)
+def build_gemini_client(settings: LlmSettings) -> Any | None:
+    """Google Gen AI client on Vertex AI, or None when the project id or the service-account
+    key file is missing (logged: Tempo then works without LLM, nothing is guessed)."""
+    path = settings.vertex_credentials_file
+    if settings.vertex_project_id is None or settings.llm_model is None or not path.is_file():
+        logger.warning(
+            "LLM disabled: Vertex AI needs TEMPO_VERTEX_PROJECT_ID, TEMPO_LLM_MODEL and the "
+            "service-account key file (secret tempo_gcp_credentials)"
         )
-        vertex = anthropic.AnthropicVertex(
-            project_id=settings.vertex_project_id,
-            region=settings.vertex_region,
-            credentials=credentials,
-            timeout=timeout,
-            max_retries=1,
-        )
-        return LlmClient(vertex.messages, "vertex", server_fallbacks=False)
-    if settings.anthropic_api_key is None:
         return None
-    client = anthropic.Anthropic(
-        api_key=settings.anthropic_api_key.get_secret_value(), timeout=timeout, max_retries=1
+    from google import genai
+    from google.oauth2 import service_account
+
+    credentials = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
+        str(path), scopes=list(VERTEX_SCOPES)
     )
-    return LlmClient(client.beta.messages, "anthropic", server_fallbacks=True)
+    return genai.Client(
+        vertexai=True,
+        project=settings.vertex_project_id,
+        location=settings.vertex_region,
+        credentials=credentials,
+    )
 
 
-class ClaudeInterpreter:
-    def __init__(self, llm: LlmClient, *, model: str) -> None:
-        self._llm = llm
+def _prompt(text: str, today: date, place_ids: list[str]) -> str | None:
+    """The interpretation request (None: text too long, not sent)."""
+    if len(text) > MAX_INPUT_CHARS:
+        logger.warning("text too long for interpretation (%d chars): not sent", len(text))
+        return None
+    return (
+        f"Today is {today.isoformat()} ({today.strftime('%A')}). "
+        f"Known place ids: {', '.join(place_ids) or 'none'}.\n\nMessage:\n{text}"
+    )
+
+
+class GeminiInterpreter:
+    """Structured reading of free text with Gemini's JSON-schema output."""
+
+    def __init__(self, client: Any, *, model: str, timeout: float = 60.0) -> None:
+        self._client = client
         self._model = model
+        self._timeout = timeout
 
     def extract(self, text: str, today: date, place_ids: list[str]) -> Extraction | None:
-        if len(text) > MAX_INPUT_CHARS:
-            logger.warning("text too long for interpretation (%d chars): not sent", len(text))
+        from google.genai import errors, types
+
+        prompt = _prompt(text, today, place_ids)
+        if prompt is None:
             return None
-        prompt = (
-            f"Today is {today.isoformat()} ({today.strftime('%A')}). "
-            f"Known place ids: {', '.join(place_ids) or 'none'}.\n\nMessage:\n{text}"
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM,
+            response_mime_type="application/json",
+            response_json_schema=Extraction.model_json_schema(),
+            http_options=types.HttpOptions(timeout=int(self._timeout * 1000)),
         )
         try:
-            response = self._llm.messages.parse(
-                model=self._model,
-                max_tokens=16000,
-                system=SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=Extraction,
-                output_config={"effort": "low"},
-                **self._llm.extra(),
+            response = self._client.models.generate_content(
+                model=self._model, contents=prompt, config=config
             )
-        except anthropic.AuthenticationError:
-            logger.error("LLM: invalid API key")
+        except errors.APIError as exc:
+            logger.warning("LLM: API error %s", exc.code)
             return None
-        except anthropic.RateLimitError:
-            logger.warning("LLM: rate limited")
-            return None
-        except anthropic.APIStatusError as exc:
-            logger.warning("LLM: API error %s", exc.status_code)
-            return None
-        except anthropic.APIConnectionError:
+        except (httpx.HTTPError, OSError):
             logger.warning("LLM: connection error")
             return None
-        if response.stop_reason == "refusal":
-            logger.warning("LLM: request declined")
+        if not response.text:
+            logger.warning("LLM: no answer (declined or empty)")
             return None
-        parsed: Extraction | None = response.parsed_output
-        return parsed
+        try:
+            return Extraction.model_validate_json(response.text)
+        except ValueError:
+            logger.warning("LLM: answer does not match the schema: ignored")
+            return None
 
 
 def build_interpreter(settings: LlmSettings) -> Interpreter | None:
-    llm = build_llm_client(settings, timeout=60.0)
-    return None if llm is None else ClaudeInterpreter(llm, model=settings.llm_model)
+    client = build_gemini_client(settings)
+    if client is None or settings.llm_model is None:
+        return None
+    return GeminiInterpreter(client, model=settings.llm_model)
