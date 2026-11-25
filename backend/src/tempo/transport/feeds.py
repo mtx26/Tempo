@@ -11,7 +11,9 @@ for realtime, ZIP for static) — see ARCHITECTURE.md "Belgian feeds". Nothing h
   transcoding mangles int64 fields).
 - Quotas come from the portal terms §5 (indicative): anonymous 100 requests/day and 10/minute;
   free Standard account 12 000/day and 500/minute. The key travels in header ``bmc-partner-key``
-  (portal knowledge base). Whether this host accepts the key is NOT yet verified (no key yet).
+  (portal knowledge base). Tested 2026-11-25: this host answers 200 with the real key, a fake
+  key or none, under ``bmc-partner-key`` or ``Ocp-Apim-Subscription-Key``: it does not check
+  the key, so the Standard quota cannot be confirmed here.
 - STIB-MIVB publishes no GTFS-RT: MOTIS routes STIB on its static GTFS.
 """
 

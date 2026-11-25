@@ -500,7 +500,10 @@ Faits vérifiés le 23/11/2026 par requêtes réelles :
   seulement. MOTIS est la seule source d'itinéraires : les trajets STIB (et tout exploitant
   sans temps réel) suivent le GTFS statique.
 - Quotas indicatifs : anonyme 100/jour ; clé Standard (en-tête `bmc-partner-key`) 12 000/jour.
-  Acceptation de la clé sur cet hôte **non vérifiée** (pas de clé).
+  Clé testée le 25/11/2026 : cet hôte répond 200 avec la vraie clé, avec une fausse clé et sans
+  clé, sous `bmc-partner-key` comme sous `Ocp-Apim-Subscription-Key` ; il ne contrôle donc pas
+  la clé et son effet sur le quota **n'est pas observable**. L'hôte documenté n'a toujours pas
+  de DNS. Tempo envoie la clé (inoffensif) et reste dans le quota anonyme planifié par défaut.
 - Relais (`transport/rt_relay.py`, une seule réplique) : détient la clé, plafonne à 80 % du
   quota, recul exponentiel, `Retry-After` respecté, répond 503 au-delà de 10 min de fraîcheur
   (MOTIS abandonne alors ce temps réel : vérifié), retire `start_time` des TEC (décalage de
