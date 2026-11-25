@@ -12,6 +12,7 @@ service-account credentials (``tempo_gcp_credentials``), billed by the Google Cl
 """
 
 import logging
+import time
 from datetime import date
 from typing import Any, Literal, Protocol
 
@@ -70,10 +71,10 @@ def build_gemini_client(settings: LlmSettings) -> Any | None:
     """Google Gen AI client on Vertex AI, or None when the project id or the service-account
     key file is missing (logged: Tempo then works without LLM, nothing is guessed)."""
     path = settings.vertex_credentials_file
-    if settings.vertex_project_id is None or settings.llm_model is None or not path.is_file():
+    if settings.vertex_project_id is None or not path.is_file():
         logger.warning(
-            "LLM disabled: Vertex AI needs TEMPO_VERTEX_PROJECT_ID, TEMPO_LLM_MODEL and the "
-            "service-account key file (secret tempo_gcp_credentials)"
+            "LLM disabled: Vertex AI needs TEMPO_VERTEX_PROJECT_ID and the service-account "
+            "key file (secret tempo_gcp_credentials)"
         )
         return None
     from google import genai
@@ -87,6 +88,26 @@ def build_gemini_client(settings: LlmSettings) -> Any | None:
         project=settings.vertex_project_id,
         location=settings.vertex_region,
         credentials=credentials,
+    )
+
+
+def log_usage(purpose: str, model: str, response: Any, started: float) -> None:
+    """One line per model call: tokens (prompt, of which served from Gemini's implicit cache,
+    output, thinking) and latency. Never the prompt, the answer or tool arguments."""
+    usage = getattr(response, "usage_metadata", None)
+
+    def count(name: str) -> int:
+        return int(getattr(usage, name, None) or 0)
+
+    logger.info(
+        "llm usage purpose=%s model=%s latency_ms=%d prompt=%d cached=%d output=%d thoughts=%d",
+        purpose,
+        model,
+        round((time.monotonic() - started) * 1000),
+        count("prompt_token_count"),
+        count("cached_content_token_count"),
+        count("candidates_token_count"),
+        count("thoughts_token_count"),
     )
 
 
@@ -121,6 +142,7 @@ class GeminiInterpreter:
             response_json_schema=Extraction.model_json_schema(),
             http_options=types.HttpOptions(timeout=int(self._timeout * 1000)),
         )
+        started = time.monotonic()
         try:
             response = self._client.models.generate_content(
                 model=self._model, contents=prompt, config=config
@@ -131,6 +153,7 @@ class GeminiInterpreter:
         except (httpx.HTTPError, OSError):
             logger.warning("LLM: connection error")
             return None
+        log_usage("interpret", self._model, response, started)
         if not response.text:
             logger.warning("LLM: no answer (declined or empty)")
             return None
@@ -143,6 +166,4 @@ class GeminiInterpreter:
 
 def build_interpreter(settings: LlmSettings) -> Interpreter | None:
     client = build_gemini_client(settings)
-    if client is None or settings.llm_model is None:
-        return None
-    return GeminiInterpreter(client, model=settings.llm_model)
+    return None if client is None else GeminiInterpreter(client, model=settings.llm_model)

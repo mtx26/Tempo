@@ -4,6 +4,7 @@ The scripted client stands in for Gemini on Vertex AI (no network, no cost): it 
 harness runs the operations the model asks for, returns their real results, keeps going until
 the model answers, and falls back to the deterministic parser when the LLM is unavailable."""
 
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -129,11 +130,17 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
     declarations = first["config"].tools[0].function_declarations
     assert any(d.name == "create_event" for d in declarations)
     assert first["config"].automatic_function_calling.disable is True
+    # identical prefix on every call (instructions, then tools): Gemini's implicit cache hits
+    for later in llm.requests[1:]:
+        assert later["config"].system_instruction == first["config"].system_instruction
+        assert later["config"].tools == first["config"].tools
     assert "2026" in first["contents"][-1].parts[0].text
     assert ctx.changed == ["create_task", "create_event", "plan_now"]
 
 
-def test_failed_operation_is_reported_to_the_model_and_rolled_back(session: Session) -> None:
+def test_failed_operation_is_reported_to_the_model_and_rolled_back(
+    session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
     seed(session)
     llm = ScriptedModels(
         response(
@@ -150,7 +157,11 @@ def test_failed_operation_is_reported_to_the_model_and_rolled_back(session: Sess
         response(say("Combien de temps dure la sortie ?")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
-    reply = assistant(llm).reply(ctx, "ajoute une sortie vendredi soir", [])
+    with caplog.at_level(logging.INFO, logger="tempo.ai.llm"):
+        reply = assistant(llm).reply(ctx, "ajoute une sortie vendredi soir", [])
+    usage = [r.getMessage() for r in caplog.records if "llm usage" in r.getMessage()]
+    assert len(usage) == 2 and all("purpose=conversation" in line for line in usage)
+    assert not any("sortie" in line.lower() for line in usage)  # no content in the log
     assert reply.text.endswith("?")
     result = tool_results(llm.requests[1])[0]
     assert not result["ok"] and "durée inconnue" in result["error"]

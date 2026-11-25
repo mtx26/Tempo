@@ -150,7 +150,7 @@ supplémentaire.
 | Module | Responsabilité |
 |---|---|
 | `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) : **unique surface métier**, lectures comprises, pour l'IA, Home Assistant et tout client (`/v1/operations`). |
-| `assistant/agent.py` | Boucle d'appels d'outils (`ToolLoopAssistant`) sur Gemini via Google Cloud Vertex AI (`GeminiChat`, SDK `google-genai`, compte de service, modèle `TEMPO_LLM_MODEL` obligatoire, appel automatique de fonctions désactivé : chaque appel passe par `run_operation`) ; client partagé avec l'interprète des e-mails (`ai/llm.py`, sortie JSON contrainte par schéma) ; un blocage de sécurité suit le chemin déterministe ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
+| `assistant/agent.py` | Boucle d'appels d'outils (`ToolLoopAssistant`) sur Gemini via Google Cloud Vertex AI (`GeminiChat`, SDK `google-genai`, compte de service, modèle `TEMPO_LLM_MODEL`, `gemini-3.5-flash-lite` par défaut, appel automatique de fonctions désactivé : chaque appel passe par `run_operation`) ; client partagé avec l'interprète des e-mails (`ai/llm.py`, sortie JSON contrainte par schéma) ; un blocage de sécurité suit le chemin déterministe ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
 | `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`assistant/actions.py`, `assistant/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. `ai/` ne fait qu'interpréter (analyseur déterministe, LLM facultatif, application validée des imports). |
 | `api/` | FastAPI, cinq routes : `/health` (public), `/v1/status`, `/v1/conversation`, `/v1/operations` (liste et exécution), `/v1/location` (GPS réel poussé par HA : télémétrie, jamais une opération accessible au LLM). |
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
@@ -791,8 +791,15 @@ autorisation de déploiement Swarm.
   public). Aucun des deux n'est publié sans accord.
 - Python 3.13 + `uv` (verrou `backend/uv.lock`), Ruff, mypy `--strict`, pytest ; `tzdata`
   explicite ; client HTTP `httpx2` ; LLM : uniquement Gemini sur Google Cloud Vertex AI (SDK
-  `google-genai`, facturé au projet Google Cloud, éligible à ses crédits) ; aucun modèle par
-  défaut : `TEMPO_LLM_MODEL` est choisi parmi les modèles réellement accessibles au projet.
+  `google-genai`, facturé au projet Google Cloud, éligible à ses crédits). Modèle par défaut
+  `gemini-3.5-flash-lite`, réglable (`TEMPO_LLM_MODEL`), choisi sur mesure réelle (2026-11) :
+  le plus rapide des modèles accessibles (2 à 5 s par demande), sans jetons de réflexion
+  facturés, appels d'outils corrects ; `gemini-3.8-flash` dépassait le délai (504).
+  Cache : le cache implicite de Gemini suffit (57 % des jetons d'entrée servis depuis le cache
+  sur une conversation réelle) grâce à un préfixe stable (consignes puis outils, ordre fixe,
+  vérifié par test) ; un cache explicite ajouterait un stockage facturé à l'heure et un cycle
+  de vie à gérer pour un usage intermittent : non retenu. Mesure : une ligne `llm usage` par
+  appel (jetons, cache, latence), sans contenu.
 - iCal : `icalendar` + `recurring-ical-events`, avec pré-analyse de la source car la
   bibliothèque ajoute un RECURRENCE-ID aux événements non récurrents et inverse silencieusement
   DTSTART/DTEND incohérents.

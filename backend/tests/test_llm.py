@@ -1,6 +1,7 @@
 """Gemini access on Vertex AI: configuration, request shape and failure handling (no network)."""
 
 import json
+import logging
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,8 +72,8 @@ def interpreter_with(behaviour: Any) -> tuple[GeminiInterpreter, list[dict[str, 
 def test_incomplete_settings_mean_no_llm(tmp_path: Path) -> None:
     key = service_account_file(tmp_path)
     assert build_interpreter(settings()) is None
-    no_model = settings(vertex_project_id="tempo-project", vertex_credentials_file=key)
-    assert build_gemini_client(no_model) is None
+    no_project = settings(vertex_credentials_file=key)
+    assert build_gemini_client(no_project) is None
     no_key = settings(
         vertex_project_id="tempo-project",
         llm_model=MODEL,
@@ -141,3 +142,30 @@ def test_oversized_text_is_not_sent() -> None:
     interp, calls = interpreter_with(lambda _: None)
     assert interp.extract("x" * (MAX_INPUT_CHARS + 1), TODAY, []) is None
     assert calls == []
+
+
+def test_default_model_is_configurable() -> None:
+    assert settings().llm_model == "gemini-3.5-flash-lite"
+    assert settings(llm_model="gemini-3.5-flash").llm_model == "gemini-3.5-flash"
+    with pytest.raises(ValueError):
+        settings(llm_model="Bad Model!")
+
+
+def test_usage_and_latency_are_logged_without_content(caplog: pytest.LogCaptureFixture) -> None:
+    usage = SimpleNamespace(
+        prompt_token_count=1200,
+        cached_content_token_count=1000,
+        candidates_token_count=40,
+        thoughts_token_count=None,
+    )
+    answer = Extraction(items=[], replan=True).model_dump_json()
+    interp, _ = interpreter_with(lambda _: SimpleNamespace(text=answer, usage_metadata=usage))
+    with caplog.at_level(logging.INFO, logger="tempo.ai.llm"):
+        interp.extract("Secret du coach : fractionné jeudi", TODAY, ["home"])
+    lines = [r.getMessage() for r in caplog.records if "llm usage" in r.getMessage()]
+    assert len(lines) == 1
+    line = lines[0]
+    assert "purpose=interpret" in line and f"model={MODEL}" in line
+    assert "prompt=1200" in line and "cached=1000" in line and "output=40" in line
+    assert "thoughts=0" in line and "latency_ms=" in line
+    assert "Secret" not in line and "home" not in line

@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from tempo.ai.llm import build_gemini_client
+from tempo.ai.llm import build_gemini_client, log_usage
 from tempo.assistant.catalog import OpContext, run_operation, tool_definitions
 from tempo.config import LlmSettings
 
@@ -208,6 +208,8 @@ class GeminiChat:
         self._client = client
         self._model = model
         self._types = types
+        # Built once, in catalogue order: every request starts with the same instructions and
+        # tools, which Gemini's implicit context cache reuses (measured: most input tokens cached).
         self._tools = [
             types.Tool(
                 function_declarations=[
@@ -243,6 +245,7 @@ class GeminiChat:
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             http_options=types.HttpOptions(timeout=int(seconds * 1000)),
         )
+        started = time.monotonic()
         try:
             response = self._client.models.generate_content(
                 model=self._model, contents=conversation, config=config
@@ -257,6 +260,7 @@ class GeminiChat:
             raise LLMUnavailableError(f"erreur LLM {exc.code}") from exc
         except (httpx.HTTPError, OSError) as exc:
             raise LLMUnavailableError("LLM injoignable") from exc
+        log_usage("conversation", self._model, response, started)
         feedback = getattr(response, "prompt_feedback", None)
         if feedback is not None and feedback.block_reason:
             return ModelTurn([], refused=True)
@@ -321,6 +325,4 @@ def inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
 
 def build_assistant(settings: LlmSettings) -> Assistant | None:
     client = build_gemini_client(settings)
-    if client is None or settings.llm_model is None:
-        return None
-    return ToolLoopAssistant(GeminiChat(client, settings.llm_model))
+    return None if client is None else ToolLoopAssistant(GeminiChat(client, settings.llm_model))

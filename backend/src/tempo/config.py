@@ -16,12 +16,13 @@ DOCKER_SECRETS_DIR = Path("/run/secrets")
 
 class LlmSettings(BaseSettings):
     """Optional LLM, shared by the API (conversation) and the worker (coach e-mails): Gemini on
-    Google Cloud Vertex AI, billed by the Google Cloud project. Needs the project id, a model
-    and a service-account key file (Docker secret ``tempo_gcp_credentials``) with the Vertex AI
+    Google Cloud Vertex AI, billed by the Google Cloud project. Needs the project id and a
+    service-account key file (Docker secret ``tempo_gcp_credentials``) with the Vertex AI
     User role. Without complete settings, no LLM is used: Tempo works fully without one."""
 
-    llm_model: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9.-]{2,60}$")
-    """Gemini model identifier available in the project (Model Garden)."""
+    llm_model: str = Field(default="gemini-3.5-flash-lite", pattern=r"^[a-z0-9][a-z0-9.-]{2,60}$")
+    """Gemini model available in the project. Default chosen on real measurements (2026-11):
+    fastest of the working models, no billed thinking tokens, correct tool use."""
     vertex_project_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
     vertex_region: str = Field(default="global", pattern=r"^[a-z0-9-]{2,40}$")
     vertex_credentials_file: Path = DOCKER_SECRETS_DIR / "tempo_gcp_credentials"
