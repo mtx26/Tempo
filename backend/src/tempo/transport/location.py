@@ -2,16 +2,16 @@
 
 - Current position: ONLY the Home Assistant phone tracker, trusted when fresh and accurate
   (``assess_position``); used for immediate trips (journey search, departure monitoring).
-- Future trips: each day starts and ends at its base (``day_base``: planned location, else
-  home); between commitments the previous commitment's place is the origin (``travel``).
+- Future trips: an outing starts from the base at its start and returns to the base at its
+  end (``base_at``: planned location covering that instant, else home); between commitments
+  the previous commitment's place is the origin (``travel``).
 - An explicit origin given in the conversation is a known place.
 Ambiguity is reported, never guessed.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from zoneinfo import ZoneInfo
 
 from tempo.transport.places import Coordinates, Place
 
@@ -99,12 +99,15 @@ def planned_place(at: datetime, stays: list[DeclaredStay]) -> Place | None:
     return covering[0].place if covering else None
 
 
-def day_base(day: date, stays: list[DeclaredStay], home: Place, tz: ZoneInfo) -> Place | None:
-    """Where the user starts and ends ``day``: the planned location covering its noon, else
-    home. Two overlapping planned locations are ambiguous: None (Tempo asks, never guesses;
+def base_at(at: datetime, stays: list[DeclaredStay], home: Place) -> Place | None:
+    """Where the user is based at instant ``at``: the planned location covering it, else home.
+
+    Planned locations may change during a day ("I leave from dad's and go back to mum's after
+    class"): each trip starts from the base at its departure and returns to the base at its
+    arrival. Two overlapping planned locations are ambiguous: None (Tempo asks, never guesses;
     no automatic switching between homes)."""
     try:
-        planned = planned_place(datetime.combine(day, time(12), tzinfo=tz), stays)
+        planned = planned_place(at, stays)
     except AmbiguousLocationError:
         return None
     return planned or home

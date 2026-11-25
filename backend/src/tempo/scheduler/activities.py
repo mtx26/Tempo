@@ -2,13 +2,18 @@
 are fixed).
 
 A training keeps its prescribed duration and content; only its day/time moves, inside its window
-``[earliest_start, latest_end]`` and inside daily activity hours. Travel to and from its place is
-part of the reserved time (``travel_before`` / ``travel_after``), so a placed session never
-overlaps a commitment once travel is counted. Races and locked trainings are NOT placed here:
-the caller passes them as ``busy``.
+``[earliest_start, latest_end]``. Travel to and from its place is part of the reserved time
+(``travel_before`` / ``travel_after``), so a placed session never overlaps a commitment once
+travel is counted. Races, fixed and locked activities are NOT placed here: the caller passes
+them as ``busy``.
 
-Objective: place every session (missing one costs far more than anything else), then stay close
-to the previous placement (stability), then to the preferred start.
+Hard rules: window, category windows (explicit user rules), order and recovery of a coach week,
+no overlap. Soft preferences (``activity_hours``, the coach's suggested day, a soft target):
+penalised, never stronger than placing the session.
+
+Objective: place every session (missing one costs far more than anything else), then respect
+the activity hours, then the soft target, then stay close to the previous placement
+(stability), then to the preferred start.
 """
 
 import itertools
@@ -23,6 +28,10 @@ from tempo.scheduler.model import Interval, utc
 
 GRID_MINUTES = 15
 MISSING_PENALTY = 10_000_000
+OUTSIDE_HOURS_PENALTY = 100_000
+"""A session outside the preferred activity hours (soft): far below a missing session."""
+LATE_PENALTY_PER_MINUTE = 20
+"""Minutes of a session ending after its soft target (located task sessions)."""
 STABILITY_WEIGHT = 4
 DAY_PREFERENCE_PENALTY = 600
 """Per day away from the coach's suggested day (soft: about 10 h of start-time distance)."""
@@ -48,6 +57,8 @@ class FlexibleActivity:
     """Calendar days required after the previous session of the group (recovery)."""
     allowed: tuple[Interval, ...] | None = None
     """Category windows (B07): when set, the session must lie inside one of them (hard)."""
+    soft_target: datetime | None = None
+    """Should end by then (soft target of a task session): lateness is penalised."""
 
     def __post_init__(self) -> None:
         if self.duration <= timedelta(0):
@@ -73,6 +84,10 @@ class ActivityPlan:
     placed: list[PlacedActivity] = field(default_factory=list)
     unplaced: list[str] = field(default_factory=list)
     """Activity ids for which no slot exists in the window (reported, never forced)."""
+    outside_hours: list[str] = field(default_factory=list)
+    """Placed outside the preferred activity hours (soft preference not met: reported)."""
+    inconclusive: bool = False
+    """The solver found no answer in its time limit: nothing is concluded (not impossible)."""
     solver_status: str = ""
 
 
@@ -117,15 +132,23 @@ def plan_activities(
     horizon_end = max(utc(a.latest_end) for a in activities) + timedelta(days=1)
     model = cp_model.CpModel()
     intervals: list[cp_model.IntervalVar] = []
-    for index, commitment in enumerate(busy):
-        s, e = (
-            math.floor(_minutes(origin, commitment.start)),
-            math.ceil(_minutes(origin, commitment.end)),
-        )
-        if e > s:
-            intervals.append(model.new_fixed_size_interval_var(s, e - s, f"busy_{index}"))
+    # Busy time is merged first: fixed intervals that overlap each other (a commitment and the
+    # journey blocked around it, two conflicting commitments) must not make the model infeasible.
+    spans = sorted(
+        (math.floor(_minutes(origin, c.start)), math.ceil(_minutes(origin, c.end))) for c in busy
+    )
+    merged: list[list[int]] = []
+    for s, e in spans:
+        if e <= s:
+            continue
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    for index, (s, e) in enumerate(merged):
+        intervals.append(model.new_fixed_size_interval_var(s, e - s, f"busy_{index}"))
 
-    # Outside activity hours (session itself must be within [day_start, day_end] local time).
+    # Outside the preferred activity hours [day_start, day_end] local time (soft).
     day = (origin.astimezone(timezone)).date()
     night_spans: list[tuple[int, int]] = []
     while datetime.combine(day, time(0), tzinfo=timezone) < horizon_end:
@@ -145,6 +168,7 @@ def plan_activities(
 
     penalties: list[cp_model.LinearExprT] = []
     entries: list[tuple[FlexibleActivity, cp_model.IntVar, cp_model.IntVar]] = []
+    in_hours: dict[int, cp_model.IntVar] = {}
     days: dict[int, cp_model.IntVar] = {}
     session_ends: dict[int, cp_model.LinearExpr] = {}
     presents: dict[int, cp_model.IntVar] = {}
@@ -168,12 +192,24 @@ def plan_activities(
         )
         intervals.append(reserved)
         window_start, window_end = GRID_MINUTES * first, GRID_MINUTES * last + duration
+        respected = model.new_bool_var(f"in_hours_{index}")
+        model.add_implication(respected, present)
+        in_hours[index] = respected
+        daytime = model.new_optional_fixed_size_interval_var(
+            start, duration, respected, f"daytime_{index}"
+        )
         for night_index, (n_start, n_end) in enumerate(night_spans):
             if n_end > n_start and n_start < window_end and n_end > window_start:
                 night = model.new_fixed_size_interval_var(
                     n_start, n_end - n_start, f"night_{index}_{night_index}"
                 )
-                model.add_no_overlap([session, night])
+                model.add_no_overlap([daytime, night])
+        penalties.append(OUTSIDE_HOURS_PENALTY * (present - respected))
+        if item.soft_target is not None:
+            due = math.floor(_minutes(origin, item.soft_target))
+            late = model.new_int_var(0, max(0, window_end - due), f"late_{index}")
+            model.add(late >= start + duration - due).only_enforce_if(present)
+            penalties.append(LATE_PENALTY_PER_MINUTE * late)
         if item.allowed is not None:
             for gap_index, (g_start, g_end) in enumerate(
                 _forbidden(origin, item.allowed, window_start, window_end)
@@ -228,12 +264,16 @@ def plan_activities(
     status = solver.solve(model)
     result = ActivityPlan(solver_status=solver.status_name(status))
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        result.unplaced = [a.activity_id for a in activities]
+        # Every session is optional, so the model is always feasible: no answer means the time
+        # limit was hit. That is inconclusive, never a proof that nothing fits.
+        result.inconclusive = True
         return result
-    for item, present, slot in entries:
+    for index, (item, present, slot) in enumerate(entries):
         if not solver.boolean_value(present):
             result.unplaced.append(item.activity_id)
             continue
+        if not solver.boolean_value(in_hours[index]):
+            result.outside_hours.append(item.activity_id)
         begins = (origin + timedelta(minutes=GRID_MINUTES * solver.value(slot))).astimezone(
             timezone
         )

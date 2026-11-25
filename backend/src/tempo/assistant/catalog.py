@@ -62,7 +62,9 @@ from tempo.planning.service import (
     active_version,
     audit,
     get_setting,
+    lock_block,
     place_directory,
+    release_block,
     replan,
     set_setting,
 )
@@ -222,8 +224,13 @@ class ActivitiesIn(Strict):
     include_inactive: bool = False
 
 
+def _begins(row: ActivityRow) -> datetime | None:
+    """Start of an activity: imposed (fixed) or chosen by the plan (flexible)."""
+    return row.earliest_start_at if row.scheduling == "fixed" else row.planned_start_at
+
+
 def activity_out(row: ActivityRow) -> dict[str, Any]:
-    begins = row.earliest_start_at if row.scheduling == "fixed" else row.planned_start_at
+    begins = _begins(row)
     return {
         "id": str(row.id),
         "kind": row.kind,
@@ -468,6 +475,8 @@ def get_rules(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "category_windows": _category_windows(ctx.session),
         "planned_locations": get_setting(ctx.session, "stays", []) or [],
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
+        "activity_hours": get_setting(ctx.session, "activity_hours")
+        or {"start": "06:00", "end": "22:00"},
         "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
     }
 
@@ -775,7 +784,7 @@ def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
             )
         )
         for row in rows:
-            row.locked = body.locked
+            row.locked = body.locked and scheduling == "fixed"
         return {
             "series_id": str(series.id),
             "occurrences_created": len(rows),
@@ -830,8 +839,10 @@ def _activity(ctx: OpContext, activity_id: str) -> ActivityRow:
 
 def _apply_event_changes(ctx: OpContext, row: ActivityRow, body: EventUpdateIn) -> list[str]:
     changed: list[str] = []
-    if row.kind == "race" and (body.start or body.scheduling == "flexible"):
-        raise OpError("une compétition est fixe : son horaire vient de sa source")
+    if row.latest_end_at <= ctx.now:
+        raise OpError("activité terminée : plus modifiable (déclarez-la avec report_activity)")
+    if row.kind == "race" and body.scheduling == "flexible":
+        raise OpError("une compétition est toujours fixe")
     if body.title is not None:
         row.title = body.title
         changed.append("title")
@@ -847,14 +858,24 @@ def _apply_event_changes(ctx: OpContext, row: ActivityRow, body: EventUpdateIn) 
         if value is not None:
             setattr(row, name, value)
             changed.append(name)
-    if body.scheduling is not None and body.scheduling != row.scheduling:
-        row.scheduling = body.scheduling
-        changed.append("scheduling")
     if body.duration_minutes is not None:
         row.duration_minutes = body.duration_minutes
         changed.append("duration_minutes")
     duration = timedelta(minutes=row.duration_minutes or 0)
-    if body.start is not None:
+    if body.scheduling is not None and body.scheduling != row.scheduling:
+        if body.scheduling == "fixed":
+            # A fixed activity needs its imposed time: given now, or the one already planned.
+            chosen = body.start or row.planned_start_at
+            if chosen is None:
+                raise OpError("indiquez l'heure à laquelle l'activité devient fixe")
+            begin = _local(chosen, ctx.tz)
+            row.earliest_start_at, row.latest_end_at = begin, begin + duration
+            row.planned_start_at = None
+        elif body.window_start is None and body.window_end is None:
+            raise OpError("indiquez la fenêtre dans laquelle Tempo peut la placer")
+        row.scheduling = body.scheduling
+        changed.append("scheduling")
+    if body.start is not None and "scheduling" not in changed:
         begin = _local(body.start, ctx.tz)
         if row.scheduling == "fixed":
             row.earliest_start_at, row.latest_end_at = begin, begin + duration
@@ -971,6 +992,8 @@ class CancelEventIn(Strict):
 )
 def cancel_event(ctx: OpContext, body: CancelEventIn) -> dict[str, Any]:
     row = _activity(ctx, body.activity_id)
+    if row.status not in ("active", "to_confirm"):
+        raise OpError(f"activité déjà {row.status}")
     if row.series_id is None or body.scope == "occurrence":
         if row.series_id is not None:
             edit_occurrence(ctx.session, row, cancel=True)
@@ -1021,19 +1044,15 @@ def set_lock(ctx: OpContext, body: LockIn) -> dict[str, Any]:
         or ctx.session.get(StudyBlockRow, _uuid(body.target_id, "block")) is not None
     ):
         block_id = _uuid(body.target_id.removeprefix("block:"), "block")
-        block = ctx.session.get(StudyBlockRow, block_id)
+        block = ctx.session.get(StudyBlockRow, block_id, with_for_update=True)
         if block is None:
             raise OpError("séance introuvable")
-        if body.locked and not block.locked and block.state not in ("promoted", "done"):
-            # The user protects this block: a locked copy is never moved without approval.
-            ctx.session.add(
-                StudyBlockRow(
-                    task_id=block.task_id, start_at=block.start_at, end_at=block.end_at, locked=True
-                )
-            )
-            block.state = "promoted"
-        elif not body.locked and block.locked:
-            ctx.session.delete(block)
+        if block.state != "planned" or block.end_at <= ctx.now:
+            raise OpError(f"séance {block.state} ou passée : rien à verrouiller")
+        if body.locked:
+            lock_block(block)
+        else:
+            release_block(ctx.session, block)
         return {"block_id": str(block_id), "locked": body.locked}
     row = _activity(ctx, body.target_id)
     if body.locked and row.scheduling == "flexible" and row.planned_start_at is None:
@@ -1059,12 +1078,21 @@ class ReportIn(Strict):
 )
 def report_activity(ctx: OpContext, body: ReportIn) -> dict[str, Any]:
     row = _activity(ctx, body.activity_id)
+    if row.status not in ("active", "to_confirm"):
+        raise OpError(f"activité déjà {row.status} : pour corriger du travail, utilisez log_work")
+    begins = _begins(row)
+    if begins is None or begins > ctx.now:
+        raise OpError("activité pas encore commencée : rien à déclarer")
+    if row.task_id is not None and body.outcome == "partial" and body.actual_minutes is None:
+        raise OpError("travail partiel : combien de minutes ? (jamais deviné)")
     row.status = body.outcome
     if row.task_id is not None and body.outcome != "missed":
         task = ctx.session.get(StudyTaskRow, row.task_id)
-        minutes = body.actual_minutes or (row.duration_minutes if body.outcome == "done" else None)
+        minutes = body.actual_minutes or row.duration_minutes
         if task is not None and minutes:
-            record_work(ctx.session, task, minutes, now=ctx.now, key=f"activity:{row.id}")
+            record_work(
+                ctx.session, task, minutes, now=ctx.now, tz=ctx.tz, key=f"activity:{row.id}"
+            )
     return {"activity": activity_out(row)}
 
 
@@ -1146,7 +1174,7 @@ def create_task(ctx: OpContext, body: TaskIn) -> dict[str, Any]:
     )
     ctx.session.add(row)
     ctx.session.flush()
-    sync_task_session(ctx.session, row, ctx.now)
+    sync_task_session(ctx.session, row, ctx.now, ctx.tz)
     return {"task": task_out(row)}
 
 
@@ -1198,7 +1226,7 @@ def update_task(ctx: OpContext, body: TaskUpdateIn) -> dict[str, Any]:
     if body.place_id is not None:
         _place_exists(ctx, body.place_id or None)
         row.place_id = body.place_id or None
-    sync_task_session(ctx.session, row, ctx.now)
+    sync_task_session(ctx.session, row, ctx.now, ctx.tz)
     return {"task": task_out(row)}
 
 
@@ -1230,8 +1258,7 @@ def log_work(ctx: OpContext, body: WorkIn) -> dict[str, Any]:
                 raise OpError("séance introuvable")
             if block.state in ("done", "partial"):
                 raise OpError(f"séance déjà déclarée ({block.state})")
-            worked = complete_block(ctx.session, block, ctx.now, body.minutes)
-            block.locked = False
+            worked = complete_block(ctx.session, block, ctx.now, ctx.tz, body.minutes)
             task = ctx.session.get(StudyTaskRow, block.task_id)
             return {"logged_minutes": worked, "task": None if task is None else task_out(task)}
         if body.task_id is None or not body.minutes:
@@ -1239,7 +1266,7 @@ def log_work(ctx: OpContext, body: WorkIn) -> dict[str, Any]:
         task = _task(ctx, body.task_id)
         key = None if body.idempotency_key is None else f"user:{body.idempotency_key}"
         inserted = record_work(
-            ctx.session, task, body.minutes, now=ctx.now, key=key, note=body.note
+            ctx.session, task, body.minutes, now=ctx.now, tz=ctx.tz, key=key, note=body.note
         )
     except DomainError as exc:
         raise OpError(str(exc)) from exc
@@ -1258,7 +1285,9 @@ class PlaceIn(Strict):
     name: str = Field(min_length=1, max_length=200)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
-    aliases: list[str] = Field(default_factory=list, max_length=50)
+    aliases: list[str] | None = Field(
+        default=None, max_length=50, description="Full alias list; omitted = keep the current ones"
+    )
 
 
 @operation(
@@ -1274,6 +1303,8 @@ def upsert_place(ctx: OpContext, body: PlaceIn) -> dict[str, Any]:
     row.name, row.latitude, row.longitude = body.name, body.latitude, body.longitude
     ctx.session.add(row)
     ctx.session.flush()
+    if body.aliases is None:
+        return {"place_id": body.place_id}
     ctx.session.execute(delete(PlaceAliasRow).where(PlaceAliasRow.place_id == body.place_id))
     for alias in {" ".join(a.split()).casefold() for a in body.aliases if a.strip()}:
         existing = ctx.session.get(PlaceAliasRow, alias)
@@ -1287,15 +1318,76 @@ class PlaceIdIn(Strict):
     place_id: str
 
 
-@operation("delete_place", "Delete a known place.", PlaceIdIn, mutates=True, replan=True)
+@operation(
+    "delete_place",
+    "Delete a known place (and its aliases). Refused while something still uses it: the "
+    "answer lists what to change first; nothing is removed silently.",
+    PlaceIdIn,
+    mutates=True,
+    replan=True,
+)
 def delete_place(ctx: OpContext, body: PlaceIdIn) -> dict[str, Any]:
-    if get_setting(ctx.session, "home_place_id") == body.place_id:
-        raise OpError("ce lieu est le domicile configuré")
     row = ctx.session.get(PlaceRow, body.place_id)
     if row is None:
         raise OpError("lieu introuvable")
+    uses = place_uses(ctx.session, body.place_id, ctx.now, ctx.tz)
+    if uses:
+        raise OpError("lieu encore utilisé (" + " ; ".join(uses) + ") : modifiez-les d'abord")
     ctx.session.delete(row)
     return {"deleted": body.place_id}
+
+
+def place_uses(session: Session, place_id: str, now: datetime, tz: ZoneInfo) -> list[str]:
+    """What still refers to a place (deleting it would silently change or drop these)."""
+    uses: list[str] = []
+    if get_setting(session, "home_place_id") == place_id:
+        uses.append("domicile configuré")
+    titles = list(
+        session.scalars(
+            select(ActivityRow.title).where(
+                ActivityRow.place_id == place_id,
+                ActivityRow.status.in_(("active", "to_confirm")),
+                ActivityRow.latest_end_at > now,
+            )
+        )
+    )
+    if titles:
+        uses.append("activités : " + ", ".join(titles[:5]))
+    tasks = list(
+        session.scalars(
+            select(StudyTaskRow.subject).where(
+                StudyTaskRow.place_id == place_id, StudyTaskRow.archived.is_(False)
+            )
+        )
+    )
+    if tasks:
+        uses.append("tâches : " + ", ".join(tasks[:5]))
+    windows = list(
+        session.scalars(select(AvailabilityRow.id).where(AvailabilityRow.place_id == place_id))
+    )
+    if windows:
+        uses.append(f"{len(windows)} disponibilité(s) hebdomadaire(s)")
+    exceptions = list(
+        session.scalars(
+            select(AvailabilityExceptionRow.id).where(
+                AvailabilityExceptionRow.place_id == place_id,
+                AvailabilityExceptionRow.day >= now.astimezone(tz).date(),
+            )
+        )
+    )
+    if exceptions:
+        uses.append(f"{len(exceptions)} exception(s) de disponibilité")
+    if any(
+        s["place_id"] == place_id and datetime.fromisoformat(s["end"]) > now
+        for s in get_setting(session, "stays", []) or []
+    ):
+        uses.append("lieux prévus")
+    return uses
+
+
+class ActivityHoursIn(Strict):
+    start: str = Field(pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(pattern=r"^\d{2}:\d{2}$")
 
 
 class SettingsChangeIn(Strict):
@@ -1311,7 +1403,12 @@ class SettingsChangeIn(Strict):
     study_preferences: dict[str, int] | None = Field(
         default=None,
         description="preferred_block_minutes, min_block_minutes, max_block_minutes, "
-        "min_gap_same_subject_minutes, max_daily_study_minutes, max_blocks_per_subject_per_day",
+        "min_gap_same_subject_minutes, max_daily_study_minutes, max_blocks_per_subject_per_day "
+        "(all soft except the min/max block length)",
+    )
+    activity_hours: ActivityHoursIn | None = Field(
+        default=None,
+        description="Preferred hours of flexible activities (soft; default 06:00-22:00)",
     )
 
 
@@ -1319,7 +1416,7 @@ class SettingsChangeIn(Strict):
     "update_settings",
     "Permanent preferences: home place, phone tracker, planning horizon, safety margin before "
     "appointments, departure reminders (minutes before leaving, several allowed), study "
-    "preferences (90-minute blocks...).",
+    "preferences (90-minute blocks...), preferred hours of flexible activities.",
     SettingsChangeIn,
     mutates=True,
     replan=True,
@@ -1330,6 +1427,14 @@ def update_settings(ctx: OpContext, body: SettingsChangeIn) -> dict[str, Any]:
         values["reminder_minutes"] = values.pop("departure_reminder_minutes")
     if "home_place_id" in values:
         _place_exists(ctx, values["home_place_id"])
+    if "activity_hours" in values:
+        hours = values["activity_hours"]
+        try:
+            opens, closes = time.fromisoformat(hours["start"]), time.fromisoformat(hours["end"])
+        except ValueError as exc:
+            raise OpError(f"heures d'activité invalides : {exc}") from exc
+        if closes <= opens:
+            raise OpError("heures d'activité : la fin doit suivre le début")
     if "study_preferences" in values:
         current = get_setting(ctx.session, "study_preferences", {}) or {}
         values["study_preferences"] = {**current, **values["study_preferences"]}
@@ -1532,7 +1637,7 @@ def set_planned_location(ctx: OpContext, body: LocationIntentIn) -> dict[str, An
         )
     ]
     stays.append({"place_id": body.place_id, "start": start.isoformat(), "end": end.isoformat()})
-    set_setting(ctx.session, "stays", stays[-50:])
+    set_setting(ctx.session, "stays", stays)
     return {"planned_locations": stays}
 
 
@@ -1780,16 +1885,20 @@ def propose_alternatives(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         alternatives: list[dict[str, Any]] = []
         missing = int(unplanned.get(task_id, 0))
         remaining = remaining_minutes(row) or 0
-        if missing and remaining > missing:
-            alternatives.append(
-                {
-                    "kind": "reduce_volume",
-                    "plannable_minutes": remaining - missing,
-                    "resolves": True,
-                    "detail": "ne garder que le volume qui tient dans l'horizon actuel",
-                }
-            )
         try:
+            if missing and remaining > missing and row.effort_minutes is not None:
+                keep = row.effort_minutes - missing
+
+                def reduce(task: StudyTaskRow, effort: int = keep) -> None:
+                    task.effort_minutes = effort
+
+                alternatives.append(
+                    {
+                        "kind": "reduce_volume",
+                        "new_estimated_minutes": keep,
+                        **_simulate(ctx, reduce, task_id),
+                    }
+                )
             if row.target_date is not None:
                 original = row.target_date
                 for days in POSTPONE_STEPS_DAYS:
@@ -2063,6 +2172,31 @@ def tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+AUDIT_KEYS = (
+    ("activity", "id"),
+    ("task", "id"),
+    ("reminder", "id"),
+    ("proposal", "id"),
+    ("series_id", None),
+    ("block_id", None),
+    ("place_id", None),
+    ("exception_id", None),
+    ("deleted", None),
+    ("acknowledged", None),
+)
+
+
+def _audit_target(result: dict[str, Any]) -> tuple[str, str]:
+    """Which entity a mutation touched, read from its typed result (for get_history)."""
+    for key, field_name in AUDIT_KEYS:
+        value = result.get(key)
+        if isinstance(value, dict) and field_name is not None and value.get(field_name):
+            return key, str(value[field_name])
+        if isinstance(value, str) and field_name is None:
+            return key.removesuffix("_id"), value
+    return "operation", "-"
+
+
 def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate and run one operation inside a savepoint: a failure leaves nothing behind.
 
@@ -2092,7 +2226,8 @@ def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[
         savepoint.commit()
     if op.mutates:
         ctx.changed.append(name)
-        audit(ctx.session, ctx.actor, f"op:{name}", "operation", "-", fields=sorted(arguments))
+        entity, entity_id = _audit_target(result)
+        audit(ctx.session, ctx.actor, f"op:{name}", entity, entity_id, fields=sorted(arguments))
         if op.replan:
             set_setting(ctx.session, "replan_requested", ctx.now.isoformat())
     return {"ok": True, "result": result}

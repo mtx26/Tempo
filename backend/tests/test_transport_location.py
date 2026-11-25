@@ -14,7 +14,7 @@ from tempo.transport.location import (
     PhonePosition,
     PositionStatus,
     assess_position,
-    day_base,
+    base_at,
 )
 from tempo.transport.places import Coordinates, Place, PlaceDirectory
 
@@ -87,30 +87,26 @@ def test_position_from_the_future_is_not_trusted() -> None:
     assert assess_position(position(age_minutes=-10), NOW) is PositionStatus.STALE
 
 
-# --- day base -----------------------------------------------------------------------------
+# --- base at an instant ---------------------------------------------------------------------
 
 
-def test_day_base_is_the_planned_location_covering_noon_else_home() -> None:
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo("Europe/Brussels")
-    day = datetime(2026, 12, 3).date()
+def test_base_is_the_planned_location_covering_the_instant_else_home() -> None:
     weekend = DeclaredStay(
         POOL, datetime(2026, 12, 2, 18, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)
     )
-    assert day_base(day, [weekend], HOME, tz) == POOL
-    assert day_base(day, [], HOME, tz) == HOME
+    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), [weekend], HOME) == POOL
+    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), [], HOME) == HOME
+    # The base changes during a day: home in the morning, the pool from the evening on.
     evening = DeclaredStay(
         POOL, datetime(2026, 12, 3, 18, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)
     )
-    assert day_base(day, [evening], HOME, tz) == HOME  # not covering the day
+    assert base_at(datetime(2026, 12, 3, 8, tzinfo=UTC), [evening], HOME) == HOME
+    assert base_at(datetime(2026, 12, 3, 19, tzinfo=UTC), [evening], HOME) == POOL
 
 
 def test_overlapping_planned_locations_are_ambiguous_not_guessed() -> None:
-    from zoneinfo import ZoneInfo
-
     stays = [
         DeclaredStay(HOME, datetime(2026, 12, 2, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)),
         DeclaredStay(POOL, datetime(2026, 12, 3, 6, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)),
     ]
-    assert day_base(datetime(2026, 12, 3).date(), stays, HOME, ZoneInfo("Europe/Brussels")) is None
+    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), stays, HOME) is None

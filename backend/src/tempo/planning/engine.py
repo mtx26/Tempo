@@ -1,26 +1,33 @@
-"""Deterministic planning pipeline: fixed events -> trainings -> travel -> study.
+"""Deterministic planning pipeline: fixed events -> flexible activities -> travel -> study.
 
 Pure function over plain inputs (no database, no clock), so it can be tested exhaustively and
 re-run by the worker. Rules (ARCHITECTURE.md §7-8):
 
-1. University events, races and locked trainings are fixed. An event whose location text is
-   not a known place/alias still blocks its time but gets no travel: reported, never guessed.
-2. Flexible trainings move inside their window (``scheduler.activities``) around fixed events;
-   travel home <-> training place is reserved around them. When no journey is known the
-   reservation is conservative (``UNROUTED_TRAINING_TRAVEL``) and reported.
-3. Each local day starts and ends at the day's base place: a declared stay covering local noon,
-   otherwise home. There is no automatic switching between family homes.
+1. University events, races, fixed, locked and under-way activities are fixed. An event whose
+   location text is not a known place/alias still blocks its time but gets no travel:
+   reported, never guessed.
+2. Journeys between fixed commitments are routed first, so flexible activities are placed
+   around commitments AND the travel they require (``scheduler.activities``). The travel of a
+   flexible activity is reserved around it from a real journey estimate; when none is known
+   nothing is invented: no reservation, and the problem is reported.
+3. An outing starts from the base at its start and returns to the base at its end
+   (``location.base_at``: planned location covering the instant, else home): the base may
+   change during a day. There is no automatic switching between family homes.
 4. Mandatory travel between located commitments is routed (``transport.travel``); impossible
    or unknown journeys block the gap and are reported. A day is split into outings: the user
    goes back to the base between two commitments only when at least ``MIN_TIME_AT_BASE``
    remains there after both real journeys; otherwise the journey goes directly.
 5. Study availability windows (with their place) are reduced by travel to/from commitments.
-6. CP-SAT places study; the independent validator must accept the plan, otherwise nothing is
-   proposed (``status = invalid``).
+6. CP-SAT places study; the independent validator checks the WHOLE plan (study and every
+   other item); with violations nothing is published (``status = invalid``).
+
+Status: ``complete`` only when all work, every activity and every journey is placed;
+``partial`` when something is left (reported); ``no_solution`` when a solver gave no answer in
+its time limit (inconclusive, the previous plan stays); ``invalid`` on violations.
 """
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,9 +44,9 @@ from tempo.scheduler.model import (
     utc,
 )
 from tempo.scheduler.solver import solve
-from tempo.scheduler.validate import validate_plan
+from tempo.scheduler.validate import Occupied, PlacedSession, validate_plan, validate_schedule
 from tempo.transport.itinerary import CachedRouting, Objective, TripQuery, find_trips
-from tempo.transport.location import DeclaredStay, LocatedEvent, day_base
+from tempo.transport.location import DeclaredStay, LocatedEvent, base_at
 from tempo.transport.places import Place
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
 from tempo.transport.travel import (
@@ -47,13 +54,15 @@ from tempo.transport.travel import (
     MAX_TRAVEL,
     StudyWindow,
     TravelBlock,
+    TravelStatus,
     plan_day_travel,
     travel_aware_study_windows,
 )
 
-UNROUTED_TRAINING_TRAVEL = timedelta(minutes=90)
 MIN_TIME_AT_BASE = timedelta(hours=1)
-"""Between two commitments further apart than this, the user goes back to the day's base."""
+"""Between two commitments further apart than this, the user goes back to the base."""
+DEFAULT_ACTIVITY_HOURS = (time(6, 0), time(22, 0))
+"""Preferred hours of flexible activities (soft; setting ``activity_hours``)."""
 
 
 class CommitmentKind(StrEnum):
@@ -65,7 +74,7 @@ class CommitmentKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Commitment:
-    """A fixed commitment (iCal class, race, locked training...)."""
+    """A fixed commitment (iCal class, race, fixed or locked activity, activity under way)."""
 
     ref: str
     title: str
@@ -74,10 +83,16 @@ class Commitment:
     kind: CommitmentKind
     place: Place | None = None
     location_text: str | None = None
+    movable: bool = False
+    """A LOCKED flexible activity: it may move again, but only after the user's approval."""
+    underway: bool = False
+    """Already started: never moved, never the subject of a conflict proposal."""
 
 
 @dataclass(frozen=True, slots=True)
 class TrainingRequest:
+    """A flexible activity to place (training, personal outing, located task session)."""
+
     activity_id: str
     title: str
     duration: timedelta
@@ -92,6 +107,11 @@ class TrainingRequest:
     min_days_after_previous: int = 0
     allowed: tuple[Interval, ...] | None = None
     """Category windows (B07): the session must lie inside one of them."""
+    task_id: str | None = None
+    """Located / non-splittable task this session belongs to."""
+    target: datetime | None = None
+    """Task target (end of the target day); strict when ``strict``."""
+    strict: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +130,9 @@ class PlanningInput:
     preferences: Preferences = field(default_factory=Preferences)
     buffer: timedelta = DEFAULT_BUFFER
     solver_seconds: float = 10.0
+    activity_hours: tuple[time, time] = DEFAULT_ACTIVITY_HOURS
+    expired_strict_tasks: dict[str, int] = field(default_factory=dict)
+    """Task sessions whose strict deadline already passed with work left: task -> minutes."""
 
 
 class OutcomeStatus(StrEnum):
@@ -117,7 +140,7 @@ class OutcomeStatus(StrEnum):
     PARTIAL = "partial"
     NO_SOLUTION = "no_solution"
     INVALID = "invalid"
-    """The validator rejected the solver's plan: nothing may be proposed."""
+    """The validator rejected the plan: nothing may be published."""
 
 
 @dataclass(slots=True)
@@ -132,6 +155,12 @@ class PlanningOutcome:
     violations: list[str] = field(default_factory=list)
     deadline_capacity: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Per missed strict deadline: work needed vs free study time before it (B12 diagnosis)."""
+    unplanned_minutes: dict[str, int] = field(default_factory=dict)
+    """Every task (study blocks and task sessions) -> minutes left unplanned."""
+    late_minutes: dict[str, int] = field(default_factory=dict)
+    hard_deadline_misses: list[str] = field(default_factory=list)
+    outside_hours: list[str] = field(default_factory=list)
+    """Activities placed outside the preferred activity hours (soft preference not met)."""
 
 
 def free_minutes(availability: list[Interval], busy: list[Interval], until: datetime) -> int:
@@ -160,13 +189,14 @@ def free_minutes(availability: list[Interval], busy: list[Interval], until: date
 def _activity_travel(
     request: TrainingRequest, base: Place | None, routing: RoutingProvider, issues: list[str]
 ) -> tuple[timedelta, timedelta]:
-    """Travel time to reserve around a flexible activity before it is placed (estimate around
-    its preferred time; the actual journeys are chosen once it is placed)."""
+    """Travel time to reserve around a flexible activity before it is placed: real journeys
+    around its preferred time. Unknown: nothing is invented (zero, reported); the journeys
+    actually needed are routed once it is placed and block their gap when they fail."""
     if request.place is None or request.place == base:
         return timedelta(0), timedelta(0)
     if base is None:
-        issues.append(f"activity '{request.title}': travel origin unknown; travel reserved")
-        return UNROUTED_TRAINING_TRAVEL, UNROUTED_TRAINING_TRAVEL
+        issues.append(f"activity '{request.title}': travel origin unknown; travel not reserved")
+        return timedelta(0), timedelta(0)
     anchor = request.preferred_start or request.earliest_start
     try:
         there = find_trips(
@@ -185,15 +215,18 @@ def _activity_travel(
             ),
         ).best
     except RoutingUnavailableError as exc:
-        issues.append(f"activity '{request.title}': routing unavailable ({exc}); travel reserved")
-        return UNROUTED_TRAINING_TRAVEL, UNROUTED_TRAINING_TRAVEL
+        issues.append(
+            f"activity '{request.title}': routing unavailable ({exc}); travel not reserved"
+        )
+        return timedelta(0), timedelta(0)
     if there is None or back is None:
         issues.append(
-            f"activity '{request.title}': no journey to/from {request.place.name}; travel reserved"
+            f"activity '{request.title}': no journey to/from {request.place.name}; "
+            "travel not reserved"
         )
     return (
-        UNROUTED_TRAINING_TRAVEL if there is None else there.duration,
-        UNROUTED_TRAINING_TRAVEL if back is None else back.duration,
+        timedelta(0) if there is None else there.duration,
+        timedelta(0) if back is None else back.duration,
     )
 
 
@@ -241,17 +274,60 @@ def _worth_going_back(
     )
 
 
-def _outings(
-    events: list[LocatedEvent], base: Place | None, routing: RoutingProvider, buffer: timedelta
-) -> list[list[LocatedEvent]]:
-    ordered = sorted(events, key=lambda e: utc(e.start))
-    outings: list[list[LocatedEvent]] = [[ordered[0]]]
-    for event in ordered[1:]:
-        if _worth_going_back(outings[-1][-1], event, base, routing, buffer):
-            outings.append([event])
-        else:
-            outings[-1].append(event)
-    return outings
+def _route_days(
+    located: list[LocatedEvent],
+    data: PlanningInput,
+    routing: RoutingProvider,
+    issues: list[str],
+    warnings: list[str],
+) -> list[TravelBlock]:
+    """Mandatory journeys of every local day: outings from and back to the base in force."""
+    tz, now = data.timezone, utc(data.now)
+
+    def base(at: datetime) -> Place | None:
+        return base_at(at, data.stays, data.home)
+
+    travel: list[TravelBlock] = []
+    days: dict[date, list[LocatedEvent]] = {}
+    for event in located:
+        days.setdefault(event.start.astimezone(tz).date(), []).append(event)
+    for events in (days[d] for d in sorted(days)):
+        ordered = sorted(events, key=lambda e: utc(e.start))
+        outings: list[list[LocatedEvent]] = [[ordered[0]]]
+        for event in ordered[1:]:
+            previous = outings[-1][-1]
+            if _worth_going_back(previous, event, base(previous.end), routing, data.buffer):
+                outings.append([event])
+            else:
+                outings[-1].append(event)
+        for index, outing in enumerate(outings):
+            first, last = outing[0], max(outing, key=lambda e: utc(e.end))
+            start_base, end_base = base(first.start), base(last.end)
+            for when, where in ((first.start, start_base), (last.end, end_base)):
+                if where is None:
+                    issues.append(
+                        f"planned locations overlap at {when.isoformat(timespec='minutes')}: "
+                        "travel origin unknown (say where you will be)"
+                    )
+            # Already under way: the departure check (worker) handles the current trip.
+            start_place = None if utc(first.start) <= now else start_base
+            following = outings[index + 1] if index + 1 < len(outings) else None
+            plan = plan_day_travel(
+                outing,
+                routing,
+                buffer=data.buffer,
+                start_place=start_place,
+                end_place=end_base,
+                return_by=None if following is None else min(e.start for e in following),
+            )
+            travel += plan.blocks
+            issues += [i for i in plan.issues if not i.startswith("origin unknown")]
+            warnings += [w for w in plan.warnings if w not in warnings]
+    return travel
+
+
+def _busy(blocks: list[TravelBlock]) -> list[Interval]:
+    return [Interval(b.start, b.end) for b in blocks if utc(b.end) > utc(b.start)]
 
 
 def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutcome:
@@ -269,24 +345,29 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 "(time blocked, travel not planned)"
             )
     fixed_busy = [Interval(c.start, c.end) for c in fixed]
+    fixed_located = [LocatedEvent(c.start, c.end, c.place) for c in fixed if c.place is not None]
+    # Journeys between fixed commitments first: flexible activities are placed around them.
+    fixed_travel = _route_days(fixed_located, data, routing, [], [])
 
-    def base_of(day: date) -> Place | None:
-        return day_base(day, data.stays, data.home, tz)
-
-    # 2. flexible activities (trainings, personal, located task sessions)
+    # Flexible activities (trainings, personal outings, located task sessions)
     flexible: list[FlexibleActivity] = []
     by_id = {t.activity_id: t for t in data.trainings}
     for request in data.trainings:
         if utc(request.latest_end) <= now:
             continue
-        base = base_of(request.earliest_start.astimezone(tz).date())
-        before, after = _activity_travel(request, base, routing, issues)
+        anchor = request.preferred_start or max(request.earliest_start, data.now, key=utc)
+        before, after = _activity_travel(
+            request, base_at(anchor, data.stays, data.home), routing, issues
+        )
+        earliest = max(request.earliest_start, data.now, key=utc) + before
+        if utc(earliest) >= utc(request.latest_end):
+            earliest = max(request.earliest_start, data.now, key=utc)
         flexible.append(
             FlexibleActivity(
                 activity_id=request.activity_id,
                 title=request.title,
                 duration=request.duration,
-                earliest_start=max(request.earliest_start, data.now, key=utc) + before,
+                earliest_start=earliest,
                 latest_end=request.latest_end,
                 preferred_start=request.preferred_start,
                 previous_start=request.previous_start,
@@ -297,74 +378,46 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 sequence_index=request.sequence_index,
                 min_days_after_previous=request.min_days_after_previous,
                 allowed=request.allowed,
+                soft_target=None if request.strict else request.target,
             )
         )
-    activity_plan = plan_activities(flexible, fixed_busy, tz)
+    day_start, day_end = data.activity_hours
+    activity_plan = plan_activities(
+        flexible,
+        fixed_busy + _busy(fixed_travel),
+        tz,
+        day_start=day_start,
+        day_end=day_end,
+    )
+    if activity_plan.inconclusive:
+        issues.append(
+            f"flexible activities: no answer from the solver ({activity_plan.solver_status}): "
+            "inconclusive, not a proof of impossibility; the previous plan is kept"
+        )
+        return PlanningOutcome(OutcomeStatus.NO_SOLUTION, None, issues=issues)
     for missing in activity_plan.unplaced:
         rule = " and its category windows" if by_id[missing].allowed is not None else ""
         issues.append(f"activity '{by_id[missing].title}': no free slot in its window{rule}")
-    # Independent check of the hard category windows (never trust the solver alone).
-    category_violations = [
-        f"activity '{by_id[p.activity_id].title}' placed outside its category windows"
-        for p in activity_plan.placed
-        if (allowed := by_id[p.activity_id].allowed) is not None
-        and not any(utc(w.start) <= utc(p.start) and utc(p.end) <= utc(w.end) for w in allowed)
-    ]
+    for outside in activity_plan.outside_hours:
+        warnings.append(f"activity '{by_id[outside].title}' placed outside the activity hours")
 
-    # 3-4. day-by-day mandatory travel
-    located: list[LocatedEvent] = [
-        LocatedEvent(c.start, c.end, c.place) for c in fixed if c.place is not None
-    ]
-    located += [
+    # Day-by-day mandatory travel (fixed commitments + placed activities)
+    located = fixed_located + [
         LocatedEvent(p.start, p.end, place)
         for p in activity_plan.placed
         if (place := by_id[p.activity_id].place) is not None
     ]
-    travel: list[TravelBlock] = []
-    days: dict[date, list[LocatedEvent]] = {}
-    for event in located:
-        days.setdefault(event.start.astimezone(tz).date(), []).append(event)
-    for day, events in sorted(days.items()):
-        base = base_of(day)
-        if base is None:
-            issues.append(
-                f"planned locations overlap on {day.isoformat()}: travel origin unknown "
-                "(say where you will be)"
-            )
-        outings = _outings(events, base, routing, data.buffer)
-        for index, outing in enumerate(outings):
-            first_start = min(utc(e.start) for e in outing)
-            # Already under way: the departure check (worker) handles the current trip.
-            start_place: Place | None = None if first_start <= now else base
-            # The way back must be home before the next outing of the day starts.
-            following = outings[index + 1] if index + 1 < len(outings) else None
-            plan = plan_day_travel(
-                outing,
-                routing,
-                buffer=data.buffer,
-                start_place=start_place,
-                end_place=base,
-                return_by=None if following is None else min(e.start for e in following),
-            )
-            travel += plan.blocks
-            issues += [i for i in plan.issues if not i.startswith("origin unknown")]
-            warnings += plan.warnings
+    travel = _route_days(located, data, routing, issues, warnings)
 
-    # 5. study windows reduced by travel
+    # Study windows reduced by travel
     windows = travel_aware_study_windows(data.availability, located, routing, buffer=data.buffer)
     issues += windows.issues
-    availability = [w for w in windows.windows if utc(w.end) > now]
     availability = [
         Interval(max(w.start, data.now, key=utc), w.end)
-        for w in availability
+        for w in windows.windows
         if utc(w.end) > now and utc(max(w.start, data.now, key=utc)) < utc(w.end)
     ]
-
-    busy = (
-        fixed_busy
-        + [b.reserved for b in activity_plan.placed]
-        + [Interval(b.start, b.end) for b in travel if utc(b.end) > utc(b.start)]
-    )
+    busy = fixed_busy + [b.reserved for b in activity_plan.placed] + _busy(travel)
     problem = PlanningProblem(
         horizon=horizon,
         timezone=tz,
@@ -384,28 +437,92 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         travel=travel,
         issues=issues,
         warnings=warnings,
+        unplanned_minutes=dict(result.unplanned_minutes),
+        late_minutes=dict(result.late_minutes),
+        hard_deadline_misses=list(result.hard_deadline_misses),
+        outside_hours=activity_plan.outside_hours,
     )
-    if result.hard_deadline_misses:
-        by_task = {d.task_id: d for d in data.demands}
-        for task_id in result.hard_deadline_misses:
-            demand = by_task.get(task_id)
-            if demand is None:
-                continue
-            outcome.deadline_capacity[task_id] = {
-                "deadline": (demand.target - timedelta(minutes=1))
-                .astimezone(tz)
-                .date()
-                .isoformat(),
-                "deadline_end": demand.target.isoformat(),
-                "needed_minutes": demand.remaining_minutes,
-                "free_minutes_before_deadline": free_minutes(
-                    problem.availability, problem.busy, demand.target
-                ),
-            }
-    if category_violations:
-        outcome.status, outcome.violations = OutcomeStatus.INVALID, category_violations
-    elif result.status is not PlanStatus.NO_SOLUTION:
-        violations = validate_plan(problem, result)
-        if violations:
-            outcome.status, outcome.violations = OutcomeStatus.INVALID, violations
+    if result.status is PlanStatus.NO_SOLUTION:
+        issues.append(
+            f"study: no answer within the solver time limit ({result.solver_status}): "
+            "inconclusive, the previous plan is kept"
+        )
+        return outcome
+    _task_sessions(data, activity_plan, outcome)
+    _deadline_capacity(data, problem, outcome)
+
+    placed = {p.activity_id: p for p in activity_plan.placed}
+    sessions = [
+        PlacedSession(
+            ref=f"activity:{p.activity_id}",
+            title=by_id[p.activity_id].title,
+            start=p.start,
+            end=p.end,
+            earliest_start=by_id[p.activity_id].earliest_start,
+            latest_end=by_id[p.activity_id].latest_end,
+            allowed=by_id[p.activity_id].allowed,
+            strict_target=by_id[p.activity_id].target if by_id[p.activity_id].strict else None,
+            sequence_group=by_id[p.activity_id].sequence_group,
+            sequence_index=by_id[p.activity_id].sequence_index,
+            min_days_after_previous=by_id[p.activity_id].min_days_after_previous,
+        )
+        for p in placed.values()
+    ]
+    occupied = [Occupied(c.title, Interval(c.start, c.end)) for c in fixed]
+    routed = [
+        Occupied(f"{b.origin.name} -> {b.destination.name}", Interval(b.start, b.end))
+        for b in travel
+        if b.status is TravelStatus.ROUTED and utc(b.end) > utc(b.start)
+    ]
+    violations = validate_plan(problem, result) + validate_schedule(sessions, occupied, routed, tz)
+    if violations:
+        outcome.status, outcome.violations = OutcomeStatus.INVALID, violations
+    elif (
+        outcome.unplanned_minutes
+        or outcome.hard_deadline_misses
+        or activity_plan.unplaced
+        or any(b.status is TravelStatus.IMPOSSIBLE for b in travel)
+    ):
+        outcome.status = OutcomeStatus.PARTIAL
     return outcome
+
+
+def _task_sessions(data: PlanningInput, activity_plan: Any, outcome: PlanningOutcome) -> None:
+    """Results of located / non-splittable task sessions, reported like study tasks."""
+    placed = {p.activity_id: p for p in activity_plan.placed}
+    for request in data.trainings:
+        if request.task_id is None or utc(request.latest_end) <= utc(data.now):
+            continue
+        minutes = int(request.duration.total_seconds() // 60)
+        spot = placed.get(request.activity_id)
+        if spot is None:
+            outcome.unplanned_minutes[request.task_id] = minutes
+            if request.strict:
+                outcome.hard_deadline_misses.append(request.task_id)
+        elif request.target is not None and utc(spot.end) > utc(request.target):
+            outcome.late_minutes[request.task_id] = minutes
+    for task_id, minutes in data.expired_strict_tasks.items():
+        outcome.unplanned_minutes[task_id] = minutes
+        outcome.hard_deadline_misses.append(task_id)
+        outcome.issues.append(f"task {task_id}: strict deadline already passed with work left")
+
+
+def _deadline_capacity(
+    data: PlanningInput, problem: PlanningProblem, outcome: PlanningOutcome
+) -> None:
+    by_task = {d.task_id: d for d in data.demands}
+    for task_id in outcome.hard_deadline_misses:
+        demand = by_task.get(task_id)
+        if demand is None:
+            continue
+        outcome.deadline_capacity[task_id] = {
+            "deadline": (demand.target - timedelta(minutes=1))
+            .astimezone(data.timezone)
+            .date()
+            .isoformat(),
+            "deadline_end": demand.target.isoformat(),
+            "needed_minutes": demand.remaining_minutes,
+            "free_minutes_before_deadline": free_minutes(
+                problem.availability, problem.busy, demand.target
+            ),
+        }

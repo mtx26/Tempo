@@ -12,7 +12,13 @@ from sqlalchemy.orm import Session
 from tempo.ai.apply import apply_result, result_from_json
 from tempo.db.models import ActivityRow, ProposalRow, StudyBlockRow
 from tempo.domain.ops import DomainError
-from tempo.planning.service import audit, notify, proposal_revision, set_setting
+from tempo.planning.service import (
+    audit,
+    notify,
+    proposal_revision,
+    release_block,
+    set_setting,
+)
 
 
 def proposal_out(row: ProposalRow) -> dict[str, Any]:
@@ -29,7 +35,7 @@ def proposal_out(row: ProposalRow) -> dict[str, Any]:
 def _apply_unlock(session: Session, row: ProposalRow) -> None:
     block = session.get(StudyBlockRow, uuid.UUID(row.details["block_id"]))
     if block is not None and block.locked:
-        session.delete(block)
+        release_block(session, block)
 
 
 def _apply_unlock_activity(session: Session, row: ProposalRow) -> None:

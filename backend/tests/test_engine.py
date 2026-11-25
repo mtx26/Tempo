@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
 from tempo.planning.engine import (
-    UNROUTED_TRAINING_TRAVEL,
     Commitment,
     CommitmentKind,
     OutcomeStatus,
@@ -115,7 +114,60 @@ def test_routing_outage_blocks_gaps_and_reports_instead_of_inventing() -> None:
     assert any("routing unavailable" in i for i in outcome.issues)
     assert {b.status for b in outcome.travel} == {TravelStatus.UNKNOWN}
     training = outcome.trainings[0]
-    assert training.reserved.start == training.start - UNROUTED_TRAINING_TRAVEL
+    # No invented travel duration: nothing is reserved around the session, it is reported.
+    assert training.reserved == Interval(training.start, training.end)
+    assert any("travel not reserved" in i for i in outcome.issues)
+
+
+def test_base_may_change_during_a_day() -> None:
+    """D03: leave from dad's in the morning, go back to mum's after class."""
+    dad = Place("dad", "Papa", Coordinates(50.50, 4.50))
+    stays = [DeclaredStay(dad, at(8, 0), at(8, 11)), DeclaredStay(MUM, at(8, 11), at(9, 0))]
+    only_tuesday = [
+        Commitment("class-8", "Analyse", at(8, 10), at(8, 12), CommitmentKind.CLASS, CAMPUS)
+    ]
+    outcome = run_planning(week(commitments=only_tuesday, trainings=[], stays=stays), FakeRouting())
+    outbound = [b for b in outcome.travel if b.destination == CAMPUS]
+    back = [b for b in outcome.travel if b.origin == CAMPUS]
+    assert outbound and outbound[0].origin == dad
+    assert back and back[0].destination == MUM
+
+
+def test_unplaced_activity_makes_the_plan_partial() -> None:
+    impossible = TrainingRequest(
+        "t9", "Sortie", timedelta(hours=3), at(10, 10), at(10, 12), place=None
+    )
+    outcome = run_planning(week(trainings=[impossible]), FakeRouting())
+    assert outcome.unplaced_trainings == ["t9"]
+    assert outcome.status is OutcomeStatus.PARTIAL
+
+
+def test_strict_task_session_that_does_not_fit_is_a_hard_miss() -> None:
+    request = TrainingRequest(
+        "s1",
+        "Dossier",
+        timedelta(hours=20),
+        at(7, 6),
+        at(8, 0),
+        place=CAMPUS,
+        task_id="dossier",
+        target=at(8, 0),
+        strict=True,
+    )
+    outcome = run_planning(week(trainings=[request]), FakeRouting())
+    assert "dossier" in outcome.hard_deadline_misses
+    assert outcome.unplanned_minutes["dossier"] == 20 * 60
+    assert outcome.status is OutcomeStatus.PARTIAL
+
+
+def test_overlapping_activity_is_rejected_by_the_independent_validator() -> None:
+    from tempo.scheduler.validate import Occupied, PlacedSession, validate_schedule
+
+    session = PlacedSession("activity:x", "Sortie", at(8, 10), at(8, 11), at(8, 8), at(8, 20))
+    found = validate_schedule(
+        [session], [Occupied("Analyse", Interval(at(8, 10), at(8, 12)))], [], TZ
+    )
+    assert found and "overlaps Analyse" in found[0]
 
 
 def test_declared_stay_changes_the_day_base_without_automatic_switching() -> None:
@@ -169,7 +221,7 @@ def test_free_minutes_before_a_deadline_counts_overlapping_busy_time_once() -> N
 def test_overlapping_planned_locations_are_reported_not_guessed() -> None:
     stays = [DeclaredStay(MUM, at(11, 0), at(13, 0)), DeclaredStay(HOME, at(12, 6), at(12, 23))]
     outcome = run_planning(week(stays=stays), FakeRouting())
-    assert any("planned locations overlap on 2026-12-12" in i for i in outcome.issues)
+    assert any("planned locations overlap at 2026-12-12" in i for i in outcome.issues)
     assert not [b for b in outcome.travel if b.start.day == 12 and b.origin == HOME]
 
 

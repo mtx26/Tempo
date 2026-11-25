@@ -10,14 +10,18 @@ Model:
   starts are restricted to the 15-minute grid inside free time of that day;
 - NoOverlap over study intervals and the union of busy, locked and unavailable time;
 - per task: planned + unplanned - overshoot == effort still to plan (remaining minus locked);
-- per local day: new study + locked study <= daily cap;
-- per subject and day: ``max_blocks_per_subject_per_day`` blocks preferred (soft: up to
-  ``EXTRA_BLOCKS_PER_SUBJECT`` more, each penalised, only when needed); consecutive blocks
-  of the same subject (any task) closer than the minimum gap are penalised;
+- per local day: study above the daily cap is penalised (soft preference);
+- per subject and day: ``max_blocks_per_subject_per_day`` blocks preferred (soft: a second pass
+  lets tasks that still miss effort use every block their free time allows, each extra block
+  penalised); consecutive blocks of the same subject (any task) closer than the minimum gap
+  are penalised;
 - hard targets: no block ends after the deadline; soft targets: lateness is penalised.
 
-Objective weights: unplanned effort >> soft lateness > same-subject adjacency >
-non-preferred block length > overshoot.
+Hard bounds that remain: availability, busy time, locked blocks, strict deadlines, the 15-min
+grid and the configured minimum/maximum block length (explicit settings).
+
+Objective weights: unplanned effort >> daily-cap overflow > soft lateness > stability >
+same-subject adjacency > non-preferred block length > overshoot.
 """
 
 import itertools
@@ -44,11 +48,10 @@ ADJACENCY_PENALTY = 120
 SHORT_BLOCK_PENALTY = 30
 OVERSHOOT_PENALTY_PER_MINUTE = 2
 STABILITY_PENALTY = 200
-EXTRA_BLOCKS_PER_SUBJECT = 2
-EXTRA_BLOCK_PENALTY = 400
-"""Cost of each block beyond the preferred per-subject daily count (a soft preference)."""
 """Cost of moving (or dropping) a previously proposed block: above the adjacency and
 short-block penalties, far below unplanned effort; ~200 minutes of soft lateness."""
+EXTRA_BLOCK_PENALTY = 400
+"""Cost of each block beyond the preferred per-subject daily count (a soft preference)."""
 
 type Span = tuple[int, int]
 
@@ -156,6 +159,7 @@ class _Builder:
         self.unplanned: dict[str, cp_model.IntVar] = {}
         self.to_plan: dict[str, int] = {}
         self.day_free: dict[int, list[Span]] = {}
+        self.overflow_weight = 1
         self.days: list[Span] = []
 
     def _fixed_spans(self) -> tuple[list[Span], list[Span]]:
@@ -192,10 +196,14 @@ class _Builder:
         target = self.clock.floor(demand.target)
         domain = _start_domain(free, g, prefs.min_block_minutes)
         capacity = sum(e - s for s, e in free)
-        extra = EXTRA_BLOCKS_PER_SUBJECT if demand.task_id in self.extended else 0
-        count = min(
-            prefs.max_blocks_per_subject_per_day + extra, capacity // prefs.min_block_minutes
-        )
+        most = capacity // prefs.min_block_minutes
+        if demand.task_id in self.extended:
+            # Second pass: the per-subject count is only a preference, so a task that still
+            # misses effort may use every block its free time and remaining need allow.
+            need = self.to_plan.get(demand.task_id, 0)
+            count = min(most, max(1, math.ceil(need / prefs.min_block_minutes)))
+        else:
+            count = min(prefs.max_blocks_per_subject_per_day, most)
         if not domain or count == 0:
             return
         previous: _Block | None = None
@@ -294,8 +302,10 @@ class _Builder:
         late_bound = max([0, *(self.horizon[1] + prefs.max_block_minutes - t for t in targets)])
         # Per minute, leaving effort unplanned must cost more than any combination of soft
         # penalties a block can incur (lateness, adjacency with neighbours, short, overshoot).
+        self.overflow_weight = late_bound + 1
+        """Per minute above the daily cap: above any lateness, below unplanned effort."""
         unplanned_weight = (
-            late_bound
+            self.overflow_weight
             + 4 * ADJACENCY_PENALTY
             + SHORT_BLOCK_PENALTY
             + OVERSHOOT_PENALTY_PER_MINUTE * prefs.min_block_minutes
@@ -432,14 +442,16 @@ class _Builder:
         self._add_midnight_adjacency(by_day, days)
         for day_index, day_blocks in by_day.items():
             cap = max(0, prefs.max_daily_study_minutes - locked_by_day.get(day_index, 0))
-            model.add(sum(b.effective for b in day_blocks) <= cap)
+            overflow = model.new_int_var(0, 24 * 60, f"overflow_{day_index}")
+            model.add(sum(b.effective for b in day_blocks) <= cap + overflow)
+            self.penalties.append(self.overflow_weight * overflow)
             by_subject: dict[str, list[_Block]] = {}
             for block in day_blocks:
                 by_subject.setdefault(block.demand.subject, []).append(block)
             for subject_blocks in by_subject.values():
                 limit = prefs.max_blocks_per_subject_per_day
                 if any(b.demand.task_id in self.extended for b in subject_blocks):
-                    extra = model.new_int_var(0, EXTRA_BLOCKS_PER_SUBJECT, f"extra_{day_index}")
+                    extra = model.new_int_var(0, len(subject_blocks), f"extra_{day_index}")
                     model.add(sum(b.present for b in subject_blocks) <= limit + extra)
                     self.penalties.append(EXTRA_BLOCK_PENALTY * extra)
                 else:

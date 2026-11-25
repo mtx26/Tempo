@@ -104,7 +104,7 @@ def test_block_outside_horizon_is_detected() -> None:
     assert any("horizon" in v for v in violations)
 
 
-def test_daily_cap_violation_is_detected() -> None:
+def test_daily_cap_is_a_soft_preference_not_a_violation() -> None:
     problem = make_problem()
     problem = PlanningProblem(
         horizon=problem.horizon,
@@ -116,7 +116,7 @@ def test_daily_cap_violation_is_detected() -> None:
         preferences=Preferences(max_daily_study_minutes=120),
     )
     blocks = [block(at(8), at(9, 30)), block(at(10), at(11, 30))]
-    assert any("daily cap" in v for v in validate_plan(problem, plan(*blocks)))
+    assert not any("daily" in v for v in validate_plan(problem, plan(*blocks)))
 
 
 def test_non_adjacent_overlap_is_detected() -> None:
@@ -139,9 +139,6 @@ def test_off_grid_block_is_detected() -> None:
     assert any("grid" in v for v in violations)
 
 
-def test_extra_blocks_of_one_subject_are_soft_up_to_the_absolute_bound() -> None:
-    three = [block(at(8), at(8, 30)), block(at(9), at(9, 30)), block(at(10), at(10, 30))]
-    assert not any("blocks of" in v for v in validate_plan(make_problem(), plan(*three)))
-    five = [*three, block(at(11), at(11, 30)), block(at(12), at(12, 30))]
-    violations = validate_plan(make_problem(), plan(*five))
-    assert any("blocks of" in v for v in violations)
+def test_extra_blocks_of_one_subject_are_a_soft_preference() -> None:
+    five = [block(at(h), at(h, 30)) for h in (8, 9, 10, 11, 12)]
+    assert not any("blocks of" in v for v in validate_plan(make_problem(), plan(*five)))

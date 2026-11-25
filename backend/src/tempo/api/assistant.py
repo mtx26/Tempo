@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from tempo.api.location import SessionDep
 from tempo.assistant import fallback
@@ -69,6 +69,9 @@ def call_operation(
     if idempotency_key and CATALOG[name].mutates:
         digest = hashlib.sha256(f"{name}:{idempotency_key}".encode()).hexdigest()[:40]
         key = f"idem:{digest}"
+        # Concurrent retries with the same key wait here: the second one replays the first's
+        # stored response instead of running the operation twice (lock held until commit).
+        session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
         previous = get_setting(session, key)
         if previous is not None:
             return dict(previous["response"])

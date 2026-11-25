@@ -35,8 +35,6 @@ from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailable
 DEFAULT_BUFFER = timedelta(minutes=10)
 MAX_TRAVEL = timedelta(hours=6)
 """Events further than this from a study window are not routed for it."""
-UNRESOLVED_RETURN_BLOCK = timedelta(hours=2)
-"""Conservative time kept free after the last event when no return journey is known."""
 
 
 class TravelStatus(StrEnum):
@@ -104,7 +102,8 @@ def _trip(
 
 
 def _label(origin: Place, destination: Place, when: datetime) -> str:
-    return f"{origin.name} -> {destination.name} ({when.isoformat()})"
+    # UTC in labels: one stable text per journey, whatever timezone the caller used.
+    return f"{origin.name} -> {destination.name} ({_u(when).isoformat()})"
 
 
 def _journey_warnings(plan: TravelPlan, journey: Journey, label: str) -> None:
@@ -209,10 +208,9 @@ def _return_trip(
         return
     if status is TravelStatus.IMPOSSIBLE:
         plan.issues.append(f"no return journey found {label}")
-    # Conservative block (not a journey): the return time is unknown, keep the evening free.
-    plan.blocks.append(
-        TravelBlock(last.end, last.end + UNRESOLVED_RETURN_BLOCK, last.place, end_place, status)
-    )
+    # Conservative block (not a journey, no invented duration): the return time is unknown,
+    # so the time up to the next known bound stays free of planned work.
+    plan.blocks.append(TravelBlock(last.end, return_by, last.place, end_place, status))
 
 
 def plan_day_travel(
@@ -226,10 +224,10 @@ def plan_day_travel(
 ) -> TravelPlan:
     """Travel blocks connecting a day's located commitments (and optional start/end places).
 
-    ``start_place`` is the day's base (``location.day_base``); when it is missing the outbound
-    trip to the first event cannot be planned and an issue is reported. The way back to
-    ``end_place`` must arrive before ``return_by`` (default: ``MAX_TRAVEL`` after the last
-    event).
+    ``start_place`` is the base at the outing start (``location.base_at``); when it is
+    missing the outbound trip to the first event cannot be planned and an issue is reported.
+    The way back to ``end_place`` must arrive before ``return_by`` (default: ``MAX_TRAVEL``
+    after the last event).
     """
     routing = provider
     ordered = sorted(events, key=lambda e: _u(e.start))

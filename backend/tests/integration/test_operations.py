@@ -382,7 +382,11 @@ def test_non_splittable_located_task_is_one_session(session: Session) -> None:
     replan(session, FakeRouting(), NOW, TZ, reason="t")
     session.refresh(sessions_[0])
     assert sessions_[0].planned_start_at is not None
-    ok(session, "report_activity", activity_id=str(sessions_[0].id), outcome="done")
+    assert "pas encore commencée" in err(
+        session, "report_activity", activity_id=str(sessions_[0].id), outcome="done"
+    )
+    after = sessions_[0].planned_start_at + timedelta(minutes=61)
+    ok(session, "report_activity", after, activity_id=str(sessions_[0].id), outcome="done")
     row = session.get(StudyTaskRow, __import__("uuid").UUID(task["id"]))
     assert row is not None and row.archived and row.completed_minutes == 60
 
@@ -730,7 +734,10 @@ def test_impossible_strict_deadline_gets_simulated_alternatives(session: Session
     assert soft["strict_miss"] is False
     assert soft["unplanned_minutes"] < chimie["unplanned_minutes"]
     reduce = kinds["reduce_volume"]
-    assert 0 < reduce["plannable_minutes"] < 3000
+    # Really simulated: the reduced volume is re-planned and its real outcome reported.
+    assert 0 < reduce["new_estimated_minutes"] < 3000
+    assert reduce["valid"] is True and "unplanned_minutes" in reduce
+    assert reduce["resolves"] is (reduce["unplanned_minutes"] == 0 and not reduce["strict_miss"])
     assert active_version(session) == published
     row = session.get(StudyTaskRow, __import__("uuid").UUID(task["id"]))
     assert row is not None and row.target_date == date(2026, 12, 8)

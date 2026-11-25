@@ -41,8 +41,9 @@ from tempo.db.models import (
     StudyTaskRow,
 )
 from tempo.domain.models import EventStatus, TargetKind
-from tempo.domain.ops import needs_session, remaining_minutes
+from tempo.domain.ops import needs_session, refresh_task_sessions, remaining_minutes
 from tempo.planning.engine import (
+    DEFAULT_ACTIVITY_HOURS,
     Commitment,
     CommitmentKind,
     OutcomeStatus,
@@ -288,6 +289,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
     for act in activity_rows:
         if act.sequence_group is not None:
             activities_by_group.setdefault(act.sequence_group, []).append(act)
+    tasks = {t.id: t for t in session.scalars(select(StudyTaskRow))}
     for act in activity_rows:
         if act.duration_minutes is None:
             continue  # duration to confirm: never scheduled with a guessed length
@@ -296,10 +298,18 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         travels = act.place_id is not None and not (act.remote or act.all_day)
         place = directory.get(act.place_id) if travels and act.place_id else None
         duration = timedelta(minutes=act.duration_minutes)
+        planned = act.planned_start_at
+        underway = (
+            act.scheduling == "flexible"
+            and planned is not None
+            and planned <= now < planned + duration
+        )
         fixed_start = (
             act.earliest_start_at
             if act.scheduling == "fixed"
-            else (act.planned_start_at or act.preferred_start_at)
+            else planned
+            if underway
+            else (planned or act.preferred_start_at)
             if act.locked
             else None
         )
@@ -313,9 +323,17 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
                     fixed_start + duration,
                     kind,
                     place,
+                    movable=act.scheduling == "flexible" and act.locked and not underway,
+                    underway=underway,
                 )
             )
         else:
+            task = tasks.get(act.task_id) if act.task_id is not None else None
+            target = (
+                None
+                if task is None or task.target_date is None
+                else _end_of_day(task.target_date, tz)
+            )
             trainings.append(
                 TrainingRequest(
                     str(act.id),
@@ -331,8 +349,27 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
                     act.sequence_index or 0,
                     _recovery_days(act, activities_by_group),
                     _category_allowed(category_rows, act, tz),
+                    task_id=None if task is None else str(task.id),
+                    target=target,
+                    strict=task is not None and task.target_kind is TargetKind.HARD,
                 )
             )
+    expired: dict[str, int] = {}
+    for act in session.scalars(
+        select(ActivityRow).where(
+            ActivityRow.status == "active",
+            ActivityRow.task_id.is_not(None),
+            ActivityRow.latest_end_at <= now,
+        )
+    ):
+        task = tasks.get(act.task_id) if act.task_id is not None else None
+        if (
+            task is not None
+            and not task.archived
+            and task.target_kind is TargetKind.HARD
+            and act.duration_minutes
+        ):
+            expired[str(task.id)] = act.duration_minutes
 
     task_ids: dict[str, uuid.UUID] = {}
     demands: list[StudyDemand] = []
@@ -371,7 +408,11 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
             str(b.task_id), subjects.get(str(b.task_id), "?"), b.start_at, b.end_at, locked=True
         )
         for b in session.scalars(
-            select(StudyBlockRow).where(StudyBlockRow.locked.is_(True), StudyBlockRow.end_at > now)
+            select(StudyBlockRow).where(
+                StudyBlockRow.locked.is_(True),
+                StudyBlockRow.state == "planned",
+                StudyBlockRow.end_at > now,
+            )
         )
         if str(b.task_id) in subjects
     ]
@@ -413,8 +454,18 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         stays=stays,
         preferences=Preferences(**prefs),
         buffer=buffer,
+        activity_hours=activity_hours(session),
+        expired_strict_tasks=expired,
     )
     return LoadedInput(data, task_ids, spread)
+
+
+def activity_hours(session: Session) -> tuple[time, time]:
+    """Preferred hours of flexible activities (setting ``activity_hours``, soft)."""
+    value = get_setting(session, "activity_hours")
+    if not value:
+        return DEFAULT_ACTIVITY_HOURS
+    return time.fromisoformat(value["start"]), time.fromisoformat(value["end"])
 
 
 def _category_allowed(
@@ -464,6 +515,21 @@ def active_version(session: Session) -> ScheduleVersion | None:
         .where(ScheduleVersion.state == "active")
         .order_by(ScheduleVersion.created_at.desc())
     ).first()
+
+
+def lock_block(block: StudyBlockRow) -> None:
+    """Protect a study block in place: detached from plan versions, never moved without the
+    user's approval (a re-plan keeps it and plans around it)."""
+    block.locked = True
+    block.schedule_version_id = None
+
+
+def release_block(session: Session, block: StudyBlockRow) -> None:
+    """Unprotect a block: it rejoins the active plan as an ordinary movable block (the next
+    re-plan keeps it when nothing better exists: stability), never deleted."""
+    active = active_version(session)
+    block.locked = False
+    block.schedule_version_id = None if active is None else active.id
 
 
 def _digest(text: str) -> str:
@@ -538,48 +604,80 @@ def _conflict_proposals(session: Session, data: PlanningInput) -> None:
     _activity_conflicts(session, data)
 
 
-def _activity_conflicts(session: Session, data: PlanningInput) -> None:
-    """Protected activities colliding with a university event (iCal is the source of truth).
+LABELS = {
+    CommitmentKind.CLASS: "le cours",
+    CommitmentKind.RACE: "la compétition",
+    CommitmentKind.TRAINING: "l'entraînement",
+    CommitmentKind.OTHER: "l'activité",
+}
 
-    - locked training: proposal to unlock it (approval -> it becomes flexible and is re-placed);
-    - race (fixed by nature): nothing can move automatically -> conflict notification."""
-    classes = [c for c in data.commitments if c.kind is CommitmentKind.CLASS]
-    protected = [
-        c
-        for c in data.commitments
-        if c.kind in (CommitmentKind.RACE, CommitmentKind.TRAINING, CommitmentKind.OTHER)
-    ]
-    for activity in protected:
-        span = Interval(activity.start, activity.end)
-        for event in classes:
-            if not Interval(event.start, event.end).overlaps(span):
-                continue
-            key = f"{activity.ref}:{event.ref}:{event.start.isoformat()}"
-            when = event.start.isoformat(timespec="minutes")
-            if activity.kind is CommitmentKind.TRAINING:
+
+def _activity_conflicts(session: Session, data: PlanningInput) -> None:
+    """Every pair of overlapping commitments, whatever their category (classes, races, fixed
+    appointments, locked activities):
+
+    - a LOCKED flexible activity in the pair: proposal to unlock it (approval -> it becomes
+      flexible again and is re-placed); the other side is never moved;
+    - two fixed commitments: nothing can move automatically -> conflict notification.
+    Activities already under way are never the subject of a proposal."""
+    items = sorted(
+        (c for c in data.commitments if utc(c.end) > utc(data.now)), key=lambda c: utc(c.start)
+    )
+    for i, first in enumerate(items):
+        for second in items[i + 1 :]:
+            if utc(second.start) >= utc(first.end):
+                break
+            movable = [c for c in (first, second) if c.movable and not c.underway]
+            key = f"{first.ref}:{second.ref}:{first.start.isoformat()}:{second.start.isoformat()}"
+            for activity in movable:
+                other = second if activity is first else first
                 propose(
                     session,
                     "unlock_activity",
-                    f"Le cours '{event.title}' chevauche l'entraînement verrouillé "
-                    f"'{activity.title}'",
+                    f"{LABELS[other.kind].capitalize()} '{other.title}' chevauche "
+                    f"{LABELS[activity.kind]} verrouillé(e) '{activity.title}'",
                     {
                         "activity_id": activity.ref.removeprefix("activity:"),
-                        "commitment": event.ref,
-                        "commitment_start": event.start.isoformat(),
+                        "commitment": other.ref,
+                        "commitment_start": other.start.isoformat(),
                     },
-                    f"unlock_activity:{key}",
+                    f"unlock_activity:{activity.ref}:{other.ref}:{other.start.isoformat()}",
                 )
-            else:
-                race = activity.kind is CommitmentKind.RACE
-                notify(
-                    session,
-                    "race_conflict" if race else "fixed_conflict",
-                    "Conflit avec une compétition" if race else "Conflit avec un rendez-vous",
-                    f"Le cours '{event.title}' ({when}) chevauche "
-                    f"{'la compétition' if race else 'le rendez-vous fixe'} "
-                    f"'{activity.title}'. Rien n'est déplacé automatiquement : à arbitrer.",
-                    f"race_conflict:{key}",
-                )
+            if movable:
+                continue
+            race = CommitmentKind.RACE in (first.kind, second.kind)
+            when = second.start.astimezone(data.timezone).isoformat(timespec="minutes")
+            notify(
+                session,
+                "race_conflict" if race else "fixed_conflict",
+                "Conflit avec une compétition" if race else "Conflit entre engagements fixes",
+                f"{LABELS[first.kind].capitalize()} '{first.title}' chevauche "
+                f"{LABELS[second.kind]} '{second.title}' ({when}). Rien n'est déplacé "
+                "automatiquement : à arbitrer.",
+                f"conflict:{key}",
+            )
+
+
+def _notify_issues(session: Session, issues: list[str], now: datetime, tz: ZoneInfo) -> None:
+    """One notification per distinct issue; routing outages are grouped into one notice per
+    day (an outage touches every journey of every re-plan: never a flood)."""
+    outage = [i for i in issues if "routing unavailable" in i]
+    if outage:
+        day = now.astimezone(tz).date().isoformat()
+        notify(
+            session,
+            "routing_outage",
+            "Routage indisponible",
+            f"Le calcul d'itinéraire est indisponible ({len(outage)} trajet(s) non calculé(s)) : "
+            "le temps autour des engagements reste bloqué, rien n'est inventé. Ce n'est pas "
+            "une impossibilité.",
+            f"routing_outage:{day}",
+        )
+    for issue in issues:
+        if issue not in outage:
+            notify(
+                session, "plan_issue", "Tempo : point à vérifier", issue, f"issue:{_digest(issue)}"
+            )
 
 
 def mark_missed_blocks(session: Session, now: datetime) -> int:
@@ -701,6 +799,7 @@ def replan(
     the stability preference so the whole horizon may be reorganised; locked and under-way
     items stay protected in every mode."""
     session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": REPLAN_LOCK})
+    refresh_task_sessions(session, now, tz)
     missed = mark_missed_blocks(session, now)
     loaded = build_input(session, now, tz)
     if mode == "global":
@@ -740,9 +839,10 @@ def replan(
         "violations": outcome.violations,
         "unplaced_trainings": outcome.unplaced_trainings,
         "travel": _travel_json(outcome),
-        "unplanned_minutes": {} if result is None else result.unplanned_minutes,
-        "late_minutes": {} if result is None else result.late_minutes,
-        "hard_deadline_misses": [] if result is None else result.hard_deadline_misses,
+        "unplanned_minutes": outcome.unplanned_minutes,
+        "late_minutes": outcome.late_minutes,
+        "hard_deadline_misses": outcome.hard_deadline_misses,
+        "outside_hours": outcome.outside_hours,
         "deadline_capacity": outcome.deadline_capacity,
         "conflicts": [] if result is None else result.conflicts,
     }
@@ -787,7 +887,7 @@ def replan(
             )
     else:
         reason_text = "; ".join(outcome.violations) or (
-            f"aucune solution ({result.solver_status})" if result else "aucune solution"
+            "calcul inconclusif dans le temps imparti (ce n'est pas une impossibilité)"
         )
         notify(
             session,
@@ -808,17 +908,18 @@ def replan(
         summary["diff"] = _schedule_diff(before_blocks, _block_keys(session, version), moved)
         version.summary = dict(summary)
     _conflict_proposals(session, loaded.data)
-    for issue in outcome.issues:
-        notify(session, "plan_issue", "Tempo : point à vérifier", issue, f"issue:{_digest(issue)}")
-    if result is not None:
-        for task in result.hard_deadline_misses:
+    _notify_issues(session, outcome.issues, now, tz)
+    if usable:
+        subjects = {str(t.id): t.subject for t in session.scalars(select(StudyTaskRow))}
+        for task in outcome.hard_deadline_misses:
+            minutes = outcome.unplanned_minutes.get(task, 0)
             notify(
                 session,
                 "deadline",
                 "Échéance impossible à tenir",
-                f"Le travail de la tâche {task} ne tient pas avant son échéance stricte "
-                f"({result.unplanned_minutes.get(task, 0)} min non planifiées).",
-                f"deadline:{task}:{result.unplanned_minutes.get(task, 0)}",
+                f"« {subjects.get(task, task)} » ne tient pas avant son échéance stricte "
+                f"({minutes} min non planifiées).",
+                f"deadline:{task}:{now.astimezone(tz).date().isoformat()}",
             )
     audit(
         session,

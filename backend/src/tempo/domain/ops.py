@@ -30,6 +30,7 @@ from tempo.db.models import (
     StudyTaskRow,
     WorkLogRow,
 )
+from tempo.domain.models import TargetKind
 
 SERIES_HORIZON = timedelta(days=60)
 MAX_OCCURRENCES = 400
@@ -50,6 +51,7 @@ def record_work(
     minutes: int,
     *,
     now: datetime,
+    tz: ZoneInfo,
     block_id: uuid.UUID | None = None,
     key: str | None = None,
     note: str = "",
@@ -79,7 +81,7 @@ def record_work(
         task.archived = True
     elif task.archived and task.effort_minutes is not None:
         task.archived = False  # a correction re-opens a task marked complete too early
-    sync_task_session(session, task, now)
+    sync_task_session(session, task, now, tz)
     return inserted
 
 
@@ -97,16 +99,18 @@ def remaining_minutes(task: StudyTaskRow) -> int | None:
 
 
 def complete_block(
-    session: Session, block: StudyBlockRow, now: datetime, minutes: int | None
+    session: Session, block: StudyBlockRow, now: datetime, tz: ZoneInfo, minutes: int | None
 ) -> int:
     """A study block reported done (fully, or ``minutes`` of it): logged once per block."""
     length = int((block.end_at - block.start_at).total_seconds() // 60)
-    worked = length if minutes is None else max(1, min(minutes, length))
+    if minutes is not None and not 0 < minutes <= length:
+        raise DomainError(f"durée invalide : entre 1 et {length} min pour cette séance")
+    worked = length if minutes is None else minutes
     task = session.get(StudyTaskRow, block.task_id)
     if task is None:
         raise DomainError("tâche introuvable")
     block.state = "done" if worked >= length else "partial"
-    record_work(session, task, worked, now=now, block_id=block.id, key=f"block:{block.id}")
+    record_work(session, task, worked, now=now, tz=tz, block_id=block.id, key=f"block:{block.id}")
     return worked
 
 
@@ -117,9 +121,21 @@ def needs_session(task: StudyTaskRow) -> bool:
     return task.place_id is not None or not task.splittable
 
 
-def sync_task_session(session: Session, task: StudyTaskRow, now: datetime) -> ActivityRow | None:
+def target_end(day: date, tz: ZoneInfo) -> datetime:
+    """End of the target day in local time (the instant work is due)."""
+    return datetime.combine(day + timedelta(days=1), time(0), tzinfo=tz)
+
+
+def sync_task_session(
+    session: Session, task: StudyTaskRow, now: datetime, tz: ZoneInfo
+) -> ActivityRow | None:
     """Keep the single flexible activity of a located / non-splittable task in line with the
-    task (duration = remaining work, window = now .. deadline). Unknown duration: no session."""
+    task (duration = remaining work). Unknown duration: no session.
+
+    Window: from now to the local end of the target day. A STRICT deadline is never moved: when
+    the work no longer fits, the window stays as it is and the planner reports the miss. A soft
+    target (or none) leaves room after it (``TASK_SESSION_HORIZON`` from now); the planner
+    penalises and reports lateness against the target."""
     current = session.scalars(
         select(ActivityRow).where(
             ActivityRow.task_id == task.id, ActivityRow.status.in_(ACTIVE_STATES)
@@ -130,14 +146,15 @@ def sync_task_session(session: Session, task: StudyTaskRow, now: datetime) -> Ac
         if current is not None:
             current.status = "cancelled"
         return None
-    end = (
-        datetime.combine(task.target_date + timedelta(days=1), time(0), tzinfo=UTC)
-        if task.target_date is not None
-        else now + TASK_SESSION_HORIZON
-    )
+    duration = timedelta(minutes=remaining)
     start = now if current is None else min(current.earliest_start_at, now)
-    if end <= start + timedelta(minutes=remaining):
-        end = start + timedelta(minutes=remaining) + TASK_SESSION_HORIZON
+    if task.target_date is not None and task.target_kind is TargetKind.HARD:
+        end = target_end(task.target_date, tz)
+        if end <= start:
+            start = end - duration  # deadline already passed: kept visible, reported as missed
+    else:
+        soft = None if task.target_date is None else target_end(task.target_date, tz)
+        end = max(soft or now, now + TASK_SESSION_HORIZON, start + duration)
     if current is None:
         current = ActivityRow(
             kind="task", source="task", task_id=task.id, scheduling="flexible", status="active"
@@ -152,6 +169,14 @@ def sync_task_session(session: Session, task: StudyTaskRow, now: datetime) -> Ac
     current.priority = task.priority
     session.flush()
     return current
+
+
+def refresh_task_sessions(session: Session, now: datetime, tz: ZoneInfo) -> None:
+    """Re-derive every task session window from its task (run before each re-plan, so a
+    window computed days ago never silently expires)."""
+    for task in session.scalars(select(StudyTaskRow).where(StudyTaskRow.archived.is_(False))):
+        if needs_session(task):
+            sync_task_session(session, task, now, tz)
 
 
 # --- recurrence ----------------------------------------------------------------------------------
