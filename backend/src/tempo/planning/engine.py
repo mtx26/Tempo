@@ -474,7 +474,19 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         for b in travel
         if b.status is TravelStatus.ROUTED and utc(b.end) > utc(b.start)
     ]
-    violations = validate_plan(problem, result) + validate_schedule(sessions, occupied, routed, tz)
+    edges = {utc(p.start) for p in placed.values()} | {utc(p.end) for p in placed.values()}
+    chosen = [
+        trip
+        for trip, block in zip(
+            routed,
+            (b for b in travel if b.status is TravelStatus.ROUTED and utc(b.end) > utc(b.start)),
+            strict=True,
+        )
+        if utc(block.end) in edges or utc(block.start) in edges
+    ]
+    violations = validate_plan(problem, result) + validate_schedule(
+        sessions, occupied, routed, tz, chosen
+    )
     if violations:
         outcome.status, outcome.violations = OutcomeStatus.INVALID, violations
     elif (

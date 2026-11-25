@@ -152,11 +152,14 @@ def validate_schedule(
     fixed: Sequence[Occupied],
     journeys: Sequence[Occupied],
     timezone: ZoneInfo,
+    chosen_journeys: Sequence[Occupied] = (),
 ) -> list[str]:
     """Hard rules of everything that is not a study block (see the module docstring).
 
     Overlaps between FIXED commitments (or the journeys linking them) are source conflicts,
-    reported for arbitration, not plan violations: the planner did not choose them."""
+    reported for arbitration, not plan violations: the planner did not choose them. Journeys
+    to or from a flexible activity (``chosen_journeys``) follow from the planner's choice, so
+    they must not overlap any fixed commitment either."""
     found: list[str] = []
     for s in sessions:
         span = Interval(s.start, s.end)
@@ -193,4 +196,8 @@ def validate_schedule(
             ).days
             if gap < after.min_days_after_previous:
                 found.append(f"recovery too short before {after.title} ({gap} day(s))")
+    for trip in chosen_journeys:
+        for item in fixed:
+            if _overlap(trip.interval, item.interval):
+                found.append(f"journey {trip.label} overlaps {item.label}")
     return found

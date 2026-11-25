@@ -285,3 +285,13 @@ def test_going_home_between_commitments_only_when_worth_it() -> None:
         ("club", "home"),
     ]
     assert _day9_legs(at(9, 13, 40)) == [("home", "campus"), ("campus", "club"), ("club", "home")]
+
+
+def test_journey_of_a_flexible_activity_over_a_commitment_is_a_violation() -> None:
+    from tempo.scheduler.validate import Occupied, validate_schedule
+
+    trip = Occupied("Kot -> Club", Interval(at(8, 17), at(8, 18)))
+    found = validate_schedule(
+        [], [Occupied("Analyse", Interval(at(8, 17, 30), at(8, 19)))], [], TZ, [trip]
+    )
+    assert found == ["journey Kot -> Club overlaps Analyse"]
