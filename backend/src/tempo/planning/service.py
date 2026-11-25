@@ -549,6 +549,7 @@ def _travel_json(outcome: PlanningOutcome) -> list[dict[str, Any]]:
                 "origin_name": block.origin.name,
                 "destination_name": block.destination.name,
                 "status": block.status.value,
+                "returning": block.returning,
                 "departure": None if journey is None else journey.departure.isoformat(),
                 "arrival": None if journey is None else journey.arrival.isoformat(),
                 "legs": []

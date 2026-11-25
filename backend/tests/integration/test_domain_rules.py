@@ -260,3 +260,24 @@ def test_activity_hours_are_a_soft_preference(session: Session) -> None:
     row = session.get(ActivityRow, uuid.UUID(created["id"]))
     assert row is not None and row.planned_start_at is not None
     assert 18 <= row.planned_start_at.astimezone(TZ).hour < 21
+
+
+def test_coach_mail_day_is_a_suggestion_within_its_week(session: Session) -> None:
+    from datetime import date, time
+
+    from tempo.ai.apply import apply_result
+    from tempo.ai.text_parser import ParsedActivity, ParseResult
+
+    seed(session)
+    wednesday = date(2026, 12, 9)
+    parsed = ParseResult(
+        activities=[ParsedActivity("training", "Fractionné", wednesday, time(18), 60, None, "")]
+    )
+    applied = apply_result(
+        session, parsed, tz=TZ, today=NOW.date(), source="email", source_ref="m1"
+    )
+    assert applied.created
+    row = session.scalars(select(ActivityRow).where(ActivityRow.source == "email")).one()
+    assert row.preferred_day == wednesday
+    assert row.earliest_start_at == datetime(2026, 12, 7, tzinfo=TZ)  # Monday of that week
+    assert row.latest_end_at == datetime(2026, 12, 14, tzinfo=TZ)

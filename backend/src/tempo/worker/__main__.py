@@ -64,6 +64,9 @@ class WorkerSettings(BaseSettings):
     training_interval_minutes: int = 30
     training_require_authentication: bool = True
     """Only accept e-mails whose provider recorded DMARC/DKIM pass (anti-spoofing)."""
+    training_authserv_id: str | None = None
+    """authserv-id of the user's receiving mail server (first word of its
+    ``Authentication-Results`` header, e.g. ``mx.google.com``): only its verdict is trusted."""
     departure_interval_minutes: int = 2
 
 
@@ -96,7 +99,7 @@ def tick(
     run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz))
     run_job(sessions, "reminders", lambda: reminders_job(sessions, now, tz))
     if due_departure:
-        run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now))
+        run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now, tz))
     if due_ics and now.astimezone(tz).hour == 4 and now.astimezone(tz).minute < 31:
         run_job(sessions, "retention", lambda: retention_job(sessions, now))
         run_job(
@@ -120,6 +123,12 @@ def mail_source(settings: WorkerSettings) -> MailSource | None:
     if any(value is None for value in required):
         logger.warning("training e-mail import disabled (IMAP host/user/password/sender not set)")
         return None
+    if settings.training_require_authentication and not settings.training_authserv_id:
+        logger.warning(
+            "training e-mail import disabled: TEMPO_TRAINING_AUTHSERV_ID (receiving server "
+            "that verifies DMARC/DKIM) is required to authenticate the coach"
+        )
+        return None
     assert settings.training_imap_password is not None  # noqa: S101 - narrowed above
     return ImapSource(
         settings.training_imap_host or "",
@@ -128,6 +137,7 @@ def mail_source(settings: WorkerSettings) -> MailSource | None:
         settings.training_allowed_sender or "",
         mailbox=settings.training_imap_mailbox,
         require_authentication=settings.training_require_authentication,
+        trusted_authserv_id=settings.training_authserv_id,
     )
 
 

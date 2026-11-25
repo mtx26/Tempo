@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from tempo.ai.llm import Extraction
 from tempo.ai.text_parser import ParsedActivity, ParsedTask, ParseResult
-from tempo.db.models import ActivityRow, PlaceRow, StudyTaskRow
+from tempo.db.models import ActivityRow, PlaceRow
 from tempo.domain.models import TargetKind
 
 MAX_EFFORT = 100_000
@@ -25,8 +25,6 @@ MAX_ACTIVITY_AHEAD = timedelta(days=60)
 MAX_TASK_AHEAD = timedelta(days=366)
 MAX_ITEMS = 20
 """Items applied per request/e-mail; more is refused (a forged e-mail must not flood the plan)."""
-TRAINING_SLACK = timedelta(days=1)
-"""A training without explicit window may move one day earlier or later (flexible)."""
 
 
 @dataclass(slots=True)
@@ -40,9 +38,18 @@ def _midnight(day: date, tz: ZoneInfo) -> datetime:
 
 
 def activity_values(
-    item: ParsedActivity, tz: ZoneInfo, today: date, known_places: set[str]
+    item: ParsedActivity,
+    tz: ZoneInfo,
+    today: date,
+    known_places: set[str],
+    *,
+    suggested_day: bool,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Validated column values for an ``activity`` row, or a rejection reason."""
+    """Validated column values for an ``activity`` row, or a rejection reason.
+
+    A training's day is either the user's own choice (conversation: the session moves within
+    that day) or a coach suggestion (e-mail: like the weekly plan, the session may move within
+    its week and the suggested day is a soft preference)."""
     if item.day < today:
         return None, f"{item.title} : date passée ({item.day.isoformat()})"
     if item.day > today + MAX_ACTIVITY_AHEAD:
@@ -56,9 +63,13 @@ def activity_values(
         if start is None:
             return None, f"{item.title} : une course doit avoir une heure de départ"
         earliest, latest = start, start + duration
+    elif suggested_day:
+        monday = item.day - timedelta(days=item.day.weekday())
+        earliest = max(_midnight(monday, tz), _midnight(today, tz))
+        latest = _midnight(monday + timedelta(days=7), tz)
     else:
-        earliest = max(_midnight(item.day, tz) - TRAINING_SLACK, _midnight(today, tz))
-        latest = _midnight(item.day + timedelta(days=1), tz) + TRAINING_SLACK
+        earliest = max(_midnight(item.day, tz), _midnight(today, tz))
+        latest = _midnight(item.day + timedelta(days=1), tz)
     values = {
         "kind": item.kind,
         "title": item.title[:300],
@@ -67,6 +78,7 @@ def activity_values(
         "earliest_start_at": earliest,
         "latest_end_at": latest,
         "preferred_start_at": start if item.kind == "training" else None,
+        "preferred_day": item.day if suggested_day and item.kind == "training" else None,
         "place_id": place,
     }
     return values, None
@@ -107,19 +119,11 @@ def apply_result(
         )
         return outcome
     places = known_places(session)
-    for task in result.tasks:
-        values, reason = task_values(task, today)
-        if values is None:
-            outcome.rejected.append(reason or "tâche invalide")
-            continue
-        session.add(StudyTaskRow(**values))
-        kind = "stricte" if task.hard else "souple"
-        outcome.created.append(
-            f"tâche « {task.subject} » {task.effort_minutes} min, échéance {kind} "
-            f"{task.target_date.isoformat()}"
-        )
+    outcome.rejected += [
+        f"{task.subject} : une tâche d'étude ne vient jamais d'un e-mail" for task in result.tasks
+    ]
     for index, activity in enumerate(result.activities):
-        values, reason = activity_values(activity, tz, today, places)
+        values, reason = activity_values(activity, tz, today, places, suggested_day=True)
         if values is None:
             outcome.rejected.append(reason or "activité invalide")
             continue

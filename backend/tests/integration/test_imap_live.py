@@ -59,7 +59,15 @@ def test_only_the_authorised_sender_is_read() -> None:
     insecure.check_hostname = False
     insecure.verify_mode = ssl.CERT_NONE
     since = datetime.now(UTC).date() - timedelta(days=1)
-    strict = ImapSource(HOST, user, user, "coach@club.test", port=3993, ssl_context=insecure)
+    strict = ImapSource(
+        HOST,
+        user,
+        user,
+        "coach@club.test",
+        port=3993,
+        ssl_context=insecure,
+        trusted_authserv_id="mx.club.test",
+    )
     assert strict.fetch(since) == []  # no Authentication-Results from this test server
     source = ImapSource(
         HOST,

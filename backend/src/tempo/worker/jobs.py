@@ -71,8 +71,11 @@ ALERT_STATUSES = frozenset(
         DepartureStatus.AT_RISK,
         DepartureStatus.LATE,
         DepartureStatus.IMPOSSIBLE,
+        DepartureStatus.UNKNOWN_POSITION,
+        DepartureStatus.UNKNOWN_ROUTING,
     }
 )
+"""Every status the user must hear about (D15: unknown position or routing is a warning)."""
 
 Sessions = sessionmaker[Session]
 
@@ -298,11 +301,11 @@ def _next_outbound(session: Session, now: datetime) -> _Trip | None:
     version = active_version(session)
     if version is None:
         return None
-    home = get_setting(session, "home_place_id")
     for trip in version.summary.get("travel", []):
         end = datetime.fromisoformat(trip["end"])
         start = datetime.fromisoformat(trip["start"])
-        if trip["destination"] == home or end <= now or start - now > DEPARTURE_LOOKAHEAD:
+        # Ways back to the base (whichever it is) have no commitment to reach in time.
+        if trip.get("returning") or end <= now or start - now > DEPARTURE_LOOKAHEAD:
             continue
         departure = trip.get("departure")
         return _Trip(
@@ -332,6 +335,7 @@ def departure_job(
     sessions: Sessions,
     routing: RoutingProvider,
     now: datetime,
+    tz: ZoneInfo,
 ) -> str | None:
     with sessions() as session:
         trip = _next_outbound(session, now)
@@ -384,17 +388,29 @@ def departure_job(
                 session,
                 "departure",
                 _departure_title(advice.status, trip.title),
-                _departure_message(state),
+                _departure_message(state, tz),
                 f"departure:{trip.end.isoformat()}:{advice.status.value}",
             )
-        _reminder(session, advice.status, advice.leave_at, trip, now)
+        # Without a usable live answer, reminders still follow the PLANNED departure.
+        unknown = advice.status in (
+            DepartureStatus.UNKNOWN_POSITION,
+            DepartureStatus.UNKNOWN_ROUTING,
+        )
+        leave_at = trip.departure if unknown else advice.leave_at
+        _reminder(session, advice.status, leave_at, trip, now, tz, planned=unknown)
         session.commit()
         return advice.status.value
 
 
 DEFAULT_REMINDERS = (60, 15)
 REMINDER_STATUSES = frozenset(
-    {DepartureStatus.ON_TIME, DepartureStatus.LEAVE_NOW, DepartureStatus.LEAVE_EARLIER}
+    {
+        DepartureStatus.ON_TIME,
+        DepartureStatus.LEAVE_NOW,
+        DepartureStatus.LEAVE_EARLIER,
+        DepartureStatus.UNKNOWN_POSITION,
+        DepartureStatus.UNKNOWN_ROUTING,
+    }
 )
 
 
@@ -404,9 +420,13 @@ def _reminder(
     leave_at: datetime | None,
     trip: _Trip,
     now: datetime,
+    tz: ZoneInfo,
+    *,
+    planned: bool = False,
 ) -> None:
     """Configurable departure reminders (setting ``reminder_minutes``, default 60 and 15): the
-    smallest threshold already reached fires once per trip."""
+    smallest threshold already reached fires once per trip. ``planned``: the live check was
+    not possible, the reminder uses the departure of the published plan and says so."""
     if leave_at is None or status not in REMINDER_STATUSES:
         return
     left = (leave_at - now).total_seconds() / 60
@@ -415,12 +435,14 @@ def _reminder(
     if not reached:
         return
     minutes = reached[0]
-    local = leave_at.strftime("%H:%M")
+    local = leave_at.astimezone(tz).strftime("%H:%M")
     notify(
         session,
         "departure_reminder",
         f"Départ dans {max(0, round(left))} min pour {trip.title}",
-        f"Départ conseillé à {local} (rappel {minutes} min).",
+        f"Départ {'prévu au planning' if planned else 'conseillé'} à {local} "
+        f"(rappel {minutes} min)"
+        + (" — position ou itinéraire en temps réel indisponible." if planned else "."),
         f"reminder:{trip.end.isoformat()}:{minutes}",
     )
 
@@ -432,13 +454,16 @@ def _departure_title(status: DepartureStatus, destination: str) -> str:
         DepartureStatus.AT_RISK: f"Arrivée juste pour {destination}",
         DepartureStatus.LATE: f"Retard prévu pour {destination}",
         DepartureStatus.IMPOSSIBLE: f"Aucun trajet trouvé vers {destination}",
+        DepartureStatus.UNKNOWN_POSITION: f"Position inconnue avant {destination}",
+        DepartureStatus.UNKNOWN_ROUTING: f"Itinéraire indisponible pour {destination}",
     }.get(status, destination)
 
 
-def _departure_message(state: dict[str, Any]) -> str:
+def _departure_message(state: dict[str, Any], tz: ZoneInfo) -> str:
     parts = []
     if state["leave_at"]:
-        parts.append(f"Départ : {datetime.fromisoformat(state['leave_at']).strftime('%H:%M')}")
+        leave = datetime.fromisoformat(state["leave_at"]).astimezone(tz)
+        parts.append(f"Départ : {leave.strftime('%H:%M')}")
     if state["minutes_late"]:
         parts.append(f"retard estimé {state['minutes_late']} min")
     if state["reason"]:

@@ -122,16 +122,27 @@ def docx_attachments(message: EmailMessage) -> tuple[tuple[str, bytes], ...]:
     return tuple(found)
 
 
-def authenticated(message: EmailMessage, sender: str) -> bool:
-    """True when the receiving provider recorded DMARC pass, or DKIM pass for the sender's
-    domain, in ``Authentication-Results`` (a forged ``From`` fails these checks)."""
-    domain = sender.rsplit("@", 1)[-1]
+def authenticated(message: EmailMessage, sender: str, trusted_authserv_id: str) -> bool:
+    """True when the user's OWN receiving server recorded, for the sender's domain, DMARC pass
+    (``header.from`` aligned) or DKIM pass (``header.d`` / ``header.i``).
+
+    Only the topmost ``Authentication-Results`` header carrying ``trusted_authserv_id`` counts
+    (RFC 8601: the receiving server adds it last and removes forged copies of its own id). A
+    header written by the sender or by any other server is never trusted, so a forged
+    ``From`` with a forged ``dmarc=pass`` is rejected."""
+    domain = re.escape(sender.rsplit("@", 1)[-1].casefold())
+    trusted = trusted_authserv_id.strip().casefold()
+    aligned_dmarc = re.compile(rf"^dmarc=pass\b.*\bheader\.from={domain}(?![\w.-])")
+    aligned_dkim = re.compile(rf"^dkim=pass\b.*\bheader\.d={domain}(?![\w.-])")
+    aligned_dkim_i = re.compile(rf"^dkim=pass\b.*\bheader\.i=[^\s;]*@{domain}(?![\w.-])")
     for header in message.get_all("Authentication-Results", []):
-        value = str(header).casefold()
-        if re.search(r"\bdmarc=pass\b", value):
-            return True
-        if re.search(r"\bdkim=pass\b", value) and f"header.d={domain}" in value:
-            return True
+        parts = [p.strip() for p in str(header).casefold().split(";")]
+        if not parts or not parts[0] or parts[0].split()[0] != trusted:
+            continue
+        return any(
+            aligned_dmarc.search(r) or aligned_dkim.search(r) or aligned_dkim_i.search(r)
+            for r in parts[1:]
+        )  # the topmost trusted header decides; older copies are ignored
     return False
 
 
@@ -147,9 +158,15 @@ class ImapSource:
         port: int = 993,
         ssl_context: ssl.SSLContext | None = None,
         require_authentication: bool = True,
+        trusted_authserv_id: str | None = None,
     ) -> None:
         if "@" not in allowed_sender or any(c in allowed_sender for c in '"\\\r\n '):
             raise ValueError("allowed sender must be one plain e-mail address")
+        self._authserv = (trusted_authserv_id or "").strip()
+        if require_authentication and not self._authserv:
+            raise ValueError(
+                "the authserv-id of the receiving mail server is required to check DMARC/DKIM"
+            )
         self._host, self._port, self._user, self._password = host, port, user, password
         self._sender = allowed_sender.casefold()
         self._mailbox = mailbox
@@ -192,7 +209,7 @@ class ImapSource:
                 sender = parseaddr(str(message.get("From", "")))[1].casefold()
                 if sender != self._sender:
                     continue  # server search is not trusted alone
-                if self._require_auth and not authenticated(message, sender):
+                if self._require_auth and not authenticated(message, sender, self._authserv):
                     logger.warning("training e-mail ignored: sender authentication not proven")
                     continue
                 messages.append(

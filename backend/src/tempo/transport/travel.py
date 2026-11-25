@@ -53,6 +53,8 @@ class TravelBlock:
     journey: Journey | None = None
     alternatives: tuple[Journey, ...] = ()
     """Other acceptable journeys, best first (kept for re-planning and the user)."""
+    returning: bool = False
+    """Way back to the base after the last commitment of an outing (no deadline to meet)."""
 
 
 @dataclass(slots=True)
@@ -202,6 +204,7 @@ def _return_trip(
                 TravelStatus.ROUTED,
                 journey,
                 alternatives,
+                returning=True,
             )
         )
         _journey_warnings(plan, journey, label)
@@ -210,7 +213,9 @@ def _return_trip(
         plan.issues.append(f"no return journey found {label}")
     # Conservative block (not a journey, no invented duration): the return time is unknown,
     # so the time up to the next known bound stays free of planned work.
-    plan.blocks.append(TravelBlock(last.end, return_by, last.place, end_place, status))
+    plan.blocks.append(
+        TravelBlock(last.end, return_by, last.place, end_place, status, returning=True)
+    )
 
 
 def plan_day_travel(

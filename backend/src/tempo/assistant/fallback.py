@@ -123,7 +123,7 @@ def reply(ctx: OpContext, text: str) -> dict[str, Any]:
             rejected.append(f"{task.subject} : {outcome['error']}")
     places = known_places(ctx.session)
     for activity in result.activities:
-        values, reason = activity_values(activity, ctx.tz, today, places)
+        values, reason = activity_values(activity, ctx.tz, today, places, suggested_day=False)
         if values is None:
             rejected.append(reason or "activité invalide")
             continue

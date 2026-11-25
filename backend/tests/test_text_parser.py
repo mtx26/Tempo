@@ -99,8 +99,21 @@ def test_sender_authentication_results() -> None:
             m["Authentication-Results"] = value
         return m
 
-    assert authenticated(msg("mx.google.com; dkim=pass header.i=@club.be; dmarc=pass"), "c@club.be")
-    assert authenticated(msg("mx; dkim=pass header.d=club.be; spf=pass"), "c@club.be")
-    assert not authenticated(msg("mx; dkim=pass header.d=evil.test"), "c@club.be")
-    assert not authenticated(msg("mx; dmarc=fail; dkim=none"), "c@club.be")
-    assert not authenticated(msg(), "c@club.be")
+    mx, coach = "mx.google.com", "c@club.be"
+    assert authenticated(msg("mx.google.com; dkim=pass header.i=@club.be"), coach, mx)
+    assert authenticated(msg("mx.google.com; dmarc=pass (p=none) header.from=club.be"), coach, mx)
+    assert authenticated(msg("MX.Google.com; dkim=pass header.d=club.be; spf=pass"), coach, mx)
+    # Wrong domain, failures, nothing at all.
+    assert not authenticated(msg("mx.google.com; dkim=pass header.d=evil.test"), coach, mx)
+    assert not authenticated(msg("mx.google.com; dkim=pass header.d=club.be.evil"), coach, mx)
+    assert not authenticated(msg("mx.google.com; dmarc=pass header.from=evil.test"), coach, mx)
+    assert not authenticated(msg("mx.google.com; dmarc=fail; dkim=none"), coach, mx)
+    assert not authenticated(msg(), coach, mx)
+    # Forged by the sender or written by another server: never trusted.
+    assert not authenticated(msg("evil.example; dmarc=pass header.from=club.be"), coach, mx)
+    # The topmost trusted header decides; an older forged "pass" below it is ignored.
+    forged = msg(
+        "mx.google.com; dmarc=fail header.from=club.be",
+        "mx.google.com; dmarc=pass header.from=club.be",
+    )
+    assert not authenticated(forged, coach, mx)

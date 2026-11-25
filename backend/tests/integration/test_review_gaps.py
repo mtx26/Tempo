@@ -141,7 +141,7 @@ def test_departure_reminders_fire_once_per_threshold(sessions: sessionmaker[Sess
                 )
             )
             s.commit()
-        departure_job(sessions, FakeRouting(), now)
+        departure_job(sessions, FakeRouting(), now, TZ)
 
     for minutes in (50, 40, 10, 5):
         check(minutes)

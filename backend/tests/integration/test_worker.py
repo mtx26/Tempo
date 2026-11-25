@@ -20,7 +20,7 @@ from tempo.db.models import (
     PlaceRow,
     ScheduleVersion,
 )
-from tempo.planning.service import get_setting, set_setting
+from tempo.planning.service import active_version, get_setting, set_setting
 from tempo.worker.jobs import (
     MAX_ICS_BYTES,
     JobError,
@@ -182,8 +182,11 @@ def test_departure_check_from_fresh_phone_position(sessions: sessionmaker[Sessio
     ics_sync(sessions, FEED, NOW, TZ)
     replan_job(sessions, FakeRouting(), NOW, TZ)
     now = datetime(2026, 12, 7, 9, 21, tzinfo=TZ)  # outbound planned 09:20 -> 09:50
-    assert departure_job(sessions, FakeRouting(), now) == "unknown_position"
+    assert departure_job(sessions, FakeRouting(), now, TZ) == "unknown_position"
     with sessions() as s:
+        # D15: an unknown position is a warning the user hears about, never silence.
+        unknown = [n for n in s.scalars(select(NotificationRow)) if n.kind == "departure"]
+        assert len(unknown) == 1 and "Position inconnue" in unknown[0].title
         s.add(
             PhonePositionRow(
                 entity_id="device_tracker.phone",
@@ -195,21 +198,44 @@ def test_departure_check_from_fresh_phone_position(sessions: sessionmaker[Sessio
             )
         )
         s.commit()
-    status = departure_job(sessions, FakeRouting(), now)
+    status = departure_job(sessions, FakeRouting(), now, TZ)
     assert status == "at_risk"  # 30 min trip, arrives 09:51 < 10:00 but inside the 10 min margin
     with sessions() as s:
         state = get_setting(s, "departure_check")
         assert state["status"] == "at_risk" and state["event_title"] == "Campus"
-        alerts = [n for n in s.scalars(select(NotificationRow)) if n.kind == "departure"]
+        alerts = [
+            n
+            for n in s.scalars(select(NotificationRow))
+            if n.kind == "departure" and "Arrivée juste" in n.title
+        ]
         assert len(alerts) == 1 and "Campus" in alerts[0].title
-    departure_job(sessions, FakeRouting(), now + timedelta(seconds=30))
+    departure_job(sessions, FakeRouting(), now + timedelta(seconds=30), TZ)
     with sessions() as s:
-        assert len([n for n in s.scalars(select(NotificationRow)) if n.kind == "departure"]) == 1
+        assert len([n for n in s.scalars(select(NotificationRow)) if n.kind == "departure"]) == 2
+
+
+def test_departure_reminder_follows_the_plan_without_gps(
+    sessions: sessionmaker[Session],
+) -> None:
+    configure(sessions)
+    ics_sync(sessions, FEED, NOW, TZ)
+    replan_job(sessions, FakeRouting(), NOW, TZ)
+    now = datetime(2026, 12, 7, 9, 0, tzinfo=TZ)  # planned departure 09:20, no phone position
+    assert departure_job(sessions, FakeRouting(), now, TZ) == "unknown_position"
+    with sessions() as s:
+        reminders = [
+            n for n in s.scalars(select(NotificationRow)) if n.kind == "departure_reminder"
+        ]
+        assert len(reminders) == 1
+        assert "prévu au planning à 09:20" in reminders[0].message
+        version = active_version(s)
+        assert version is not None
+        assert any(t["returning"] for t in version.summary["travel"])
 
 
 def test_no_trip_clears_the_departure_state(sessions: sessionmaker[Session]) -> None:
     configure(sessions)
-    assert departure_job(sessions, FakeRouting(), NOW) is None
+    assert departure_job(sessions, FakeRouting(), NOW, TZ) is None
     with sessions() as s:
         assert get_setting(s, "departure_check") is None
 
