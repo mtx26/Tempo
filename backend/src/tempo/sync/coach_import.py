@@ -13,15 +13,16 @@ Update rules (ARCHITECTURE.md):
 """
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tempo.db.models import ActivityRow
-from tempo.planning.service import notify, propose
+from tempo.db.store import notify, propose
 from tempo.sync.coach_plan import PlanSession, WeeklyPlan
+from tempo.timeutil import local_midnight
 
 SOURCE = "coach_plan"
 PROTECTED_STATUSES = frozenset({"done", "cancelled"})
@@ -38,10 +39,6 @@ class PlanImport:
     skipped_past: int = 0
 
 
-def _midnight(day: date, tz: ZoneInfo) -> datetime:
-    return datetime.combine(day, time(0), tzinfo=tz)
-
-
 def _protected(row: ActivityRow) -> bool:
     return row.locked or row.user_modified or row.status in PROTECTED_STATUSES
 
@@ -50,11 +47,11 @@ def _values(
     session_: PlanSession, plan: WeeklyPlan, tz: ZoneInfo, today: date
 ) -> dict[str, object]:
     needs_confirmation = session_.duration_minutes is None or session_.is_race
-    earliest = max(_midnight(plan.monday, tz), _midnight(today, tz))
-    latest = _midnight(plan.sunday + timedelta(days=1), tz)
+    earliest = max(local_midnight(plan.monday, tz), local_midnight(today, tz))
+    latest = local_midnight(plan.sunday + timedelta(days=1), tz)
     if session_.is_race:  # the race day is fixed; its start time is confirmed by the user
-        earliest = _midnight(session_.day, tz)
-        latest = _midnight(session_.day + timedelta(days=1), tz)
+        earliest = local_midnight(session_.day, tz)
+        latest = local_midnight(session_.day + timedelta(days=1), tz)
     return {
         "kind": "race" if session_.is_race else "training",
         "title": session_.title,

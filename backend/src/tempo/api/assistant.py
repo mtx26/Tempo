@@ -22,7 +22,7 @@ from tempo.assistant import fallback
 from tempo.assistant.agent import Assistant, LLMUnavailableError
 from tempo.assistant.catalog import CATALOG, OpContext, run_operation
 from tempo.db.models import ConversationTurnRow
-from tempo.planning.service import get_setting, set_setting
+from tempo.db.store import get_setting, set_setting
 from tempo.transport.routing import RoutingProvider
 
 logger = logging.getLogger(__name__)

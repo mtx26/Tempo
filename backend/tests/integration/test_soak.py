@@ -37,7 +37,7 @@ from tempo.db.models import (
     ScheduleVersion,
     StudyBlockRow,
 )
-from tempo.planning.service import active_version, set_setting
+from tempo.db.store import active_version, set_setting
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, RoutingUnavailableError
 from tempo.worker.jobs import fetch_ics

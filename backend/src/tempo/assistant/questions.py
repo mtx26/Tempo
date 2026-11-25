@@ -31,10 +31,6 @@ TYPE_LABELS = {
 }
 
 
-def _plain(text: str) -> str:
-    return plain(text).strip()
-
-
 @dataclass(frozen=True, slots=True)
 class Question:
     kind: str
@@ -52,19 +48,19 @@ DAY_WORDS = re.compile(
 
 
 def parse_question(text: str, today: date) -> Question | None:
-    plain = _plain(text).rstrip(" ?!.")
+    normalised = plain(text).strip().rstrip(" ?!.")
     if re.search(
-        r"\b(prochain depart|quand (?:dois[- ]je|faut[- ]il) partir|partir quand)\b", plain
+        r"\b(prochain depart|quand (?:dois[- ]je|faut[- ]il) partir|partir quand)\b", normalised
     ):
         return Question("departure")
     if re.search(
-        r"\b(prochain(?:e)? (?:cours|rendez-vous|evenement|seance|activite)|la suite)\b", plain
+        r"\b(prochain(?:e)? (?:cours|rendez-vous|evenement|seance|activite)|la suite)\b", normalised
     ):
         return Question("next")
-    if re.search(r"\b(combien|reste)\b.*\b(etude|etudier|travail|heures?)\b", plain):
+    if re.search(r"\b(combien|reste)\b.*\b(etude|etudier|travail|heures?)\b", normalised):
         return Question("remaining")
-    if AGENDA_TRIGGER.search(plain):
-        found = DAY_WORDS.search(plain)
+    if AGENDA_TRIGGER.search(normalised):
+        found = DAY_WORDS.search(normalised)
         day = resolve_day(found[1], today) if found else today
         if day is not None:
             return Question("agenda", day)

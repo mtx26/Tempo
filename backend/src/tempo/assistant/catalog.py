@@ -42,6 +42,7 @@ from tempo.db.models import (
     StudyTaskRow,
     SyncRun,
 )
+from tempo.db.store import active_version, audit, get_setting, place_directory, set_setting
 from tempo.domain.models import TargetKind
 from tempo.domain.ops import (
     DomainError,
@@ -57,17 +58,7 @@ from tempo.domain.ops import (
     update_series,
 )
 from tempo.planning.proposals import decide, proposal_out
-from tempo.planning.service import (
-    PlanningNotConfiguredError,
-    active_version,
-    audit,
-    get_setting,
-    lock_block,
-    place_directory,
-    release_block,
-    replan,
-    set_setting,
-)
+from tempo.planning.service import PlanningNotConfiguredError, lock_block, release_block, replan
 from tempo.planning.views import schedule_items, summary
 from tempo.scheduler.model import Preferences
 from tempo.transport.itinerary import Objective, TripQuery, find_trips

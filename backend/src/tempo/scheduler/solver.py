@@ -40,9 +40,8 @@ from tempo.scheduler.model import (
     PlanStatus,
     Preferences,
     StudyDemand,
-    utc,
 )
-from tempo.scheduler.validate import busy_conflicts
+from tempo.timeutil import utc
 
 ADJACENCY_PENALTY = 120
 SHORT_BLOCK_PENALTY = 30
@@ -546,14 +545,12 @@ def _solve_once(
     status_name = solver.status_name(status)
     if stopper.reached and status == cp_model.FEASIBLE:
         status_name = "OPTIMAL_BY_BOUND"  # proven by objective_lower_bound
-    conflicts = busy_conflicts(problem)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return PlanResult(
             status=PlanStatus.NO_SOLUTION,
             blocks=list(problem.locked_blocks),
             unplanned_minutes={t: m for t, m in builder.to_plan.items() if m},
-            conflicts=conflicts,
             solver_status=status_name,
         )
 
@@ -586,7 +583,6 @@ def _solve_once(
         unplanned_minutes=unplanned_minutes,
         late_minutes=late_minutes,
         hard_deadline_misses=misses,
-        conflicts=conflicts,
         solver_status=status_name,
         objective=solver.objective_value,
     )

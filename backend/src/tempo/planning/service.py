@@ -12,33 +12,34 @@ Persistence rules:
   de-duplicated notifications for Home Assistant.
 """
 
-import hashlib
 import math
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import ColumnElement, or_, select, text, update
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from tempo.db.models import (
     ActivityRow,
-    AuditEntry,
     AvailabilityExceptionRow,
     AvailabilityRow,
     CategoryWindowRow,
     FixedEventRow,
-    NotificationRow,
-    PlaceAliasRow,
-    PlaceRow,
-    ProposalRow,
     ScheduleVersion,
-    SettingRow,
     StudyBlockRow,
     StudyTaskRow,
+)
+from tempo.db.store import (
+    active_version,
+    audit,
+    digest,
+    get_setting,
+    notify,
+    place_directory,
+    propose,
 )
 from tempo.domain.models import EventStatus, TargetKind
 from tempo.domain.ops import needs_session, refresh_task_sessions, remaining_minutes
@@ -46,15 +47,18 @@ from tempo.planning.engine import (
     DEFAULT_ACTIVITY_HOURS,
     Commitment,
     CommitmentKind,
+    Conflict,
+    ConflictKind,
     OutcomeStatus,
     PlanningInput,
     PlanningOutcome,
     TrainingRequest,
     run_planning,
 )
-from tempo.scheduler.model import Interval, PlannedBlock, Preferences, StudyDemand, utc
+from tempo.scheduler.model import PlannedBlock, Preferences, StudyDemand
+from tempo.timeutil import Interval, end_of_day, utc
 from tempo.transport.location import DeclaredStay
-from tempo.transport.places import Coordinates, Place, PlaceDirectory
+from tempo.transport.places import PlaceDirectory
 from tempo.transport.routing import RoutingProvider
 from tempo.transport.travel import StudyWindow
 
@@ -65,97 +69,6 @@ ACTOR = "planner"
 
 class PlanningNotConfiguredError(RuntimeError):
     """A prerequisite (home place) is missing: Tempo asks instead of guessing."""
-
-
-def get_setting(session: Session, key: str, default: Any = None) -> Any:
-    row = session.get(SettingRow, key)
-    return default if row is None else row.value.get("value", default)
-
-
-def set_setting(session: Session, key: str, value: Any) -> None:
-    stmt = insert(SettingRow).values(key=key, value={"value": value})
-    session.execute(
-        stmt.on_conflict_do_update(index_elements=["key"], set_={"value": stmt.excluded.value})
-    )
-
-
-def audit(
-    session: Session, actor: str, action: str, entity: str, entity_id: str, **details: Any
-) -> None:
-    session.add(
-        AuditEntry(
-            at=datetime.now(UTC),
-            actor=actor,
-            action=action,
-            entity=entity,
-            entity_id=entity_id,
-            details=details,
-        )
-    )
-
-
-def notify(session: Session, kind: str, title: str, message: str, dedupe_key: str) -> None:
-    """Insert a notification once per ``dedupe_key`` (repeated issues do not spam)."""
-    stmt = insert(NotificationRow).values(
-        id=uuid.uuid4(),
-        kind=kind,
-        title=title[:300],
-        message=message,
-        dedupe_key=dedupe_key[:300],
-        created_at=datetime.now(UTC),
-    )
-    session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
-
-
-def proposal_revision(session: Session, details: dict[str, Any]) -> str | None:
-    """Digest of the state a proposal was computed on (its target block / activity). Approval
-    recomputes it: a different value means the inputs changed and the proposal is obsolete."""
-    parts: list[str] = []
-    if "block_id" in details:
-        block = session.get(StudyBlockRow, uuid.UUID(details["block_id"]))
-        parts.append(
-            "-"
-            if block is None
-            else f"{block.start_at}|{block.end_at}|{block.locked}|{block.state}"
-        )
-    if "activity_id" in details:
-        act = session.get(ActivityRow, uuid.UUID(details["activity_id"]))
-        parts.append(
-            "-"
-            if act is None
-            else f"{act.status}|{act.locked}|{act.earliest_start_at}|{act.latest_end_at}|"
-            f"{act.duration_minutes}|{act.planned_start_at if act.locked else ''}"
-        )
-    return _digest("#".join(parts)) if parts else None
-
-
-def propose(
-    session: Session, kind: str, title: str, details: dict[str, Any], dedupe_key: str
-) -> None:
-    stmt = insert(ProposalRow).values(
-        id=uuid.uuid4(),
-        kind=kind,
-        title=title[:300],
-        details=details,
-        dedupe_key=dedupe_key[:300],
-        created_at=datetime.now(UTC),
-        input_revision=proposal_revision(session, details),
-    )
-    session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
-
-
-def _place(row: PlaceRow) -> Place:
-    return Place(row.id, row.name, Coordinates(row.latitude, row.longitude))
-
-
-def place_directory(session: Session) -> PlaceDirectory:
-    places = [_place(p) for p in session.scalars(select(PlaceRow))]
-    aliases = {a.alias: a.place_id for a in session.scalars(select(PlaceAliasRow))}
-    return PlaceDirectory(places, aliases)
-
-
-def _end_of_day(day: date, tz: ZoneInfo) -> datetime:
-    return datetime.combine(day + timedelta(days=1), time(0), tzinfo=tz)
 
 
 def _availability(
@@ -204,7 +117,7 @@ def _wall_clock(day: date, start: int, end: int, tz: ZoneInfo) -> tuple[datetime
     # Wall-clock minutes (DST-safe): build local times, not midnight + offset.
     begin = datetime.combine(day, time(start // 60, start % 60), tzinfo=tz)
     finish = (
-        _end_of_day(day, tz)
+        end_of_day(day, tz)
         if end == 1440
         else datetime.combine(day, time(end // 60, end % 60), tzinfo=tz)
     )
@@ -250,7 +163,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
     if home is None:
         raise PlanningNotConfiguredError("no home place configured (setting home_place_id)")
     horizon_days = int(get_setting(session, "horizon_days", DEFAULT_HORIZON_DAYS))
-    horizon_end = _end_of_day((now + timedelta(days=horizon_days)).astimezone(tz).date(), tz)
+    horizon_end = end_of_day((now + timedelta(days=horizon_days)).astimezone(tz).date(), tz)
     buffer = timedelta(minutes=int(get_setting(session, "buffer_minutes", 10)))
 
     commitments: list[Commitment] = []
@@ -332,7 +245,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
             target = (
                 None
                 if task is None or task.target_date is None
-                else _end_of_day(task.target_date, tz)
+                else end_of_day(task.target_date, tz)
             )
             trainings.append(
                 TrainingRequest(
@@ -389,12 +302,12 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
             target_kind = TargetKind.SOFT
         else:
             target_day, target_kind = task.target_date, task.target_kind
-        target, minutes = _end_of_day(target_day, tz), remaining
+        target, minutes = end_of_day(target_day, tz), remaining
         if target_day > last_day:
             # Target beyond the planning horizon: plan only the proportional share now (spread
             # the work until the target); the real deadline is checked once it is in range.
             minutes = _proportional_share(remaining, today, last_day, target_day)
-            target, target_kind = _end_of_day(last_day, tz), TargetKind.SOFT
+            target, target_kind = end_of_day(last_day, tz), TargetKind.SOFT
             spread[str(task.id)] = minutes
         demands.append(
             StudyDemand(
@@ -405,7 +318,12 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
 
     locked = [
         PlannedBlock(
-            str(b.task_id), subjects.get(str(b.task_id), "?"), b.start_at, b.end_at, locked=True
+            str(b.task_id),
+            subjects.get(str(b.task_id), "?"),
+            b.start_at,
+            b.end_at,
+            locked=True,
+            ref=f"block:{b.id}",
         )
         for b in session.scalars(
             select(StudyBlockRow).where(
@@ -509,14 +427,6 @@ def _recovery_days(act: ActivityRow, groups: dict[str, list[ActivityRow]]) -> in
     return min(max((act.preferred_day - previous.preferred_day).days, 0), MAX_RECOVERY_DAYS)
 
 
-def active_version(session: Session) -> ScheduleVersion | None:
-    return session.scalars(
-        select(ScheduleVersion)
-        .where(ScheduleVersion.state == "active")
-        .order_by(ScheduleVersion.created_at.desc())
-    ).first()
-
-
 def lock_block(block: StudyBlockRow) -> None:
     """Protect a study block in place: detached from plan versions, never moved without the
     user's approval (a re-plan keeps it and plans around it)."""
@@ -530,10 +440,6 @@ def release_block(session: Session, block: StudyBlockRow) -> None:
     active = active_version(session)
     block.locked = False
     block.schedule_version_id = None if active is None else active.id
-
-
-def _digest(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
 def _travel_json(outcome: PlanningOutcome) -> list[dict[str, Any]]:
@@ -581,30 +487,6 @@ def _travel_json(outcome: PlanningOutcome) -> list[dict[str, Any]]:
     return items
 
 
-def _conflict_proposals(session: Session, data: PlanningInput) -> None:
-    fixed = [Interval(c.start, c.end) for c in data.commitments]
-    rows = session.scalars(
-        select(StudyBlockRow).where(StudyBlockRow.locked.is_(True), StudyBlockRow.end_at > data.now)
-    )
-    for row in rows:
-        block = Interval(row.start_at, row.end_at)
-        for commitment, interval in zip(data.commitments, fixed, strict=True):
-            if interval.overlaps(block):
-                propose(
-                    session,
-                    "unlock_block",
-                    f"'{commitment.title}' chevauche un bloc d'étude verrouillé",
-                    {
-                        "block_id": str(row.id),
-                        "block_start": row.start_at.isoformat(),
-                        "commitment": commitment.ref,
-                        "commitment_start": commitment.start.isoformat(),
-                    },
-                    f"unlock:{row.id}:{commitment.ref}:{commitment.start.isoformat()}",
-                )
-    _activity_conflicts(session, data)
-
-
 LABELS = {
     CommitmentKind.CLASS: "le cours",
     CommitmentKind.RACE: "la compétition",
@@ -613,47 +495,53 @@ LABELS = {
 }
 
 
-def _activity_conflicts(session: Session, data: PlanningInput) -> None:
-    """Every pair of overlapping commitments, whatever their category (classes, races, fixed
-    appointments, locked activities):
-
-    - a LOCKED flexible activity in the pair: proposal to unlock it (approval -> it becomes
-      flexible again and is re-placed); the other side is never moved;
-    - two fixed commitments: nothing can move automatically -> conflict notification.
-    Activities already under way are never the subject of a proposal."""
-    items = sorted(
-        (c for c in data.commitments if utc(c.end) > utc(data.now)), key=lambda c: utc(c.start)
-    )
-    for i, first in enumerate(items):
-        for second in items[i + 1 :]:
-            if utc(second.start) >= utc(first.end):
-                break
-            movable = [c for c in (first, second) if c.movable and not c.underway]
-            key = f"{first.ref}:{second.ref}:{first.start.isoformat()}:{second.start.isoformat()}"
-            for activity in movable:
-                other = second if activity is first else first
-                propose(
-                    session,
-                    "unlock_activity",
-                    f"{LABELS[other.kind].capitalize()} '{other.title}' chevauche "
-                    f"{LABELS[activity.kind]} verrouillé(e) '{activity.title}'",
-                    {
-                        "activity_id": activity.ref.removeprefix("activity:"),
-                        "commitment": other.ref,
-                        "commitment_start": other.start.isoformat(),
-                    },
-                    f"unlock_activity:{activity.ref}:{other.ref}:{other.start.isoformat()}",
-                )
-            if movable:
-                continue
-            race = CommitmentKind.RACE in (first.kind, second.kind)
-            when = second.start.astimezone(data.timezone).isoformat(timespec="minutes")
+def _publish_conflicts(session: Session, conflicts: list[Conflict], tz: ZoneInfo) -> None:
+    """Publish what ``engine.find_conflicts`` detected: a proposal when approval can resolve
+    it (unlock a locked block or activity), otherwise a conflict notification (rien ne bouge)."""
+    for conflict in conflicts:
+        other = conflict.other
+        if conflict.kind is ConflictKind.LOCKED_BLOCK:
+            block_id = conflict.subject_ref.removeprefix("block:")
+            propose(
+                session,
+                "unlock_block",
+                f"'{other.title}' chevauche un bloc d'étude verrouillé",
+                {
+                    "block_id": block_id,
+                    "block_start": conflict.subject_start.isoformat(),
+                    "commitment": other.ref,
+                    "commitment_start": other.start.isoformat(),
+                },
+                f"unlock:{block_id}:{other.ref}:{other.start.isoformat()}",
+            )
+        elif conflict.kind is ConflictKind.LOCKED_ACTIVITY:
+            assert conflict.subject_kind is not None  # noqa: S101 - activities have a kind
+            propose(
+                session,
+                "unlock_activity",
+                f"{LABELS[other.kind].capitalize()} '{other.title}' chevauche "
+                f"{LABELS[conflict.subject_kind]} verrouillé(e) '{conflict.subject_title}'",
+                {
+                    "activity_id": conflict.subject_ref.removeprefix("activity:"),
+                    "commitment": other.ref,
+                    "commitment_start": other.start.isoformat(),
+                },
+                f"unlock_activity:{conflict.subject_ref}:{other.ref}:{other.start.isoformat()}",
+            )
+        else:
+            assert conflict.subject_kind is not None  # noqa: S101 - commitments have a kind
+            race = CommitmentKind.RACE in (conflict.subject_kind, other.kind)
+            when = other.start.astimezone(tz).isoformat(timespec="minutes")
+            key = (
+                f"{conflict.subject_ref}:{other.ref}:{conflict.subject_start.isoformat()}:"
+                f"{other.start.isoformat()}"
+            )
             notify(
                 session,
                 "race_conflict" if race else "fixed_conflict",
                 "Conflit avec une compétition" if race else "Conflit entre engagements fixes",
-                f"{LABELS[first.kind].capitalize()} '{first.title}' chevauche "
-                f"{LABELS[second.kind]} '{second.title}' ({when}). Rien n'est déplacé "
+                f"{LABELS[conflict.subject_kind].capitalize()} '{conflict.subject_title}' "
+                f"chevauche {LABELS[other.kind]} '{other.title}' ({when}). Rien n'est déplacé "
                 "automatiquement : à arbitrer.",
                 f"conflict:{key}",
             )
@@ -677,7 +565,7 @@ def _notify_issues(session: Session, issues: list[str], now: datetime, tz: ZoneI
     for issue in issues:
         if issue not in outage:
             notify(
-                session, "plan_issue", "Tempo : point à vérifier", issue, f"issue:{_digest(issue)}"
+                session, "plan_issue", "Tempo : point à vérifier", issue, f"issue:{digest(issue)}"
             )
 
 
@@ -845,7 +733,7 @@ def replan(
         "hard_deadline_misses": outcome.hard_deadline_misses,
         "outside_hours": outcome.outside_hours,
         "deadline_capacity": outcome.deadline_capacity,
-        "conflicts": [] if result is None else result.conflicts,
+        "conflicts": [c.describe() for c in outcome.conflicts],
     }
     usable = outcome.status in (OutcomeStatus.COMPLETE, OutcomeStatus.PARTIAL)
     version = ScheduleVersion(
@@ -895,7 +783,7 @@ def replan(
             "plan_rejected",
             "Planification impossible à valider",
             f"Le nouveau planning n'a pas été appliqué (l'ancien reste actif) : {reason_text}",
-            f"rejected:{_digest(reason_text)}:{now.date()}",
+            f"rejected:{digest(reason_text)}:{now.date()}",
         )
 
     if usable:
@@ -908,7 +796,7 @@ def replan(
         ]
         summary["diff"] = _schedule_diff(before_blocks, _block_keys(session, version), moved)
         version.summary = dict(summary)
-    _conflict_proposals(session, loaded.data)
+    _publish_conflicts(session, outcome.conflicts, tz)
     _notify_issues(session, outcome.issues, now, tz)
     if usable:
         subjects = {str(t.id): t.subject for t in session.scalars(select(StudyTaskRow))}

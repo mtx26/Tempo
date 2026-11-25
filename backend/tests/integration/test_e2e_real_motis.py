@@ -13,7 +13,6 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from tempo.db.ics_repository import get_or_create_source
 from tempo.db.models import (
     AvailabilityRow,
     Base,
@@ -23,8 +22,10 @@ from tempo.db.models import (
     StudyBlockRow,
     StudyTaskRow,
 )
+from tempo.db.store import set_setting
 from tempo.domain.models import EventStatus
-from tempo.planning.service import replan, set_setting
+from tempo.planning.service import replan
+from tempo.sync.ics_repository import get_or_create_source
 from tempo.transport.motis import MotisClient
 
 MOTIS_URL = os.environ.get("TEMPO_TEST_MOTIS_URL")

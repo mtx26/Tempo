@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
 from tempo.scheduler.model import (
-    Interval,
     PlannedBlock,
     PlanningProblem,
     PlanResult,
@@ -21,6 +20,7 @@ from tempo.scheduler.model import (
 )
 from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import validate_plan
+from tempo.timeutil import Interval
 
 TZ = ZoneInfo("Europe/Brussels")
 
@@ -205,7 +205,8 @@ def test_planning_across_dst_change_keeps_local_wall_clock() -> None:
     assert 8 <= block.start.astimezone(TZ).hour < 12
 
 
-def test_class_moved_onto_locked_block_is_reported_not_infeasible() -> None:
+def test_class_moved_onto_locked_block_is_not_infeasible() -> None:
+    """The solver plans around it; the conflict itself is detected by engine.find_conflicts."""
     locked = PlannedBlock("analyse", "analyse", at(1, 8), at(1, 9, 30), locked=True)
     p = problem(
         [demand("analyse", 180)],
@@ -216,7 +217,6 @@ def test_class_moved_onto_locked_block_is_reported_not_infeasible() -> None:
     result = solve(p, time_limit_seconds=10)
     assert result.status is PlanStatus.COMPLETE
     assert locked in result.blocks
-    assert len(result.conflicts) == 1
     new_blocks = [b for b in result.blocks if not b.locked]
     assert all(not b.interval.overlaps(Interval(at(1, 9), at(1, 10))) for b in new_blocks)
 

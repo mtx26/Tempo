@@ -16,9 +16,10 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
-from tempo.scheduler.model import Interval, PlanningProblem, StudyDemand
+from tempo.scheduler.model import PlanningProblem, StudyDemand
 from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import validate_plan
+from tempo.timeutil import Interval
 
 TZ = ZoneInfo("Europe/Brussels")
 START = date(2027, 2, 1)  # a Monday

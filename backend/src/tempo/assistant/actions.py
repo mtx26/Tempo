@@ -15,12 +15,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from tempo.db.models import ProposalRow, StudyBlockRow, StudyTaskRow
-from tempo.planning.service import active_version
+from tempo.db.store import active_version
 from tempo.text import plain
-
-
-def _plain(text: str) -> str:
-    return plain(text).strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +34,12 @@ _DONE = re.compile(
 
 
 def parse_action(text: str) -> Action | None:
-    plain = _plain(text).rstrip(" !.")
-    if _APPROVE.match(plain):
+    normalised = plain(text).strip().rstrip(" !.")
+    if _APPROVE.match(normalised):
         return Action("approve")
-    if _REJECT.match(plain):
+    if _REJECT.match(normalised):
         return Action("reject")
-    if _DONE.match(plain):
+    if _DONE.match(normalised):
         return Action("done")
     return None
 

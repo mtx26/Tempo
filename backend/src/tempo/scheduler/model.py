@@ -1,38 +1,16 @@
 """Input and output types of the deterministic study planner.
 
-All datetimes are timezone-aware. Arithmetic is done in UTC: Python ignores UTC offsets when
-subtracting or comparing two datetimes that share the same ``tzinfo`` object, which is wrong
-across DST changes.
+All datetimes are timezone-aware; time primitives (``utc``, ``Interval``) live in
+``tempo.timeutil``.
 """
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
-
-
-def utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("datetime must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-@dataclass(frozen=True, slots=True)
-class Interval:
-    start: datetime
-    end: datetime
-
-    def __post_init__(self) -> None:
-        if utc(self.end) <= utc(self.start):
-            raise ValueError("interval end must be after start")
-
-    def overlaps(self, other: "Interval") -> bool:
-        return utc(self.start) < utc(other.end) and utc(other.start) < utc(self.end)
-
-    def contains(self, other: "Interval") -> bool:
-        return utc(self.start) <= utc(other.start) and utc(other.end) <= utc(self.end)
+from tempo.timeutil import Interval, utc
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +42,8 @@ class PlannedBlock:
     end: datetime
     locked: bool = False
     """Locked blocks are never moved by the optimizer (changing them needs approval)."""
+    ref: str | None = None
+    """``block:<id>`` of a stored locked block (conflict proposals); None for computed blocks."""
 
     def __post_init__(self) -> None:
         if utc(self.end) <= utc(self.start):
@@ -148,8 +128,6 @@ class PlanResult:
     late_minutes: dict[str, int] = field(default_factory=dict)
     """Effort minutes of soft-target tasks planned in blocks ending after the target."""
     hard_deadline_misses: list[str] = field(default_factory=list)
-    conflicts: list[str] = field(default_factory=list)
-    """Source conflicts to surface for approval (e.g. a class moved onto a locked block)."""
     solver_status: str = ""
     objective: float | None = None
     """CP-SAT objective of the returned plan (lower is better); None without a solution."""

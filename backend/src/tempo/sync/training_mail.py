@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from tempo.ai.apply import apply_result, from_extraction, known_places, result_to_json
 from tempo.ai.llm import Interpreter
 from tempo.ai.text_parser import ParseResult, parse_text
-from tempo.planning.service import get_setting, notify, propose, set_setting
+from tempo.db.store import get_setting, notify, propose, set_setting
 from tempo.sync.coach_import import apply_weekly_plan
 from tempo.sync.coach_plan import MAX_DOCX_BYTES, PlanFormatError, parse_plan_docx
 

@@ -5,9 +5,10 @@ from datetime import timedelta
 import pytest
 
 from benchmarks import scheduler_bench
-from tempo.scheduler.model import Interval, Preferences
+from tempo.scheduler.model import Preferences
 from tempo.scheduler.solver import objective_lower_bound, solve
 from tempo.scheduler.validate import validate_plan
+from tempo.timeutil import Interval
 from tests.test_scheduler import at, demand, problem
 
 

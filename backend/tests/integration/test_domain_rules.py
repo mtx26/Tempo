@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from tempo.assistant.catalog import run_operation
 from tempo.db.models import ActivityRow, AuditEntry, PlaceAliasRow, StudyBlockRow, StudyTaskRow
-from tempo.planning.service import active_version, get_setting, replan
+from tempo.db.store import active_version, get_setting
+from tempo.planning.service import replan
 from tests.integration.test_operations import ctx, err, ok
 from tests.integration.test_planning_service import NOW, TZ, seed
 from tests.test_engine import FakeRouting

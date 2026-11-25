@@ -17,10 +17,10 @@ the single itinerary service (``itinerary.find_trips``):
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 
-from tempo.scheduler.model import Interval
+from tempo.timeutil import Interval, utc
 from tempo.transport.itinerary import (
     Objective,
     TripQuery,
@@ -77,10 +77,6 @@ class StudyWindows:
     issues: list[str] = field(default_factory=list)
 
 
-def _u(value: datetime) -> datetime:
-    return value.astimezone(UTC)
-
-
 def _trip(
     routing: RoutingProvider,
     origin: Place,
@@ -105,7 +101,7 @@ def _trip(
 
 def _label(origin: Place, destination: Place, when: datetime) -> str:
     # UTC in labels: one stable text per journey, whatever timezone the caller used.
-    return f"{origin.name} -> {destination.name} ({_u(when).isoformat()})"
+    return f"{origin.name} -> {destination.name} ({utc(when).isoformat()})"
 
 
 def _journey_warnings(plan: TravelPlan, journey: Journey, label: str) -> None:
@@ -235,7 +231,7 @@ def plan_day_travel(
     after the last event).
     """
     routing = provider
-    ordered = sorted(events, key=lambda e: _u(e.start))
+    ordered = sorted(events, key=lambda e: utc(e.start))
     plan = TravelPlan()
     if not ordered:
         return plan
@@ -257,8 +253,8 @@ def plan_day_travel(
 
 def _subtract(window: Interval, busy: list[tuple[datetime, datetime]]) -> list[Interval]:
     pieces: list[Interval] = []
-    cursor = _u(window.start)
-    end = _u(window.end)
+    cursor = utc(window.start)
+    end = utc(window.end)
     for b_start, b_end in sorted(busy):
         if b_end <= cursor or b_start >= end:
             continue
@@ -286,13 +282,13 @@ def travel_aware_study_windows(
     (outbound) or from the event to its end (return) and an issue is reported.
     """
     routing = provider
-    all_events = sorted(events, key=lambda e: _u(e.start))
+    all_events = sorted(events, key=lambda e: utc(e.start))
     result = StudyWindows()
     for window in windows:
-        w_start, w_end = _u(window.interval.start), _u(window.interval.end)
+        w_start, w_end = utc(window.interval.start), utc(window.interval.end)
         busy: list[tuple[datetime, datetime]] = []
         for event in all_events:
-            e_start, e_end = _u(event.start), _u(event.end)
+            e_start, e_end = utc(event.start), utc(event.end)
             if e_start >= w_end + max_travel or e_end <= w_start - max_travel:
                 continue
             busy.append((e_start, e_end))
@@ -327,11 +323,11 @@ def travel_aware_study_windows(
                 result.issues.append(f"no outbound journey to {where}; time before it withheld")
                 busy.append((min(w_start, e_start), e_start))
             else:
-                busy.append((_u(there.departure), e_start))
+                busy.append((utc(there.departure), e_start))
             if back is None:
                 result.issues.append(f"no return journey from {where}; time after it withheld")
                 busy.append((e_end, max(w_end, e_end)))
             else:
-                busy.append((e_end, _u(back.arrival)))
+                busy.append((e_end, utc(back.arrival)))
         result.windows.extend(_subtract(window.interval, busy))
     return result

@@ -5,7 +5,6 @@ from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
 from tempo.scheduler.model import (
-    Interval,
     PlannedBlock,
     PlanningProblem,
     PlanResult,
@@ -14,6 +13,7 @@ from tempo.scheduler.model import (
     StudyDemand,
 )
 from tempo.scheduler.validate import validate_plan
+from tempo.timeutil import Interval
 
 TZ = ZoneInfo("Europe/Brussels")
 

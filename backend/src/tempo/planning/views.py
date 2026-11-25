@@ -16,14 +16,10 @@ from tempo.db.models import (
     StudyBlockRow,
     StudyTaskRow,
 )
+from tempo.db.store import active_version, get_setting, place_directory
 from tempo.domain.models import EventStatus
 from tempo.domain.ops import remaining_minutes
-from tempo.planning.service import active_version, get_setting, place_directory
-from tempo.scheduler.model import utc
-
-
-def _iso(value: datetime) -> str:
-    return value.isoformat()
+from tempo.timeutil import utc
 
 
 def schedule_items(session: Session, start: datetime, end: datetime) -> list[dict[str, Any]]:
@@ -44,8 +40,8 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                 "type": "class",
                 "id": f"event:{event.id}",
                 "title": event.summary,
-                "start": _iso(event.start_at),
-                "end": _iso(event.end_at),
+                "start": event.start_at.isoformat(),
+                "end": event.end_at.isoformat(),
                 "location": event.location,
                 "place_id": None if place is None else place.id,
                 "fixed": True,
@@ -71,8 +67,8 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                 "block_id": str(block.id),
                 "task_id": str(block.task_id),
                 "title": f"Étude : {subjects.get(block.task_id, '?')}",
-                "start": _iso(block.start_at),
-                "end": _iso(block.end_at),
+                "start": block.start_at.isoformat(),
+                "end": block.end_at.isoformat(),
                 "locked": block.locked,
                 "state": block.state,
                 "fixed": False,
@@ -100,8 +96,8 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                 "activity_id": str(act.id),
                 "title": act.title,
                 "notes": act.notes,
-                "start": _iso(begins),
-                "end": _iso(ends),
+                "start": begins.isoformat(),
+                "end": ends.isoformat(),
                 "location": places.get(act.place_id or ""),
                 "place_id": act.place_id,
                 "locked": act.locked,

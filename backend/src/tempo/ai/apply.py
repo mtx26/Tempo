@@ -18,6 +18,7 @@ from tempo.ai.llm import Extraction
 from tempo.ai.text_parser import ParsedActivity, ParsedTask, ParseResult
 from tempo.db.models import ActivityRow, PlaceRow
 from tempo.domain.models import TargetKind
+from tempo.timeutil import local_midnight
 
 MAX_EFFORT = 100_000
 MAX_ACTIVITY_AHEAD = timedelta(days=60)
@@ -31,10 +32,6 @@ MAX_ITEMS = 20
 class Applied:
     created: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
-
-
-def _midnight(day: date, tz: ZoneInfo) -> datetime:
-    return datetime.combine(day, time(0), tzinfo=tz)
 
 
 def activity_values(
@@ -65,11 +62,11 @@ def activity_values(
         earliest, latest = start, start + duration
     elif suggested_day:
         monday = item.day - timedelta(days=item.day.weekday())
-        earliest = max(_midnight(monday, tz), _midnight(today, tz))
-        latest = _midnight(monday + timedelta(days=7), tz)
+        earliest = max(local_midnight(monday, tz), local_midnight(today, tz))
+        latest = local_midnight(monday + timedelta(days=7), tz)
     else:
-        earliest = max(_midnight(item.day, tz), _midnight(today, tz))
-        latest = _midnight(item.day + timedelta(days=1), tz)
+        earliest = max(local_midnight(item.day, tz), local_midnight(today, tz))
+        latest = local_midnight(item.day + timedelta(days=1), tz)
     values = {
         "kind": item.kind,
         "title": item.title[:300],

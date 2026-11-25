@@ -19,14 +19,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
-from tempo.scheduler.model import (
-    Interval,
-    PlannedBlock,
-    PlanningProblem,
-    PlanResult,
-    PlanStatus,
-    utc,
-)
+from tempo.scheduler.model import PlannedBlock, PlanningProblem, PlanResult, PlanStatus
+from tempo.timeutil import Interval, utc
 
 
 def _minutes(block: PlannedBlock) -> int:
@@ -107,15 +101,6 @@ def validate_plan(problem: PlanningProblem, result: PlanResult) -> list[str]:
             if planned[demand.task_id] < demand.remaining_minutes:
                 violations.append(f"{demand.task_id}: status complete but effort is missing")
     return violations
-
-
-def busy_conflicts(problem: PlanningProblem) -> list[str]:
-    """Locked blocks that collide with fixed commitments: protected changes needing approval."""
-    return [
-        f"locked block conflicts with a fixed commitment: {_label(locked)}"
-        for locked in problem.locked_blocks
-        if any(b.overlaps(locked.interval) for b in problem.busy)
-    ]
 
 
 @dataclass(frozen=True, slots=True)

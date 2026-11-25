@@ -20,7 +20,8 @@ from tempo.db.models import (
     StudyTaskRow,
     WorkLogRow,
 )
-from tempo.planning.service import active_version, propose, replan
+from tempo.db.store import active_version, propose
+from tempo.planning.service import replan
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
 from tests.integration.test_planning_service import NOW, TZ, at, seed

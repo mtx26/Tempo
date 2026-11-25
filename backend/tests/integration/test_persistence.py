@@ -9,7 +9,6 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from tempo.db.ics_repository import active_events, apply_ics_sync, get_or_create_source
 from tempo.db.models import (
     AuditEntry,
     Base,
@@ -20,6 +19,7 @@ from tempo.db.models import (
 )
 from tempo.domain.models import TargetKind
 from tempo.sync.ics import Window, parse_ics
+from tempo.sync.ics_repository import active_events, apply_ics_sync, get_or_create_source
 
 pytestmark = pytest.mark.integration
 

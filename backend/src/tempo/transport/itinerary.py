@@ -19,10 +19,11 @@ reported as ``incomplete``.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from tempo.timeutil import utc
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
 
@@ -39,12 +40,6 @@ class Objective(StrEnum):
     LATEST_DEPARTURE = "latest_departure"
     EARLIEST_ARRIVAL = "earliest_arrival"
     SHORTEST = "shortest"
-
-
-def _u(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("itinerary bounds must be timezone-aware")
-    return value.astimezone(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,19 +59,19 @@ class TripQuery:
         if (
             self.depart_after is not None
             and self.arrive_before is not None
-            and _u(self.arrive_before) <= _u(self.depart_after)
+            and utc(self.arrive_before) <= utc(self.depart_after)
         ):
             raise ValueError("empty time window")
 
     def in_bounds(self, journey: Journey) -> bool:
-        departure, arrival = _u(journey.departure), _u(journey.arrival)
+        departure, arrival = utc(journey.departure), utc(journey.arrival)
         if self.depart_after is not None and self.arrive_before is not None:
-            return departure >= _u(self.depart_after) and arrival <= _u(self.arrive_before)
+            return departure >= utc(self.depart_after) and arrival <= utc(self.arrive_before)
         if self.arrive_before is not None:
-            deadline = _u(self.arrive_before)
+            deadline = utc(self.arrive_before)
             return deadline - self.span <= arrival <= deadline
         assert self.depart_after is not None  # noqa: S101 - checked in __post_init__
-        earliest = _u(self.depart_after)
+        earliest = utc(self.depart_after)
         return earliest <= departure <= earliest + self.span
 
     def meets_criteria(self, journey: Journey) -> bool:
@@ -93,18 +88,18 @@ def walking(journey: Journey) -> timedelta:
 
 RANKING: dict[Objective, Callable[[Journey], Any]] = {
     Objective.LATEST_DEPARTURE: lambda j: (
-        -_u(j.departure).timestamp(),
+        -utc(j.departure).timestamp(),
         j.severe_disruptions,
         j.transfers,
         j.duration,
     ),
     Objective.EARLIEST_ARRIVAL: lambda j: (
-        _u(j.arrival),
+        utc(j.arrival),
         j.severe_disruptions,
         j.transfers,
         j.duration,
     ),
-    Objective.SHORTEST: lambda j: (j.duration, j.severe_disruptions, j.transfers, _u(j.arrival)),
+    Objective.SHORTEST: lambda j: (j.duration, j.severe_disruptions, j.transfers, utc(j.arrival)),
 }
 
 
@@ -130,11 +125,18 @@ class TripResult:
 
 def _key(journey: Journey) -> tuple[Any, ...]:
     return (
-        _u(journey.departure),
-        _u(journey.arrival),
+        utc(journey.departure),
+        utc(journey.arrival),
         journey.transfers,
         tuple(
-            (leg.mode, leg.line, leg.origin_name, leg.destination_name, _u(leg.start), _u(leg.end))
+            (
+                leg.mode,
+                leg.line,
+                leg.origin_name,
+                leg.destination_name,
+                utc(leg.start),
+                utc(leg.end),
+            )
             for leg in journey.legs
         ),
     )
@@ -153,12 +155,12 @@ def find_trips(provider: RoutingProvider, query: TripQuery) -> TripResult:
     )
     if backward:
         assert query.arrive_before is not None  # noqa: S101 - narrowing
-        cursor = _u(query.arrive_before)
-        stop = _u(query.depart_after) if query.depart_after is not None else cursor - query.span
+        cursor = utc(query.arrive_before)
+        stop = utc(query.depart_after) if query.depart_after is not None else cursor - query.span
     else:
         assert query.depart_after is not None  # noqa: S101 - narrowing
-        cursor = _u(query.depart_after)
-        stop = _u(query.arrive_before) if query.arrive_before is not None else cursor + query.span
+        cursor = utc(query.depart_after)
+        stop = utc(query.arrive_before) if query.arrive_before is not None else cursor + query.span
     found: dict[tuple[Any, ...], Journey] = {}
     result = TripResult()
     budget = min(MAX_PAGES, max(MIN_PAGES, int(abs(stop - cursor) / PAGE_SPAN)))
@@ -178,12 +180,12 @@ def find_trips(provider: RoutingProvider, query: TripQuery) -> TripResult:
         ):
             break
         if backward:
-            earlier = [_u(j.arrival) for j in page if _u(j.arrival) <= cursor]
+            earlier = [utc(j.arrival) for j in page if utc(j.arrival) <= cursor]
             if not new or not earlier:
                 break
             cursor = min(earlier) - STEP
         else:
-            later = [_u(j.departure) for j in page if _u(j.departure) >= cursor]
+            later = [utc(j.departure) for j in page if utc(j.departure) >= cursor]
             if not new or not later:
                 break
             cursor = max(later) + STEP
@@ -251,7 +253,7 @@ class CachedRouting:
     def plan(
         self, origin: Coordinates, destination: Coordinates, time: datetime, *, arrive_by: bool
     ) -> list[Journey]:
-        key = (origin, destination, _u(time), arrive_by)
+        key = (origin, destination, utc(time), arrive_by)
         if key not in self._cache:
             self._cache[key] = self._provider.plan(origin, destination, time, arrive_by=arrive_by)
         return self._cache[key]

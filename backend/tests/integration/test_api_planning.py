@@ -15,10 +15,11 @@ from sqlalchemy.orm import Session
 
 from tempo.api.app import create_app
 from tempo.config import Settings
-from tempo.db.ics_repository import get_or_create_source
 from tempo.db.models import Base, FixedEventRow, StudyBlockRow, StudyTaskRow
+from tempo.db.store import get_setting
 from tempo.domain.models import EventStatus
-from tempo.planning.service import get_setting, replan
+from tempo.planning.service import replan
+from tempo.sync.ics_repository import get_or_create_source
 from tests.test_engine import FakeRouting
 
 pytestmark = pytest.mark.integration

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from tempo.timeutil import utc
 from tempo.transport.places import Coordinates
 
 
@@ -17,12 +18,6 @@ class RoutingUnavailableError(RuntimeError):
 STREET_MODES = frozenset(
     {"WALK", "BIKE", "RENTAL", "CAR", "HGV", "CAR_PARKING", "CAR_DROPOFF", "ODM", "RIDE_SHARING"}
 )
-
-
-def _aware_utc(name: str, value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(UTC)
 
 
 SEVERE_EFFECTS = frozenset(
@@ -55,10 +50,10 @@ class ServiceAlert:
     def active_during(self, start: datetime, end: datetime) -> bool:
         if not self.impact_periods:
             return True
-        s, e = _aware_utc("start", start), _aware_utc("end", end)
+        s, e = utc(start, "start"), utc(end, "end")
         return any(
-            (p_start is None or _aware_utc("period start", p_start) < e)
-            and (p_end is None or _aware_utc("period end", p_end) > s)
+            (p_start is None or utc(p_start, "period start") < e)
+            and (p_end is None or utc(p_end, "period end") > s)
             for p_start, p_end in self.impact_periods
         )
 
@@ -81,9 +76,9 @@ class Leg:
     alerts: tuple[ServiceAlert, ...] = ()
 
     def __post_init__(self) -> None:
-        start, end = _aware_utc("leg start", self.start), _aware_utc("leg end", self.end)
-        _aware_utc("leg scheduled start", self.scheduled_start)
-        _aware_utc("leg scheduled end", self.scheduled_end)
+        start, end = utc(self.start, "leg start"), utc(self.end, "leg end")
+        utc(self.scheduled_start, "leg scheduled start")
+        utc(self.scheduled_end, "leg scheduled end")
         if end < start:
             raise ValueError("leg ends before it starts")
 
@@ -102,8 +97,8 @@ class Leg:
     @property
     def relevant_alerts(self) -> tuple[ServiceAlert, ...]:
         """Alerts whose impact period overlaps the leg (scheduled or live times)."""
-        first = min(_aware_utc("s", self.start), _aware_utc("s", self.scheduled_start))
-        last = max(_aware_utc("e", self.end), _aware_utc("e", self.scheduled_end))
+        first = min(utc(self.start, "s"), utc(self.scheduled_start, "s"))
+        last = max(utc(self.end, "e"), utc(self.scheduled_end, "e"))
         return tuple(a for a in self.alerts if a.active_during(first, last))
 
 
@@ -117,8 +112,8 @@ class Journey:
 
     def __post_init__(self) -> None:
         """Reject inconsistent itineraries: they could hide a mandatory trip."""
-        departure = _aware_utc("departure", self.departure)
-        arrival = _aware_utc("arrival", self.arrival)
+        departure = utc(self.departure, "departure")
+        arrival = utc(self.arrival, "arrival")
         if not self.legs:
             raise ValueError("journey without legs")
         if arrival < departure:

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from tempo.timeutil import utc
+
 
 class TargetKind(StrEnum):
     SOFT = "soft"
@@ -22,11 +24,6 @@ class EventStatus(StrEnum):
     CONFIRMED = "confirmed"
     TENTATIVE = "tentative"
     CANCELLED = "cancelled"
-
-
-def _require_aware(name: str, value: datetime) -> None:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{name} must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +39,8 @@ class FixedEvent:
     status: EventStatus = EventStatus.CONFIRMED
 
     def __post_init__(self) -> None:
-        _require_aware("start", self.start)
-        _require_aware("end", self.end)
+        utc(self.start, "start")
+        utc(self.end, "end")
         if self.end.astimezone(UTC) <= self.start.astimezone(UTC):
             raise ValueError("end must be after start")
 

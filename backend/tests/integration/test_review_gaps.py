@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.api.app import create_app
 from tempo.config import Settings
-from tempo.db.ics_repository import get_or_create_source
 from tempo.db.models import (
     ActivityRow,
     Base,
@@ -23,10 +22,12 @@ from tempo.db.models import (
     ProposalRow,
     StudyBlockRow,
 )
+from tempo.db.store import set_setting
 from tempo.domain.models import EventStatus
-from tempo.planning.service import replan, set_setting
+from tempo.planning.service import replan
 from tempo.sync.coach_import import apply_weekly_plan
 from tempo.sync.coach_plan import parse_plan_docx
+from tempo.sync.ics_repository import get_or_create_source
 from tempo.worker.jobs import departure_job
 from tests.docx_fixtures import EXAMPLE_WEEK, plan_docx
 from tests.integration.test_planning_service import seed

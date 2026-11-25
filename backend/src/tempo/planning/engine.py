@@ -34,17 +34,16 @@ from zoneinfo import ZoneInfo
 
 from tempo.scheduler.activities import FlexibleActivity, PlacedActivity, plan_activities
 from tempo.scheduler.model import (
-    Interval,
     PlannedBlock,
     PlanningProblem,
     PlanResult,
     PlanStatus,
     Preferences,
     StudyDemand,
-    utc,
 )
 from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import Occupied, PlacedSession, validate_plan, validate_schedule
+from tempo.timeutil import Interval, utc
 from tempo.transport.itinerary import CachedRouting, Objective, TripQuery, find_trips
 from tempo.transport.location import DeclaredStay, LocatedEvent, base_at
 from tempo.transport.places import Place
@@ -135,6 +134,89 @@ class PlanningInput:
     """Task sessions whose strict deadline already passed with work left: task -> minutes."""
 
 
+class ConflictKind(StrEnum):
+    LOCKED_BLOCK = "locked_block"
+    """A commitment overlaps a locked study block: unlocking it needs approval."""
+    LOCKED_ACTIVITY = "locked_activity"
+    """A commitment overlaps a locked flexible activity: unlocking it needs approval."""
+    FIXED = "fixed"
+    """Two fixed commitments overlap: nothing can move automatically, to arbitrate."""
+
+
+@dataclass(frozen=True, slots=True)
+class Conflict:
+    """One overlap between protected items. ``subject`` is what may move after the user's
+    approval (a locked block or activity); for FIXED it is simply the earlier commitment."""
+
+    kind: ConflictKind
+    subject_ref: str
+    subject_title: str
+    subject_start: datetime
+    subject_kind: CommitmentKind | None
+    """None for a study block."""
+    other: Commitment
+
+    def describe(self) -> str:
+        what = "study block" if self.subject_kind is None else self.subject_kind.value
+        return (
+            f"{self.kind.value}: {what} '{self.subject_title}' "
+            f"({self.subject_start.isoformat(timespec='minutes')}) overlaps "
+            f"{self.other.kind.value} '{self.other.title}' "
+            f"({self.other.start.isoformat(timespec='minutes')})"
+        )
+
+
+def find_conflicts(
+    commitments: list[Commitment], locked_blocks: list[PlannedBlock], now: datetime
+) -> list[Conflict]:
+    """Every overlap between protected items, whatever their category: commitment pairs
+    (classes, races, fixed appointments, locked or under-way activities) and stored locked
+    study blocks against commitments. Under-way items are never the subject of a proposal.
+    Detection only: publication (proposals, notifications) is ``planning.service``'s job, and
+    a conflict without possible resolution is still reported (FIXED)."""
+    found: list[Conflict] = []
+    items = sorted((c for c in commitments if utc(c.end) > utc(now)), key=lambda c: utc(c.start))
+    for i, first in enumerate(items):
+        for second in items[i + 1 :]:
+            if utc(second.start) >= utc(first.end):
+                break
+            movable = [c for c in (first, second) if c.movable and not c.underway]
+            for subject in movable:
+                other = second if subject is first else first
+                found.append(
+                    Conflict(
+                        ConflictKind.LOCKED_ACTIVITY,
+                        subject.ref,
+                        subject.title,
+                        subject.start,
+                        subject.kind,
+                        other,
+                    )
+                )
+            if not movable:
+                found.append(
+                    Conflict(
+                        ConflictKind.FIXED, first.ref, first.title, first.start, first.kind, second
+                    )
+                )
+    for block in locked_blocks:
+        if block.ref is None or utc(block.end) <= utc(now):
+            continue  # computed / under-way blocks are not stored protections
+        for commitment in items:
+            if block.interval.overlaps(Interval(commitment.start, commitment.end)):
+                found.append(
+                    Conflict(
+                        ConflictKind.LOCKED_BLOCK,
+                        block.ref,
+                        block.subject,
+                        block.start,
+                        None,
+                        commitment,
+                    )
+                )
+    return found
+
+
 class OutcomeStatus(StrEnum):
     COMPLETE = "complete"
     PARTIAL = "partial"
@@ -161,6 +243,8 @@ class PlanningOutcome:
     hard_deadline_misses: list[str] = field(default_factory=list)
     outside_hours: list[str] = field(default_factory=list)
     """Activities placed outside the preferred activity hours (soft preference not met)."""
+    conflicts: list[Conflict] = field(default_factory=list)
+    """Overlaps between protected items (``find_conflicts``), reported in every outcome."""
 
 
 def free_minutes(availability: list[Interval], busy: list[Interval], until: datetime) -> int:
@@ -345,6 +429,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 "(time blocked, travel not planned)"
             )
     fixed_busy = [Interval(c.start, c.end) for c in fixed]
+    conflicts = find_conflicts(fixed, data.locked_blocks, data.now)
     fixed_located = [LocatedEvent(c.start, c.end, c.place) for c in fixed if c.place is not None]
     # Journeys between fixed commitments first: flexible activities are placed around them.
     fixed_travel = _route_days(fixed_located, data, routing, [], [])
@@ -394,7 +479,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
             f"flexible activities: no answer from the solver ({activity_plan.solver_status}): "
             "inconclusive, not a proof of impossibility; the previous plan is kept"
         )
-        return PlanningOutcome(OutcomeStatus.NO_SOLUTION, None, issues=issues)
+        return PlanningOutcome(OutcomeStatus.NO_SOLUTION, None, issues=issues, conflicts=conflicts)
     for missing in activity_plan.unplaced:
         rule = " and its category windows" if by_id[missing].allowed is not None else ""
         issues.append(f"activity '{by_id[missing].title}': no free slot in its window{rule}")
@@ -441,6 +526,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         late_minutes=dict(result.late_minutes),
         hard_deadline_misses=list(result.hard_deadline_misses),
         outside_hours=activity_plan.outside_hours,
+        conflicts=conflicts,
     )
     if result.status is PlanStatus.NO_SOLUTION:
         issues.append(

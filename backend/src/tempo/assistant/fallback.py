@@ -8,11 +8,17 @@ LLM assistant: same validation, savepoints, audit and re-plan requests.
 from datetime import datetime
 from typing import Any
 
-from tempo.ai.actions import Action, block_to_complete, parse_action, pending_proposals, subject_of
 from tempo.ai.apply import MAX_ITEMS, activity_values, known_places, task_values
-from tempo.ai.questions import answer, parse_question
 from tempo.ai.text_parser import parse_text
+from tempo.assistant.actions import (
+    Action,
+    block_to_complete,
+    parse_action,
+    pending_proposals,
+    subject_of,
+)
 from tempo.assistant.catalog import OpContext, run_operation
+from tempo.assistant.questions import answer, parse_question
 
 EXAMPLES = (
     "Exemples : « ajoute 5h de maths pour vendredi », « ajoute 90 min d'analyse avant le "

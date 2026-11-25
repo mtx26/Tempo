@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from tempo.scheduler.model import Interval
+from tempo.timeutil import Interval
 from tempo.transport.itinerary import CachedRouting
 from tempo.transport.location import LocatedEvent
 from tempo.transport.places import Coordinates, Place

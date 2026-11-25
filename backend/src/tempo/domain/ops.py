@@ -13,7 +13,7 @@ One implementation per business rule (no duplicate logic between HTTP routes and
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -31,6 +31,7 @@ from tempo.db.models import (
     WorkLogRow,
 )
 from tempo.domain.models import TargetKind
+from tempo.timeutil import end_of_day
 
 SERIES_HORIZON = timedelta(days=60)
 MAX_OCCURRENCES = 400
@@ -121,11 +122,6 @@ def needs_session(task: StudyTaskRow) -> bool:
     return task.place_id is not None or not task.splittable
 
 
-def target_end(day: date, tz: ZoneInfo) -> datetime:
-    """End of the target day in local time (the instant work is due)."""
-    return datetime.combine(day + timedelta(days=1), time(0), tzinfo=tz)
-
-
 def sync_task_session(
     session: Session, task: StudyTaskRow, now: datetime, tz: ZoneInfo
 ) -> ActivityRow | None:
@@ -149,11 +145,11 @@ def sync_task_session(
     duration = timedelta(minutes=remaining)
     start = now if current is None else min(current.earliest_start_at, now)
     if task.target_date is not None and task.target_kind is TargetKind.HARD:
-        end = target_end(task.target_date, tz)
+        end = end_of_day(task.target_date, tz)
         if end <= start:
             start = end - duration  # deadline already passed: kept visible, reported as missed
     else:
-        soft = None if task.target_date is None else target_end(task.target_date, tz)
+        soft = None if task.target_date is None else end_of_day(task.target_date, tz)
         end = max(soft or now, now + TASK_SESSION_HORIZON, start + duration)
     if current is None:
         current = ActivityRow(
@@ -416,10 +412,3 @@ def update_series(
         updated += 1
     session.flush()
     return updated
-
-
-def local_day_bounds(day: date, last_day: date, tz: ZoneInfo) -> tuple[datetime, datetime]:
-    return (
-        datetime.combine(day, time(0), tzinfo=tz),
-        datetime.combine(last_day + timedelta(days=1), time(0), tzinfo=tz),
-    )

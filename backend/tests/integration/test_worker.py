@@ -20,7 +20,7 @@ from tempo.db.models import (
     PlaceRow,
     ScheduleVersion,
 )
-from tempo.planning.service import active_version, get_setting, set_setting
+from tempo.db.store import active_version, get_setting, set_setting
 from tempo.worker.jobs import (
     MAX_ICS_BYTES,
     JobError,

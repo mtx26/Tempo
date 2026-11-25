@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 from ortools.sat.python import cp_model
 
-from tempo.scheduler.model import Interval, utc
+from tempo.timeutil import Interval, utc
 
 GRID_MINUTES = 15
 MISSING_PENALTY = 10_000_000

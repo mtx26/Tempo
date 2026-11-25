@@ -142,7 +142,7 @@ flowchart TD
  V --> U
 ```
 
-Backend monolithique modulaire (`backend/src/tempo`) + worker séparé. PostgreSQL est la source
+Backend monolithique modulaire (`backend/src/tempo`) + worker séparé. Dépendances en couches, sans cycle entre modules : `timeutil` et `domain/models` à la base, puis `db`, `domain/ops` (règles, au-dessus de `db`), `transport` (qui ne dépend que de `timeutil`), `ai`, `scheduler`, `sync`, `planning`, enfin `assistant`, `api` et `worker`. PostgreSQL est la source
 de vérité ; Home Assistant n'est pas une seconde base de planning. MOTIS calcule les
 itinéraires, OR-Tools résout les contraintes, Tempo orchestre. Aucune passerelle IA
 supplémentaire.
@@ -151,13 +151,15 @@ supplémentaire.
 |---|---|
 | `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) : **unique surface métier**, lectures comprises, pour l'IA, Home Assistant et tout client (`/v1/operations`). |
 | `assistant/agent.py` | Boucle d'appels d'outils Claude (Messages API, `claude-opus-5-5`, prompt système mis en cache, repli serveur `fallbacks`) ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
-| `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`ai/actions.py`, `ai/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. |
+| `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`assistant/actions.py`, `assistant/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. `ai/` ne fait qu'interpréter (analyseur déterministe, LLM facultatif, application validée des imports). |
 | `api/` | FastAPI, cinq routes : `/health` (public), `/v1/status`, `/v1/conversation`, `/v1/operations` (liste et exécution), `/v1/location` (GPS réel poussé par HA : télémétrie, jamais une opération accessible au LLM). |
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
-| `planning/` | Chargement des entrées, moteur (`engine.py`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), vues. |
+| `db/` | Modèles et migrations ; `store.py` : services de persistance partagés par tous les paquets (réglages, audit, notifications par une seule fonction, propositions avec leur révision, version active, annuaire des lieux). |
+| `timeutil.py` | Primitives de temps uniques : conversion UTC (refus des dates sans fuseau), bornes de jour locales sûres aux changements d'heure, `Interval`. |
+| `planning/` | Chargement des entrées, moteur (`engine.py`, dont la détection unique des conflits `find_conflicts`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), vues. |
 | `scheduler/` | CP-SAT : étude (`solver.py`), activités flexibles (`activities.py`), validateur indépendant (`validate.py`). |
 | `transport/` | `itinerary.py` : **service d'itinéraire unique** (bornes, objectif, critères, pagination MOTIS, alternatives, cache par exécution) utilisé par la recherche, les trajets du planning, l'estimation des activités flexibles et le contrôle de départ ; `location.py` : position réelle et base à un instant ; client MOTIS, trajets obligatoires (`travel.py`), contrôle de départ, relais GTFS-RT, flux belges, mise à jour des données de routage. |
-| `sync/` | iCal (`ics.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
+| `sync/` | iCal (`ics.py`, enregistrement `ics_repository.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
 | `worker/` | Boucle de jobs durables (`job_run`) : iCal, séries, replanification, rappels, contrôle de départ, e-mails, rétention. |
 | `../tempo-homeassistant` | Intégration HACS `custom_components/tempo` (dépôt séparé). |
 
@@ -413,7 +415,7 @@ flowchart TD
  IMP --> P[Replanification selon protections]
 ```
 
-- **Université** (`sync/ics.py`, `db/ics_repository.py`) : identité (UID, RECURRENCE-ID UTC) ;
+- **Université** (`sync/ics.py`, `sync/ics_repository.py`) : identité (UID, RECURRENCE-ID UTC) ;
   suppression logique avec historique ; flux vide ou plus de 50 % de suppressions ⇒ sync
   `suspect`, suppressions retenues ; UID invalides jamais supprimés ; verrou consultatif par
   source ; heures inexistantes (passage à l'heure d'été) normalisées, ambiguës résolues sur la
@@ -635,7 +637,8 @@ stateDiagram-v2
   enregistre l'empreinte de son entrée (`input_revision`) ; à l'accord, l'empreinte est
   recalculée : différente ⇒ `obsolete`, rien n'est appliqué, une replanification est demandée.
 - Conflits entre engagements de toutes catégories (cours, compétitions, rendez-vous fixes,
-  activités verrouillées) : une activité flexible verrouillée en conflit produit une
+  activités verrouillées), détectés en un seul endroit (`planning/engine.find_conflicts`) et
+  repris dans le résumé de chaque version, même rejetée : une activité flexible verrouillée en conflit produit une
   proposition de déverrouillage, une séance d'étude verrouillée aussi ; deux engagements fixes
   produisent une notification de conflit (rien ne bouge). Une activité déjà commencée n'est
   jamais déplacée ni proposée. Modification iCal nocturne : le cours officiel est enregistré
@@ -762,14 +765,14 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution locale : backend **530 tests réussis, 0 ignoré** (PostgreSQL 16
+Dernière exécution locale : backend **536 tests réussis, 0 ignoré** (PostgreSQL 16
 réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
 portail Belgian Mobility réel en anonyme), couverture 94 %, Ruff et mypy strict propres ;
 intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres. Recettes rejouées
-le 25/11/2026 après les corrections de l'audit de conformité, base de développement vide :
-vrai Home Assistant 2026.11.2 (`scripts/ha_e2e.py`) 15/15 et pile complète avec worker, relais
-et MOTIS national (`scripts/live_scenario.py`) 15/15 ; jobs du worker sains, battement de santé
-actif.
+le 25/11/2026 après la réorganisation en couches (`timeutil`, `db/store`, conflits
+centralisés), base de développement vide : vrai Home Assistant 2026.11.2 (`scripts/ha_e2e.py`)
+15/15 et pile complète avec worker, relais et MOTIS national (`scripts/live_scenario.py`)
+15/15 ; jobs du worker sains.
 
 Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), URL iCal de
 l'université, entité `device_tracker`, adresse de l'expéditeur du coach + accès IMAP, clé

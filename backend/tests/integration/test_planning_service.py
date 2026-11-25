@@ -7,7 +7,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from tempo.db.ics_repository import get_or_create_source
 from tempo.db.models import (
     ActivityRow,
     AvailabilityRow,
@@ -19,8 +18,10 @@ from tempo.db.models import (
     StudyBlockRow,
     StudyTaskRow,
 )
+from tempo.db.store import set_setting
 from tempo.domain.models import EventStatus
-from tempo.planning.service import PlanningNotConfiguredError, replan, set_setting
+from tempo.planning.service import PlanningNotConfiguredError, replan
+from tempo.sync.ics_repository import get_or_create_source
 from tests.test_engine import FakeRouting
 
 TZ = ZoneInfo("Europe/Brussels")

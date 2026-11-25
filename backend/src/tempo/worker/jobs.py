@@ -28,7 +28,6 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.ai.llm import Interpreter
-from tempo.db.ics_repository import apply_ics_sync, get_or_create_source
 from tempo.db.models import (
     ActivityRow,
     ConversationTurnRow,
@@ -41,15 +40,10 @@ from tempo.db.models import (
     SettingRow,
     StudyBlockRow,
 )
-from tempo.planning.service import (
-    PlanningNotConfiguredError,
-    active_version,
-    get_setting,
-    notify,
-    replan,
-    set_setting,
-)
+from tempo.db.store import active_version, get_setting, notify, set_setting
+from tempo.planning.service import PlanningNotConfiguredError, replan
 from tempo.sync.ics import IcsParseError, parse_ics
+from tempo.sync.ics_repository import apply_ics_sync, get_or_create_source
 from tempo.sync.training_mail import MailSource, import_messages
 from tempo.transport.departure import DepartureStatus, check_departure
 from tempo.transport.location import LocatedEvent, PhonePosition

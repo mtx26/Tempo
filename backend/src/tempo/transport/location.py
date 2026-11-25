@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from tempo.timeutil import utc
 from tempo.transport.places import Coordinates, Place
 
 MAX_POSITION_AGE = timedelta(minutes=10)
@@ -26,12 +27,6 @@ class PositionStatus(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
-def _utc(name: str, value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
 @dataclass(frozen=True, slots=True)
 class PhonePosition:
     coordinates: Coordinates
@@ -40,7 +35,7 @@ class PhonePosition:
     entity_id: str
 
     def __post_init__(self) -> None:
-        _utc("observed_at", self.observed_at)
+        utc(self.observed_at, "observed_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +45,7 @@ class LocatedEvent:
     place: Place
 
     def __post_init__(self) -> None:
-        if _utc("end", self.end) <= _utc("start", self.start):
+        if utc(self.end, "end") <= utc(self.start, "start"):
             raise ValueError("event end must be after start")
 
 
@@ -63,7 +58,7 @@ class DeclaredStay:
     end: datetime
 
     def __post_init__(self) -> None:
-        if _utc("end", self.end) <= _utc("start", self.start):
+        if utc(self.end, "end") <= utc(self.start, "start"):
             raise ValueError("stay end must be after start")
 
 
@@ -76,7 +71,7 @@ def assess_position(
 ) -> PositionStatus:
     if position is None:
         return PositionStatus.UNAVAILABLE
-    age = _utc("now", now) - position.observed_at.astimezone(UTC)
+    age = utc(now, "now") - position.observed_at.astimezone(UTC)
     if age < timedelta(0) or age > max_age:
         return PositionStatus.STALE
     if position.accuracy_m > max_accuracy_m:
@@ -92,8 +87,8 @@ def planned_place(at: datetime, stays: list[DeclaredStay]) -> Place | None:
     """The planned location covering ``at`` (None if none).
 
     Raises ``AmbiguousLocationError`` when several planned locations overlap."""
-    instant = _utc("at", at)
-    covering = [s for s in stays if _utc("start", s.start) <= instant < _utc("end", s.end)]
+    instant = utc(at, "at")
+    covering = [s for s in stays if utc(s.start, "start") <= instant < utc(s.end, "end")]
     if len(covering) > 1:
         raise AmbiguousLocationError
     return covering[0].place if covering else None

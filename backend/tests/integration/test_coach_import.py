@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from tempo.api.app import create_app
 from tempo.config import Settings
 from tempo.db.models import ActivityRow, AvailabilityRow, Base, NotificationRow, PlaceRow
-from tempo.planning.service import replan, set_setting
+from tempo.db.store import set_setting
+from tempo.planning.service import replan
 from tempo.sync.coach_import import apply_weekly_plan
 from tempo.sync.coach_plan import parse_plan_docx
 from tempo.sync.training_mail import MailMessage

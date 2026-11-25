@@ -11,14 +11,9 @@ from sqlalchemy.orm import Session
 
 from tempo.ai.apply import apply_result, result_from_json
 from tempo.db.models import ActivityRow, ProposalRow, StudyBlockRow
+from tempo.db.store import audit, notify, proposal_revision, set_setting
 from tempo.domain.ops import DomainError
-from tempo.planning.service import (
-    audit,
-    notify,
-    proposal_revision,
-    release_block,
-    set_setting,
-)
+from tempo.planning.service import release_block
 
 
 def proposal_out(row: ProposalRow) -> dict[str, Any]:

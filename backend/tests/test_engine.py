@@ -13,7 +13,8 @@ from tempo.planning.engine import (
     TrainingRequest,
     run_planning,
 )
-from tempo.scheduler.model import Interval, PlannedBlock, StudyDemand, utc
+from tempo.scheduler.model import PlannedBlock, StudyDemand
+from tempo.timeutil import Interval, utc
 from tempo.transport.location import DeclaredStay
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
@@ -295,3 +296,38 @@ def test_journey_of_a_flexible_activity_over_a_commitment_is_a_violation() -> No
         [], [Occupied("Analyse", Interval(at(8, 17, 30), at(8, 19)))], [], TZ, [trip]
     )
     assert found == ["journey Kot -> Club overlaps Analyse"]
+
+
+def test_find_conflicts_covers_every_category_and_never_hides_one() -> None:
+    from tempo.planning.engine import ConflictKind, find_conflicts
+
+    exam = Commitment("event:1", "Examen", at(9, 9), at(9, 11), CommitmentKind.CLASS, CAMPUS)
+    race = Commitment("activity:r", "10 km", at(9, 10), at(9, 11), CommitmentKind.RACE, CLUB)
+    locked = Commitment(
+        "activity:t", "Footing", at(9, 10, 30), at(9, 11, 30), CommitmentKind.TRAINING, movable=True
+    )
+    running = Commitment(
+        "activity:u", "Sortie", at(9, 10, 45), at(9, 12), CommitmentKind.OTHER, underway=True
+    )
+    block = PlannedBlock("maths", "maths", at(9, 8), at(9, 9, 30), locked=True, ref="block:b1")
+    computed = PlannedBlock("maths", "maths", at(9, 8), at(9, 9, 30), locked=True)
+    found = find_conflicts([exam, race, locked, running], [block, computed], at(9, 6))
+    kinds = {(c.kind, c.subject_ref, c.other.ref) for c in found}
+    # Two fixed commitments: reported even though nothing can be resolved automatically.
+    assert (ConflictKind.FIXED, "event:1", "activity:r") in kinds
+    # A locked flexible activity is the subject of an approval, never the under-way one.
+    assert (ConflictKind.LOCKED_ACTIVITY, "activity:t", "event:1") in kinds
+    assert not any(
+        c.subject_ref == "activity:u" and c.kind is not ConflictKind.FIXED for c in found
+    )
+    # Stored locked block vs commitment; a computed (under-way) block is not a protection.
+    assert [c.subject_ref for c in found if c.kind is ConflictKind.LOCKED_BLOCK] == ["block:b1"]
+
+
+def test_conflicts_are_reported_even_without_a_usable_plan() -> None:
+    clash = [
+        Commitment("a", "Cours", at(9, 10), at(9, 12), CommitmentKind.CLASS, None),
+        Commitment("b", "Dentiste", at(9, 11), at(9, 12), CommitmentKind.OTHER, None),
+    ]
+    outcome = run_planning(week(commitments=clash, trainings=[]), FakeRouting())
+    assert next(c.describe() for c in outcome.conflicts).startswith("fixed: class 'Cours'")

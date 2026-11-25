@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from tempo.scheduler.activities import FlexibleActivity, plan_activities
-from tempo.scheduler.model import Interval
+from tempo.timeutil import Interval
 
 TZ = ZoneInfo("Europe/Brussels")
 

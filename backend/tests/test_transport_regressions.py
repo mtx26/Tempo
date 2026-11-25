@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tempo.scheduler.model import Interval
+from tempo.timeutil import Interval
 from tempo.transport.location import (
     DeclaredStay,
     LocatedEvent,
