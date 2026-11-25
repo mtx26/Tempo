@@ -40,8 +40,20 @@ def test_stib_has_no_realtime_feed() -> None:
 def test_urls_are_https_and_realtime_requests_protobuf() -> None:
     for item in FEEDS:
         assert item.url.startswith("https://api-management-discovery-production.azure-api.net/")
+        assert item.url_for(AccessTier.ANONYMOUS) == item.url
     for item in REALTIME:
         assert item.url.endswith("?format=protobuf")
+
+
+def test_keyed_tiers_use_the_authenticated_host_with_the_same_path() -> None:
+    """Knowledge base, "Use with API key": api.belgianmobility.io checks the key (verified
+    2026-11-25: 401 without key or with a wrong key); the anonymous host ignores any key."""
+    anonymous = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed/"
+    keyed = "https://api.belgianmobility.io/api/gtfs/feed/"
+    for item in FEEDS:
+        url = item.url_for(AccessTier.STANDARD)
+        assert url.startswith(keyed)
+        assert url.removeprefix(keyed) == item.url.removeprefix(anonymous)
 
 
 def test_only_tec_is_repaired() -> None:
@@ -50,9 +62,12 @@ def test_only_tec_is_repaired() -> None:
 
 def test_default_plan_for_all_realtime_feeds_fits_the_standard_quota() -> None:
     result = check_budget(REALTIME, PollingPlan(), AccessTier.STANDARD)
-    # 3 x 720 trip-update polls + 3 x 144 alert polls.
-    assert result.requests_per_day == 3 * 720 + 3 * 144
+    # Trip updates every minute, alerts every 5 minutes: 3 x 1440 + 3 x 288 polls.
+    assert result.requests_per_day == 3 * 1440 + 3 * 288
     assert result.allowed_per_day == 9_600
+    # Headroom: well under half of the 12 000/day quota (static downloads, retries, changes).
+    assert result.requests_per_day < 12_000 // 2
+    assert result.requests_per_minute_peak <= 6
 
 
 def test_all_realtime_feeds_do_not_fit_the_anonymous_quota() -> None:

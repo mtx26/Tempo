@@ -499,15 +499,27 @@ Faits vérifiés le 23/11/2026 par requêtes réelles :
   `opendata-discovery-gtfs-realtime...` n'avait pas d'enregistrement DNS. STIB : GTFS statique
   seulement. MOTIS est la seule source d'itinéraires : les trajets STIB (et tout exploitant
   sans temps réel) suivent le GTFS statique.
-- Quotas indicatifs : anonyme 100/jour ; clé Standard (en-tête `bmc-partner-key`) 12 000/jour.
-  Clé testée le 25/11/2026 : cet hôte répond 200 avec la vraie clé, avec une fausse clé et sans
-  clé, sous `bmc-partner-key` comme sous `Ocp-Apim-Subscription-Key` ; il ne contrôle donc pas
-  la clé et son effet sur le quota **n'est pas observable**. L'hôte documenté n'a toujours pas
-  de DNS. Tempo envoie la clé (inoffensif) et reste dans le quota anonyme planifié par défaut.
+- Quotas indicatifs (conditions d'utilisation §5) : anonyme 100/jour et 10/min ; Standard
+  12 000/jour et 500/min ; au-delà, le portail peut répondre 429.
+- Deux hôtes, mêmes chemins (base de connaissances du portail) : l'hôte anonyme ci-dessus ne
+  contrôle aucune clé (25/11/2026 : 200 avec la vraie clé, une fausse ou aucune) ; l'hôte
+  « avec clé » `api.belgianmobility.io` la contrôle (401 « missing subscription key » sans clé,
+  « invalid subscription key » avec une mauvaise). Avec une clé, le relais et la mise à jour
+  des GTFS statiques utilisent donc `api.belgianmobility.io` (`Feed.url_for`), en-tête
+  `bmc-partner-key` (`Ocp-Apim-Subscription-Key` y est vu comme une clé absente). Les hôtes
+  `opendata-discovery-gtfs-*` de la documentation n'ont toujours pas de DNS.
+- Interrogation avec clé : TripUpdates toutes les minutes (l'éditeur publie toutes les 30 s),
+  alertes toutes les 5 min, pour les six flux : 5 184 requêtes/jour, soit 43 % du quota
+  (54 % du plafond de 80 % que le relais s'impose) ; s'y ajoutent au plus 4 téléchargements
+  statiques par jour. MOTIS interroge le relais (interne, gratuit) toutes les 30 s : une copie
+  fraîche l'atteint en moins de 30 s.
 - Relais (`transport/rt_relay.py`, une seule réplique) : détient la clé, plafonne à 80 % du
-  quota, recul exponentiel, `Retry-After` respecté, répond 503 au-delà de 10 min de fraîcheur
-  (MOTIS abandonne alors ce temps réel : vérifié), retire `start_time` des TEC (décalage de
-  12 h en amont ; résolution 50 % → 100 %).
+  quota, recul exponentiel. Un 429 suspend **tous** les flux (le quota est par compte) jusqu'à
+  `Retry-After` (secondes ou date HTTP, jamais raccourci, au moins 5 min) ; un 401/403 est
+  journalisé comme clé refusée. Les copies encore fraîches restent servies ; au-delà de 10 min
+  le relais répond 503 et MOTIS abandonne ce temps réel (vérifié) : le routage continue sur
+  les horaires statiques. Il retire `start_time` des TEC (décalage de 12 h en amont ;
+  résolution 50 % → 100 %).
 - Alertes : consultatives, filtrées par période d'impact, jamais d'exclusion de trajet ;
   annulations et retards viennent des TripUpdates. Un retard réel de +7 min a été observé.
 - MOTIS national : import 3 min 29 s, 1,8 Go, serveur 0,7–0,9 Go, requête médiane 100–130 ms.

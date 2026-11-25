@@ -3,17 +3,19 @@
 Every URL below was fetched successfully on 2026-11-23 (anonymous access, HTTP 200, protobuf
 for realtime, ZIP for static) — see ARCHITECTURE.md "Belgian feeds". Nothing here is guessed:
 
-- Host ``api-management-discovery-production.azure-api.net`` is the one used in the Belgian
-  Mobility knowledge-base samples. The portal also documents
-  ``opendata-discovery-gtfs-realtime.api.production.belgianmobility.io``, but that name did not
-  resolve in public DNS on 2026-11-23, so it is NOT used.
+- Two hosts, same paths (portal knowledge base): anonymous samples use
+  ``api-management-discovery-production.azure-api.net``, which serves without checking any key;
+  "Use with API key" samples use ``api.belgianmobility.io``, which checks the key (verified
+  2026-11-25: 401 "missing subscription key" without it, "invalid subscription key" with a
+  wrong one). A keyed tier therefore MUST use ``api.belgianmobility.io`` (``Feed.url_for``).
+  The portal also documents ``opendata-discovery-gtfs-*.api.production.belgianmobility.io``;
+  those names did not resolve in public DNS (2026-11-23 and 2026-11-25): NOT used.
 - Realtime is JSON by default on this host; ``?format=protobuf`` is mandatory (the JSON
   transcoding mangles int64 fields).
 - Quotas come from the portal terms §5 (indicative): anonymous 100 requests/day and 10/minute;
-  free Standard account 12 000/day and 500/minute. The key travels in header ``bmc-partner-key``
-  (portal knowledge base). Tested 2026-11-25: this host answers 200 with the real key, a fake
-  key or none, under ``bmc-partner-key`` or ``Ocp-Apim-Subscription-Key``: it does not check
-  the key, so the Standard quota cannot be confirmed here.
+  free Standard account 12 000/day and 500/minute; beyond them the portal may answer HTTP 429.
+  The key travels in header ``bmc-partner-key`` (FAQ: not the Azure default
+  ``Ocp-Apim-Subscription-Key``, which the keyed host reports as a missing key).
 - STIB-MIVB publishes no GTFS-RT: MOTIS routes STIB on its static GTFS.
 """
 
@@ -23,6 +25,7 @@ from datetime import timedelta
 from enum import StrEnum
 
 BASE_URL = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed"
+KEYED_BASE_URL = "https://api.belgianmobility.io/api/gtfs/feed"
 KEY_HEADER = "bmc-partner-key"
 SECONDS_PER_DAY = 86_400
 
@@ -71,6 +74,12 @@ class Feed:
     needs_repair: bool = False
     """True when Tempo must sanitise the feed before MOTIS can use it (see ``gtfsrt``)."""
 
+    def url_for(self, tier: "AccessTier") -> str:
+        """Anonymous host without a key; the key-checking host for every keyed tier."""
+        if tier is AccessTier.ANONYMOUS:
+            return self.url
+        return KEYED_BASE_URL + self.url.removeprefix(BASE_URL)
+
     @property
     def is_realtime(self) -> bool:
         return self.kind is not FeedKind.STATIC
@@ -118,10 +127,15 @@ def feed(operator: Operator, kind: FeedKind) -> Feed:
 
 @dataclass(frozen=True, slots=True)
 class PollingPlan:
-    """How often each feed kind is fetched from the portal (one request per fetch)."""
+    """How often each feed kind is fetched from the portal (one request per fetch).
 
-    trip_updates: timedelta = timedelta(minutes=2)
-    service_alerts: timedelta = timedelta(minutes=10)
+    Default = Standard tier: trip updates every minute (publisher refresh: 30 s), alerts every
+    5 minutes. All six realtime feeds: 5 184 requests/day, 43 % of the 12 000/day quota and
+    54 % of the 80 % planning cap, leaving room for static downloads, retries and quota changes;
+    peak 6 requests in a minute (quota 500)."""
+
+    trip_updates: timedelta = timedelta(minutes=1)
+    service_alerts: timedelta = timedelta(minutes=5)
     static: timedelta = _DAILY
 
     def interval(self, kind: FeedKind) -> timedelta:

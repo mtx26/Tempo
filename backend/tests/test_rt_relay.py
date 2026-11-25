@@ -86,17 +86,19 @@ def test_tec_is_served_repaired_with_the_key_header() -> None:
     assert all(not e.trip_update.trip.HasField("start_time") for e in decode(payload).entity)
     request = portal.requests[0]
     assert request.headers[KEY_HEADER] == KEY.get_secret_value()
-    assert str(request.url) == feed(Operator.TEC, FeedKind.TRIP_UPDATES).url
+    tec = feed(Operator.TEC, FeedKind.TRIP_UPDATES)
+    assert str(request.url) == tec.url_for(AccessTier.STANDARD)
+    assert request.url.host == "api.belgianmobility.io"
 
 
 def test_cached_within_interval_and_refetched_after() -> None:
     portal, clock = Portal(), Clock()
     relay = make_relay(portal, clock)
     relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
-    clock.now += timedelta(seconds=60)
+    clock.now += timedelta(seconds=30)
     relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
     assert len(portal.requests) == 1
-    clock.now += timedelta(seconds=60)
+    clock.now += timedelta(seconds=30)
     relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
     assert len(portal.requests) == 2
     assert relay.requests_last_24h == 2
@@ -109,6 +111,7 @@ def test_anonymous_relay_never_sends_a_key() -> None:
     relay = make_relay(portal, clock, tier=AccessTier.ANONYMOUS, feeds=sncb, plan=plan)
     relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES)
     assert KEY_HEADER not in portal.requests[0].headers
+    assert portal.requests[0].url.host == "api-management-discovery-production.azure-api.net"
 
 
 def test_429_without_cache_is_unavailable_and_backs_off() -> None:
@@ -363,3 +366,46 @@ def test_anonymous_selection_of_all_feeds_needs_daily_intervals() -> None:
         relay_from_settings(RelaySettings(feeds=every))
     daily = RelaySettings(feeds=every, trip_updates_seconds=86_400, alerts_seconds=86_400)
     assert relay_from_settings(daily).allowed_per_day == 80
+
+
+def test_429_pauses_every_feed_because_the_quota_is_per_account() -> None:
+    portal, clock = Portal(), Clock()
+    relay = make_relay(portal, clock)
+    sncb = relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES)  # fresh copy before the 429
+    portal.status, portal.headers = 429, {"Retry-After": "900"}
+    with pytest.raises(RelayUnavailableError, match="429"):
+        relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    clock.now += timedelta(minutes=2)
+    # Another feed is due but the account is paused: no request, the fresh copy is still served.
+    assert relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES) == sncb
+    with pytest.raises(RelayUnavailableError, match="paused"):
+        relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
+    assert len(portal.requests) == 2
+    assert relay.status()["paused_until"] is not None
+    portal.status, portal.headers = 200, {}
+    clock.now += timedelta(minutes=14)
+    portal.body_by_operator["delijn"] = _restamp(DELIJN_TU, clock.now)
+    assert relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
+    assert relay.status()["paused_until"] is None
+
+
+def test_retry_after_as_http_date_is_honoured() -> None:
+    portal, clock = Portal(), Clock()
+    until = clock.now + timedelta(minutes=40)
+    portal.status = 429
+    portal.headers = {"Retry-After": until.strftime("%a, %d %b %Y %H:%M:%S GMT")}
+    relay = make_relay(portal, clock)
+    with pytest.raises(RelayUnavailableError):
+        relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    clock.now += timedelta(minutes=39)
+    with pytest.raises(RelayUnavailableError):
+        relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    assert len(portal.requests) == 1
+
+
+def test_rejected_key_is_reported_as_such() -> None:
+    portal, clock = Portal(), Clock()
+    portal.status = 401
+    relay = make_relay(portal, clock)
+    with pytest.raises(RelayUnavailableError, match="key rejected"):
+        relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)

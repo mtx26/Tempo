@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx2
 
-from tempo.transport.feeds import FEEDS, KEY_HEADER, FeedKind, Operator
+from tempo.transport.feeds import FEEDS, KEY_HEADER, AccessTier, FeedKind, Operator
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,9 @@ REGIONS: dict[str, tuple[frozenset[Operator], str]] = {
 }
 
 
-def sources(region: str = "belgium") -> list[Source]:
+def sources(region: str = "belgium", *, keyed: bool = False) -> list[Source]:
+    """Inputs of a region; ``keyed`` = a portal key is configured, so the static GTFS come from
+    the key-checking host (``Feed.url_for``) and count against that key's quota."""
     if region not in REGIONS:
         raise ValueError(f"unknown region {region!r}; choose from {sorted(REGIONS)}")
     operators, osm = REGIONS[region]
@@ -75,7 +77,7 @@ def sources(region: str = "belgium") -> list[Source]:
     static = [
         Source(
             f"{feed.operator.name.lower().replace('_', '')}.gtfs.zip",
-            feed.url,
+            feed.url_for(AccessTier.STANDARD if keyed else AccessTier.ANONYMOUS),
             True,
             forbid_frequencies=feed.operator in repaired,
         )
@@ -218,7 +220,7 @@ def update_inputs(
     state = _load(state_path)
     now = clock()
     report = UpdateReport([], [], [], {}, None)
-    for source in only or sources(region):
+    for source in only or sources(region, keyed=key is not None):
         entry = state.get(source.name, {})
         last_check = entry.get("checked_at")
         if last_check and now - datetime.fromisoformat(last_check) < source.min_interval:

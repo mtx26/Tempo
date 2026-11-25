@@ -8,8 +8,11 @@
 #     otherwise) and refuses stale or broken feeds with HTTP 503. With incremental_rt_update:
 #     false MOTIS then DROPS its realtime data for that feed (verified live 2026-11-23), so
 #     stale delays are never shown as live.
-# MOTIS may poll the relay every minute: the relay only calls the portal when its own
-# interval (default 2 min trip updates / 10 min alerts with a Standard key) has elapsed.
+# MOTIS polls the relay every 30 s (internal, free): the relay only calls the portal when its
+# own interval has elapsed (Standard key: trip updates 1 min, alerts 5 min, 43 % of the daily
+# quota), so each fresh copy reaches MOTIS within 30 s. On HTTP 429 the relay pauses every
+# feed; once copies are older than 10 min it answers 503 and MOTIS routes on the static
+# timetable.
 # Without a key the relay serves only SNCB trip updates (anonymous quota): the other five
 # URLs answer 404 and MOTIS logs an error for them — expected, not a failure of Tempo.
 # Host `tempo-rt-relay` = Swarm service name; locally use
@@ -20,7 +23,7 @@ osm: /input/osm.pbf
 timetable:
   first_day: TODAY
   num_days: 60
-  update_interval: 60
+  update_interval: 30
   incremental_rt_update: false   # required: see header (stale data must disappear)
   http_timeout: 30
   datasets:

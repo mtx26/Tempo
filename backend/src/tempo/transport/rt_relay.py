@@ -2,8 +2,12 @@
 
 Why a relay (ARCHITECTURE.md "Belgian feeds"):
 - one place enforces the portal quota (budget checked at start, rolling 24 h request log that
-  survives restarts when ``state_file`` is set, ``429`` back-off), whatever polling interval
-  MOTIS is configured with. Run exactly ONE replica: the request log is per process;
+  survives restarts when ``state_file`` is set), whatever polling interval MOTIS is configured
+  with. Run exactly ONE replica: the request log is per process. The quota is per account, so
+  an HTTP ``429`` pauses EVERY feed (``Retry-After`` in seconds or as an HTTP date, never
+  shortened); copies that are still fresh keep being served, then MOTIS routes on the static
+  timetable;
+- with a key, the relay calls the key-checking host ``api.belgianmobility.io``;
 - the ``bmc-partner-key`` stays in a Docker secret of this service and is never written to the
   MOTIS configuration stored in the routing data volume;
 - feeds are validated (decodable, fresh) and TEC is repaired (``gtfsrt.prepare``) before MOTIS
@@ -23,6 +27,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import httpx2
@@ -147,6 +152,8 @@ class FeedRelay:
         self._state_file = state_file
         self._sent: deque[datetime] = deque(self._load_state())
         self._exhausted_logged = False
+        self._paused_until: datetime | None = None
+        """Account-wide pause after an HTTP 429 (the quota is per key, not per feed)."""
 
     def _load_state(self) -> list[datetime]:
         """Previous request times; a corrupt log refuses to start (quota safety first)."""
@@ -181,8 +188,13 @@ class FeedRelay:
     def enabled(self, operator: Operator, kind: FeedKind) -> bool:
         return (operator, kind) in self._feeds
 
-    def _take_request(self, now: datetime) -> bool:
+    def _take_request(self, now: datetime) -> str | None:
+        """Reserve one portal request; otherwise the reason no request may be sent."""
         with self._counter_lock:
+            if self._paused_until is not None:
+                if now < self._paused_until:
+                    return f"portal paused after HTTP 429 until {self._paused_until.isoformat()}"
+                self._paused_until = None
             while self._sent and now - self._sent[0] >= WINDOW:
                 self._sent.popleft()
             if len(self._sent) >= self._budget.allowed_per_day:
@@ -192,11 +204,16 @@ class FeedRelay:
                         len(self._sent),
                     )
                     self._exhausted_logged = True
-                return False
+                return "portal request budget exhausted (rolling 24 h)"
             self._exhausted_logged = False
             self._sent.append(now)
             self._save_state()
-            return True
+            return None
+
+    def _pause(self, until: datetime) -> None:
+        with self._counter_lock:
+            if self._paused_until is None or until > self._paused_until:
+                self._paused_until = until
 
     def _backoff(
         self, entry: _Entry, now: datetime, reason: str, server_wait: timedelta | None = None
@@ -209,18 +226,24 @@ class FeedRelay:
         logger.warning("realtime feed fetch failed: %s", reason)
 
     def _fetch(self, item: Feed, entry: _Entry, now: datetime) -> None:
-        if not self._take_request(now):
-            entry.last_error = "portal request budget exhausted (rolling 24 h)"
+        refused = self._take_request(now)
+        if refused is not None:
+            entry.last_error = refused
             return
         try:
-            response = self._http.get(item.url, headers=self._headers)
+            response = self._http.get(item.url_for(self.tier), headers=self._headers)
         except httpx2.HTTPError as exc:
             self._backoff(entry, now, f"{item.name}: {type(exc).__name__}")
             return
         if response.status_code == 429:
-            retry = response.headers.get("Retry-After", "").strip()
-            wait = timedelta(seconds=int(retry)) if retry.isdigit() else None
+            wait = retry_after(response.headers.get("Retry-After", ""), now)
             self._backoff(entry, now, f"{item.name}: HTTP 429 (quota)", wait)
+            if entry.retry_at is not None:
+                self._pause(entry.retry_at)
+            return
+        if response.status_code in (401, 403):
+            reason = "key rejected: check the Belgian Mobility subscription and key"
+            self._backoff(entry, now, f"{item.name}: HTTP {response.status_code} ({reason})")
             return
         if response.status_code != 200:
             self._backoff(entry, now, f"{item.name}: HTTP {response.status_code}")
@@ -268,12 +291,28 @@ class FeedRelay:
                 "entities": None if entry.summary is None else entry.summary.entities,
                 "last_error": entry.last_error,
             }
+        paused = self._paused_until
         return {
             "tier": self.tier.value,
+            "paused_until": None if paused is None or paused <= now else paused.isoformat(),
             "requests_last_24h": self.requests_last_24h,
             "allowed_per_day": self._budget.allowed_per_day,
             "feeds": feeds,
         }
+
+
+def retry_after(value: str, now: datetime) -> timedelta | None:
+    """``Retry-After`` as delay-seconds or HTTP date (RFC 9110); None when absent/unreadable."""
+    value = value.strip()
+    if value.isdigit():
+        return timedelta(seconds=int(value))
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        return None
+    return max(when - now, timedelta(0))
 
 
 def relay_from_settings(settings: RelaySettings) -> FeedRelay:

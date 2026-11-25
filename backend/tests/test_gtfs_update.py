@@ -178,6 +178,11 @@ def test_sources_per_region() -> None:
     }
     assert national["tec.gtfs.zip"].forbid_frequencies
     assert not national["stib.gtfs.zip"].forbid_frequencies
+    keyed = {s.name: s for s in sources(keyed=True)}
+    for name, source in keyed.items():
+        if name != "osm.pbf":
+            assert source.url.startswith("https://api.belgianmobility.io/api/gtfs/feed/")
+            assert source.url.split("/feed/")[1] == national[name].url.split("/feed/")[1]
     brussels = {s.name for s in sources("brussels")}
     assert brussels == {"stib.gtfs.zip", "sncb.gtfs.zip", "osm.pbf"}
     with pytest.raises(ValueError, match="region"):
