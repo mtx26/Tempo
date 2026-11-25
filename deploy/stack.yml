@@ -51,8 +51,11 @@ services:
       - source: tempo_owner_database_url
         target: tempo_database_url
     networks: [backend]
+    # A plain service run once (not a Swarm job: Portainer's forced update rejects jobs with
+    # "Jobs may not have an update config"). It exits when the migration succeeds and is not
+    # restarted; every stack update re-creates it, so migrations run on each update.
     deploy:
-      mode: replicated-job
+      replicas: 1
       restart_policy: {condition: on-failure, max_attempts: 5, delay: 10s}
 
   api:
