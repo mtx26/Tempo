@@ -416,8 +416,10 @@ flowchart TD
 ```
 
 - **Université** (`sync/ics.py`, `sync/ics_repository.py`) : identité (UID, RECURRENCE-ID UTC) ;
-  suppression logique avec historique ; flux vide ou plus de 50 % de suppressions ⇒ sync
-  `suspect`, suppressions retenues ; UID invalides jamais supprimés ; verrou consultatif par
+  suppression logique avec historique ; flux vide ou plus de 50 % de suppressions (au moins 3)
+  ⇒ sync `suspect`, suppressions retenues ; UID invalides jamais supprimés ; événements journée
+  entière et repères de durée nulle (congés, échéances) jamais traités comme des engagements,
+  signalés seulement s'ils tombent dans la fenêtre synchronisée ; verrou consultatif par
   source ; heures inexistantes (passage à l'heure d'été) normalisées, ambiguës résolues sur la
   première occurrence, avec avertissement ; une série déplacée est appariée par UID et mise à
   jour en place. Une panne ou un import partiel n'est jamais une suppression générale.
@@ -743,7 +745,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 | B01 Conversation | Partiel | Agent Claude à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend ; **recette dans un vrai Home Assistant 2026.11.2** (Docker, `scripts/ha_e2e.py`, 15/15) : flux de configuration, agent de conversation Assist, ajout de tâche et question par la conversation (repli déterministe), refus de deviner, GPS du téléphone transmis et jugé fiable, liste de tâches à jour, aucun service métier ; budget de 60 s, panne du LLM après une modification sans rejeu, délai de 150 s côté HA (`test_assistant.py`). **Jamais exécuté avec un vrai LLM** (aucune clé). |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente, séance unique située ; échéance stricte d'une séance située en heure locale, jamais repoussée, manquée signalée (`test_domain_rules.py`). |
-| B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, invalides) notifiés. **Flux iCal réel de l'université non testé** (URL non fournie). |
+| B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, repères, invalides) notifiés. **Flux réel de l'université validé localement** le 25/11/2026 (secret `tempo_ics_url`) : téléchargement sécurisé, 36 cours importés dans une base jetable, seconde synchronisation sans changement ; ses congés codés en durée nulle ont révélé un défaut corrigé (`test_ics.py`). Pas encore en service continu (worker non déployé). |
 | B05 Études | Vérifié | 15 h, blocs de 90 min, souple/stricte, correction sans double comptage. |
 | B06 Sport | Partiel | Entraînements (flexibles) et compétitions (fixes) créés en conversation (`create_event` avec `kind`) ; DOCX, mise à jour sans doublon, durée inconnue, protections testés (fixtures + vrai serveur IMAP local) ; authentification par le serveur de réception désigné, en-têtes falsifiés refusés (`test_text_parser.py`, `test_worker_mail.py`). **Adresse réelle du coach, boîte réelle et vrais en-têtes DMARC/DKIM non testés.** |
 | B07 Règles | Vérifié | Fenêtres hebdomadaires d'étude + exceptions datées + préférences ; fenêtres par catégorie d'activité flexible (`set_category_windows` : entraînement, personnel, tâche située), contrainte dure dans CP-SAT et revérifiée par le moteur (`test_activities.py`, `test_operations.py`). |
@@ -765,7 +767,7 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution locale : backend **536 tests réussis, 0 ignoré** (PostgreSQL 16
+Dernière exécution locale : backend **537 tests réussis, 0 ignoré** (PostgreSQL 16
 réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
 portail Belgian Mobility réel en anonyme), couverture 94 %, Ruff et mypy strict propres ;
 intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres. Recettes rejouées
@@ -774,8 +776,9 @@ centralisés), base de développement vide : vrai Home Assistant 2026.11.2 (`scr
 15/15 et pile complète avec worker, relais et MOTIS national (`scripts/live_scenario.py`)
 15/15 ; jobs du worker sains.
 
-Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), URL iCal de
-l'université, entité `device_tracker`, adresse de l'expéditeur du coach + accès IMAP, clé
+Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), installation de
+l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de
+l'expéditeur du coach + accès IMAP, clé
 Belgian Mobility Standard, création et visibilité des dépôts GitHub, licence de l'intégration,
 autorisation de déploiement Swarm.
 

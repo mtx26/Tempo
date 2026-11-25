@@ -2,8 +2,8 @@
 
 - Recurrences (RRULE/RDATE/EXDATE) and overridden occurrences (RECURRENCE-ID) are expanded.
 - Cancelled events are dropped, so a later sync reports them as ``removed``.
-- All-day events are reported in ``skipped``: they are not timed commitments and must not
-  silently block a whole day.
+- All-day events and zero-duration markers (holidays, deadlines) are reported in ``skipped``
+  when they fall in the window: they are not timed commitments and must not block time.
 - Floating (naive) times are interpreted in the configured default timezone; a TZID that cannot
   be resolved is rejected rather than reinterpreted (no fabricated times).
 
@@ -143,8 +143,9 @@ def _source_problem(component: Any, default_tz: ZoneInfo) -> str | None:
             return f"unknown TZID {tzid!r}"
         if isinstance(decoded, datetime):
             values[name] = _as_aware(decoded, default_tz)
-    if len(values) == 2 and values["DTEND"] <= values["DTSTART"]:
-        return "DTEND is not after DTSTART in source"
+    # DTEND == DTSTART is a dated marker (holiday, deadline): handled by _build_event, not broken.
+    if len(values) == 2 and values["DTEND"] < values["DTSTART"]:
+        return "DTEND is before DTSTART in source"
     return None
 
 
@@ -183,6 +184,12 @@ def _build_event(
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         kind = "all-day" if isinstance(start, date) else "untimed"
         skipped.append(f"{uid}: {kind} event not treated as a timed commitment")
+        return None
+    if end == start:
+        # Zero-duration marker inside the window (e.g. "Congé (Toussaint)"): not a timed
+        # commitment and not invalid data. Reported once, never blocks time.
+        summary = (_text(component, "SUMMARY") or "")[:80]
+        skipped.append(f"{uid}: zero-duration marker '{summary}' not treated as a timed commitment")
         return None
     status_text = (_text(component, "STATUS") or "").upper()
     start_at, start_issue = dst_normalise(_as_aware(start, default_tz))

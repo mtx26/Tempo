@@ -309,3 +309,19 @@ def test_ordinary_times_produce_no_dst_warning() -> None:
         default_tz=BRUSSELS,
     )
     assert result.warnings == []
+
+
+def test_zero_duration_markers_are_not_invalid_and_only_reported_in_the_window() -> None:
+    """Real UMONS feed: holidays are zero-duration events at local midnight ("Congé
+    (Toussaint)"). They are dated markers, not timed commitments and not broken data: never
+    "invalid", and only reported when they fall inside the synchronised window."""
+    data = _calendar(
+        *_event("holiday-in", "DTSTART:20261031T230000Z", "DTEND:20261031T230000Z"),
+        *_event("holiday-out", "DTSTART:20250926T220000Z", "DTEND:20250926T220000Z"),
+        *_event("class", "DTSTART:20261022T080000Z", "DTEND:20261022T100000Z"),
+    )
+    result = parse_ics(data, *WINDOW, default_tz=BRUSSELS)
+    assert [e.uid for e in result.events] == ["class"]
+    assert result.invalid_uids == set()
+    assert len(result.skipped) == 1 and "holiday-in" in result.skipped[0]
+    assert "zero-duration" in result.skipped[0]
