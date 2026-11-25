@@ -146,3 +146,18 @@ def test_server_error_message_is_kept_in_the_exception() -> None:
 
     with pytest.raises(RoutingUnavailableError, match="outside of loaded timetable window"):
         client(handler).plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True)
+
+
+def test_max_travel_is_sent_as_motis_max_travel_time() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return ok(request)
+
+    motis = client(handler)
+    assert motis.accepts_max_travel
+    motis.plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True, max_travel=timedelta(hours=3))
+    motis.plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True)
+    assert seen[0].url.params["maxTravelTime"] == "180"
+    assert "maxTravelTime" not in seen[1].url.params

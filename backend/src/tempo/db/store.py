@@ -11,8 +11,9 @@ interpretation code never depends on the planning pipeline:
 
 import hashlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -29,7 +30,10 @@ from tempo.db.models import (
     SettingRow,
     StudyBlockRow,
 )
+from tempo.transport.access import DEFAULT_MAX_JOURNEY, Access, AccessRouting
+from tempo.transport.location import Alternation, DeclaredStay
 from tempo.transport.places import Coordinates, Place, PlaceDirectory
+from tempo.transport.routing import RoutingProvider
 
 
 def get_setting(session: Session, key: str, default: Any = None) -> Any:
@@ -129,3 +133,60 @@ def place_directory(session: Session) -> PlaceDirectory:
     ]
     aliases = {a.alias: a.place_id for a in session.scalars(select(PlaceAliasRow))}
     return PlaceDirectory(places, aliases)
+
+
+ALTERNATION_SETTING = "residence_alternation"
+MAX_JOURNEY_SETTING = "max_journey_minutes"
+
+
+def declared_stays(session: Session, directory: PlaceDirectory) -> list[DeclaredStay]:
+    """Planned locations stated in the conversation (temporary exceptions), known places only."""
+    return [
+        DeclaredStay(place, datetime.fromisoformat(s["start"]), datetime.fromisoformat(s["end"]))
+        for s in get_setting(session, "stays", []) or []
+        if (place := directory.get(s["place_id"])) is not None
+    ]
+
+
+def residence_alternation(
+    session: Session, directory: PlaceDirectory, tz: ZoneInfo
+) -> Alternation | None:
+    """The recurring residence schedule stated in the conversation, if any."""
+    raw = get_setting(session, ALTERNATION_SETTING)
+    if not raw:
+        return None
+    places = [directory.get(pid) for pid in raw["residences"]]
+    if any(p is None for p in places):
+        return None  # a residence was deleted: no schedule rather than a wrong one
+    return Alternation(
+        tuple(p for p in places if p is not None),
+        date.fromisoformat(raw["first_day"]),
+        time.fromisoformat(raw["switch_at"]),
+        int(raw["period_days"]),
+        tz,
+    )
+
+
+def residence_base(session: Session, directory: PlaceDirectory | None = None) -> Place | None:
+    """Fallback base: the configured home place, else the first residence of the alternation."""
+    directory = directory or place_directory(session)
+    home_id = get_setting(session, "home_place_id")
+    home = directory.get(home_id) if home_id else None
+    if home is not None:
+        return home
+    raw = get_setting(session, ALTERNATION_SETTING) or {}
+    first = (raw.get("residences") or [None])[0]
+    return directory.get(first) if first else None
+
+
+def access_routing(session: Session, routing: RoutingProvider) -> AccessRouting:
+    """The routing provider with the user's transport access points and journey limit."""
+    directory = place_directory(session)
+    accesses = []
+    for row in session.scalars(select(PlaceRow).where(PlaceRow.access_place_id.is_not(None))):
+        place, point = directory.get(row.id), directory.get(row.access_place_id or "")
+        if place is not None and point is not None and row.access_minutes:
+            accesses.append(Access(place, point, timedelta(minutes=row.access_minutes)))
+    minutes = get_setting(session, MAX_JOURNEY_SETTING)
+    limit = DEFAULT_MAX_JOURNEY if not minutes else timedelta(minutes=int(minutes))
+    return AccessRouting(routing, accesses, max_journey=limit)

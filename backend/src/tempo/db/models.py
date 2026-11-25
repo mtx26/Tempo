@@ -199,17 +199,31 @@ class PhonePositionRow(Base):
 
 
 class PlaceRow(Base):
-    """Named place with coordinates (home, campus, club...). Configured from Home Assistant."""
+    """Named place with coordinates (home, campus, club...), managed in conversation.
+
+    ``access_place_id`` +
+    ``access_minutes``: public transport is reached at another place after a fixed, user-given
+    duration (e.g. driven to a bus stop); both or neither, never guessed."""
 
     __tablename__ = "place"
     __table_args__ = (
         CheckConstraint("latitude BETWEEN -90 AND 90", name="latitude_range"),
         CheckConstraint("longitude BETWEEN -180 AND 180", name="longitude_range"),
+        CheckConstraint(
+            "(access_place_id IS NULL) = (access_minutes IS NULL)", name="access_complete"
+        ),
+        CheckConstraint(
+            "access_minutes IS NULL OR access_minutes BETWEEN 1 AND 240",
+            name="access_minutes_range",
+        ),
+        CheckConstraint("access_place_id IS NULL OR access_place_id <> id", name="access_other"),
     )
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     latitude: Mapped[float]
     longitude: Mapped[float]
+    access_place_id: Mapped[str | None] = mapped_column(ForeignKey("place.id", ondelete="RESTRICT"))
+    access_minutes: Mapped[int | None]
 
 
 class PlaceAliasRow(Base):

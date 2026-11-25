@@ -32,6 +32,11 @@ normalement. Exemples :
   prochaine » ; « À partir de février, c'est à 20 h ».
 - « J'ai fait 45 minutes de physique » ; « En fait c'était 30 » ; « Session terminée ».
 - « Demain je dors chez papa » ; « Je ne suis pas disponible samedi matin ».
+- « J'alterne entre chez maman et chez papa chaque vendredi : ce vendredi soir je vais chez
+  papa » ; « Cette semaine je reste chez maman » (exception) ; « Où je dors la semaine
+  prochaine ? ».
+- « Depuis chez maman, on me dépose à l'arrêt de bus du village en 10 minutes » (point d'accès aux
+  transports) ; « Ne me propose pas de trajet de plus de 2 h 30 ».
 - « Comment j'arrive au campus pour 8 h ? » ; « Rappelle-moi 30 min avant le médecin » ;
   « Préviens-moi 60 et 15 minutes avant chaque départ ».
 - « Qu'est-ce qui a changé cette nuit ? » ; « Pourquoi la chimie n'est pas planifiée ? » ;

@@ -40,7 +40,7 @@ from tempo.db.models import (
     SettingRow,
     StudyBlockRow,
 )
-from tempo.db.store import active_version, get_setting, notify, set_setting
+from tempo.db.store import access_routing, active_version, get_setting, notify, set_setting
 from tempo.planning.service import PlanningNotConfiguredError, replan
 from tempo.sync.ics import IcsParseError, parse_ics
 from tempo.sync.ics_repository import apply_ics_sync, get_or_create_source
@@ -367,7 +367,7 @@ def departure_job(
         advice = check_departure(
             target,
             position,
-            routing,
+            access_routing(session, routing),
             now=now,
             buffer=buffer,
             planned_departure=trip.departure,

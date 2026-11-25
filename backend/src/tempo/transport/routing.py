@@ -16,7 +16,18 @@ class RoutingUnavailableError(RuntimeError):
 
 
 STREET_MODES = frozenset(
-    {"WALK", "BIKE", "RENTAL", "CAR", "HGV", "CAR_PARKING", "CAR_DROPOFF", "ODM", "RIDE_SHARING"}
+    {
+        "WALK",
+        "BIKE",
+        "RENTAL",
+        "CAR",
+        "HGV",
+        "CAR_PARKING",
+        "CAR_DROPOFF",
+        "ODM",
+        "RIDE_SHARING",
+        "ACCESS",  # fixed user-given access to transport (``transport.access``)
+    }
 )
 
 

@@ -192,7 +192,7 @@ def test_training_without_slot_is_reported() -> None:
     blocked = Commitment("exam", "Examen", at(8, 0), at(9, 23, 30), CommitmentKind.OTHER, None)
     outcome = run_planning(week(commitments=[blocked]), FakeRouting())
     assert outcome.unplaced_trainings == ["t1"]
-    assert any("no free slot" in i for i in outcome.issues)
+    assert any("aucun créneau libre" in i for i in outcome.issues)
 
 
 def test_impossible_hard_deadline_is_partial_not_invalid() -> None:
@@ -331,3 +331,43 @@ def test_conflicts_are_reported_even_without_a_usable_plan() -> None:
     ]
     outcome = run_planning(week(commitments=clash, trainings=[]), FakeRouting())
     assert next(c.describe() for c in outcome.conflicts).startswith("fixed: class 'Cours'")
+
+
+def _residence_training(**kw: object) -> TrainingRequest:
+    values: dict[str, object] = {
+        "activity_id": "run",
+        "title": "Endurance",
+        "duration": timedelta(minutes=60),
+        "earliest_start": at(8, 0),
+        "latest_end": at(8, 23, 59),
+        "preferred_start": at(8, 11),
+    }
+    values.update(kw)
+    return TrainingRequest(**values)  # type: ignore[arg-type]
+
+
+def test_training_without_place_happens_at_the_residence_never_during_an_outing() -> None:
+    # Two classes with a short gap: the user stays at the campus between them.
+    classes = [
+        Commitment("c1", "Analyse", at(8, 9), at(8, 11), CommitmentKind.CLASS, CAMPUS),
+        Commitment("c2", "Algèbre", at(8, 12), at(8, 14), CommitmentKind.CLASS, CAMPUS),
+    ]
+    outcome = run_planning(
+        week(commitments=classes, trainings=[_residence_training()]), FakeRouting()
+    )
+    (run,) = outcome.trainings
+    day8 = [b for b in outcome.travel if b.start.day == 8]
+    first_departure = min(b.start for b in day8)
+    last_return = max(b.end for b in day8)
+    span = Interval(run.start, run.start + timedelta(minutes=60))
+    assert not span.overlaps(Interval(first_departure, last_return)), (run.start, day8)
+    assert outcome.issues == []
+
+
+def test_training_without_any_slot_at_the_residence_is_unplaced_not_forced() -> None:
+    all_day = [Commitment("x", "Stage", at(8, 0), at(8, 23, 30), CommitmentKind.CLASS, CAMPUS)]
+    request = _residence_training(earliest_start=at(8, 6), latest_end=at(8, 22))
+    outcome = run_planning(week(commitments=all_day, trainings=[request]), FakeRouting())
+    assert outcome.unplaced_trainings == ["run"]
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert any("aucun créneau libre à la résidence" in i for i in outcome.issues)

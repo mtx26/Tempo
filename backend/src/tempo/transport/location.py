@@ -3,15 +3,20 @@
 - Current position: ONLY the Home Assistant phone tracker, trusted when fresh and accurate
   (``assess_position``); used for immediate trips (journey search, departure monitoring).
 - Future trips: an outing starts from the base at its start and returns to the base at its
-  end (``base_at``: planned location covering that instant, else home); between commitments
-  the previous commitment's place is the origin (``travel``).
+  end (``base_at``: planned location covering that instant, else the residence of the
+  alternation in force, else home); between commitments the previous commitment's place is the
+  origin (``travel``): no return home is assumed between activities.
+- Residence alternation: residences rotate every ``period`` at the same local time (e.g. every
+  Friday at noon: the morning belongs to the previous residence, the evening to the next one).
+  Planned locations are temporary exceptions: they never shift the recurrence.
 - An explicit origin given in the conversation is a known place.
 Ambiguity is reported, never guessed.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from tempo.timeutil import utc
 from tempo.transport.places import Coordinates, Place
@@ -62,6 +67,38 @@ class DeclaredStay:
             raise ValueError("stay end must be after start")
 
 
+@dataclass(frozen=True, slots=True)
+class Alternation:
+    """Residences in rotation order; ``residences[0]`` starts at ``first_day`` ``switch_at``
+    (local time), then the next one every ``period_days`` days at the same local time."""
+
+    residences: tuple[Place, ...]
+    first_day: date
+    switch_at: time
+    period_days: int
+    timezone: ZoneInfo
+
+    def __post_init__(self) -> None:
+        if not self.residences or self.period_days < 1:
+            raise ValueError("an alternation needs residences and a positive period")
+
+    def switch_moment(self, index: int) -> datetime:
+        """Local instant of the ``index``-th change (0 = the declared one)."""
+        day = self.first_day + timedelta(days=index * self.period_days)
+        return datetime.combine(day, self.switch_at, tzinfo=self.timezone)
+
+    def index_at(self, at: datetime) -> int:
+        """Number of changes since the declared one (negative before it)."""
+        local = utc(at, "at").astimezone(self.timezone)
+        index = (local.date() - self.first_day).days // self.period_days
+        if local < self.switch_moment(index):
+            index -= 1
+        return index
+
+    def residence_at(self, at: datetime) -> Place:
+        return self.residences[self.index_at(at) % len(self.residences)]
+
+
 def assess_position(
     position: PhonePosition | None,
     now: datetime,
@@ -94,8 +131,14 @@ def planned_place(at: datetime, stays: list[DeclaredStay]) -> Place | None:
     return covering[0].place if covering else None
 
 
-def base_at(at: datetime, stays: list[DeclaredStay], home: Place) -> Place | None:
-    """Where the user is based at instant ``at``: the planned location covering it, else home.
+def base_at(
+    at: datetime,
+    stays: list[DeclaredStay],
+    home: Place,
+    alternation: Alternation | None = None,
+) -> Place | None:
+    """Where the user is based at instant ``at``: the planned location covering it (temporary
+    exception), else the residence of the alternation, else home.
 
     Planned locations may change during a day ("I leave from dad's and go back to mum's after
     class"): each trip starts from the base at its departure and returns to the base at its
@@ -105,4 +148,6 @@ def base_at(at: datetime, stays: list[DeclaredStay], home: Place) -> Place | Non
         planned = planned_place(at, stays)
     except AmbiguousLocationError:
         return None
-    return planned or home
+    if planned is not None:
+        return planned
+    return alternation.residence_at(at) if alternation is not None else home

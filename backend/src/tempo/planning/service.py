@@ -33,13 +33,17 @@ from tempo.db.models import (
     StudyTaskRow,
 )
 from tempo.db.store import (
+    access_routing,
     active_version,
     audit,
+    declared_stays,
     digest,
     get_setting,
     notify,
     place_directory,
     propose,
+    residence_alternation,
+    residence_base,
 )
 from tempo.domain.models import EventStatus, TargetKind
 from tempo.domain.ops import needs_session, refresh_task_sessions, remaining_minutes
@@ -57,7 +61,6 @@ from tempo.planning.engine import (
 )
 from tempo.scheduler.model import PlannedBlock, Preferences, StudyDemand
 from tempo.timeutil import Interval, end_of_day, utc
-from tempo.transport.location import DeclaredStay
 from tempo.transport.places import PlaceDirectory
 from tempo.transport.routing import RoutingProvider
 from tempo.transport.travel import StudyWindow
@@ -158,8 +161,7 @@ def _proportional_share(remaining: int, today: date, last_day: date, target: dat
 
 def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
     directory = place_directory(session)
-    home_id = get_setting(session, "home_place_id")
-    home = directory.get(home_id) if home_id else None
+    home = residence_base(session, directory)
     if home is None:
         raise PlanningNotConfiguredError("no home place configured (setting home_place_id)")
     horizon_days = int(get_setting(session, "horizon_days", DEFAULT_HORIZON_DAYS))
@@ -348,15 +350,8 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
             if str(b.task_id) in subjects
         ]
 
-    stays = [
-        DeclaredStay(
-            directory.get(s["place_id"]) or home,
-            datetime.fromisoformat(s["start"]),
-            datetime.fromisoformat(s["end"]),
-        )
-        for s in get_setting(session, "stays", [])
-        if directory.get(s["place_id"]) is not None
-    ]
+    stays = declared_stays(session, directory)
+    alternation = residence_alternation(session, directory, tz)
     prefs = get_setting(session, "study_preferences", {}) or {}
     data = PlanningInput(
         now=now,
@@ -370,6 +365,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         locked_blocks=locked,
         previous_blocks=previous,
         stays=stays,
+        alternation=alternation,
         preferences=Preferences(**prefs),
         buffer=buffer,
         activity_hours=activity_hours(session),
@@ -688,6 +684,7 @@ def replan(
     the stability preference so the whole horizon may be reorganised; locked and under-way
     items stay protected in every mode."""
     session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": REPLAN_LOCK})
+    routing = access_routing(session, routing)  # access points + realistic journeys only
     refresh_task_sessions(session, now, tz)
     missed = mark_missed_blocks(session, now)
     loaded = build_input(session, now, tz)

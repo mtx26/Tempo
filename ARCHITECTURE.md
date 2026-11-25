@@ -222,7 +222,7 @@ Contrat (implémenté) :
 | Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_location`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
 | Événements | `create_event` (fixe/flexible, journée entière occupée/informative, plusieurs jours, RRULE, distanciel), `update_event` (portée occurrence / suivantes / série), `cancel_event`, `set_lock`, `report_activity`, `confirm_activity` |
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
-| Lieux et règles | `upsert_place`, `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location` |
+| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `clear_residence_alternation`, `get_residence_schedule` |
 | Rappels et validation | `create_reminder`, `cancel_reminder`, `decide_proposal`, `acknowledge_notification` |
 | Planning et transport | `plan_now` (local / global, simulation `dry_run`), `propose_alternatives`, `search_journey` |
 
@@ -473,13 +473,32 @@ flowchart TD
 Résolution centralisée (`transport/location.py`) : position réelle seulement si fraîche et
 précise (`assess_position`, utilisée aussi par `get_position`) ; chaque sortie part de la base
 en vigueur à son début et revient à celle en vigueur à sa fin (`base_at` : lieu prévu couvrant
-l'instant, sinon domicile), la base pouvant donc changer dans la journée (« je pars de chez
+l'instant, sinon résidence de l'alternance, sinon domicile), la base pouvant donc changer dans la journée (« je pars de chez
 papa et je rentre chez maman après les cours ») ; deux lieux prévus qui se chevauchent ⇒
 origine inconnue signalée, jamais devinée ; entre deux engagements, l'origine est
 le lieu de l'engagement précédent : le trajet est direct, sauf si le retour à la base laisse
 au moins 1 h sur place une fois les deux trajets réels comptés. `get_location` donne à
 l'assistant où l'utilisateur est ou sera à un instant (GPS réel maintenant, sinon trajet ou
-activité située prévus, sinon lieu prévu, sinon domicile), avec la source utilisée. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,
+activité située prévus, sinon lieu prévu, sinon résidence de l'alternance, sinon domicile),
+avec la source utilisée.
+
+Résidences multiples (générique, rien de personnel dans le code) :
+- **Alternance** (`Alternation`, réglage `residence_alternation`) : résidences dans l'ordre de
+  rotation, changement tous les `period_days` jours à la même heure locale `switch_at`
+  (heure d'été comprise) ; une seule déclaration datée l'initialise (« ce vendredi soir je vais
+  chez papa » ⇒ `set_residence_alternation`), la redéclarer est un changement définitif,
+  `get_residence_schedule` la montre avec ses exceptions. Les **lieux prévus**
+  (`set_planned_location`) sont des exceptions temporaires : ils priment sans décaler la
+  récurrence. Chaque déclaration replanifie (plan local, stabilité préservée).
+- **Point d'accès aux transports** par lieu (`access_place_id` + `access_minutes`, les deux ou
+  aucun, contrainte en base ; durée donnée par l'utilisateur, jamais devinée) : un seul
+  adaptateur de routage (`transport/access.py`, `db.store.access_routing`) interroge MOTIS
+  depuis/vers le point d'accès et ajoute une étape `ACCESS` de durée fixe ; il sert à la
+  planification, aux trajets du jour, au contrôle de départ (GPS à moins de 300 m du lieu
+  compris) et aux recherches en conversation.
+- **Itinéraires irréalistes** rejetés : durée porte-à-porte maximale `max_journey_minutes`
+  (180 par défaut, réglable en conversation), transmise à MOTIS (`maxTravelTime`) et
+  revérifiée accès compris. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,
 sessions de tâches situées, études hors base) reçoivent leurs trajets. Un texte de lieu iCal inconnu
 bloque le temps sans trajet et est signalé (ajouter un alias). Coordonnées jamais devinées.
 

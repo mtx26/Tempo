@@ -42,7 +42,18 @@ from tempo.db.models import (
     StudyTaskRow,
     SyncRun,
 )
-from tempo.db.store import active_version, audit, get_setting, place_directory, set_setting
+from tempo.db.store import (
+    ALTERNATION_SETTING,
+    access_routing,
+    active_version,
+    audit,
+    declared_stays,
+    get_setting,
+    place_directory,
+    residence_alternation,
+    residence_base,
+    set_setting,
+)
 from tempo.domain.models import TargetKind
 from tempo.domain.ops import (
     DomainError,
@@ -64,7 +75,6 @@ from tempo.scheduler.model import Preferences
 from tempo.transport.itinerary import Objective, TripQuery, find_trips
 from tempo.transport.location import (
     AmbiguousLocationError,
-    DeclaredStay,
     PhonePosition,
     PositionStatus,
     assess_position,
@@ -170,6 +180,7 @@ def get_context(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
         "planned_locations": get_setting(ctx.session, "stays", []) or [],
+        "residence_alternation": get_setting(ctx.session, ALTERNATION_SETTING),
     }
 
 
@@ -308,7 +319,12 @@ def list_tasks(ctx: OpContext, body: TasksIn) -> dict[str, Any]:
     return {"tasks": [task_out(r) for r in ctx.session.scalars(query)]}
 
 
-@operation("list_places", "Known places with coordinates and aliases.", NoInput, mutates=False)
+@operation(
+    "list_places",
+    "Known places with coordinates, aliases and transport access point.",
+    NoInput,
+    mutates=False,
+)
 def list_places(ctx: OpContext, _: NoInput) -> dict[str, Any]:
     aliases: dict[str, list[str]] = {}
     for alias in ctx.session.scalars(select(PlaceAliasRow)):
@@ -321,6 +337,8 @@ def list_places(ctx: OpContext, _: NoInput) -> dict[str, Any]:
                 "latitude": p.latitude,
                 "longitude": p.longitude,
                 "aliases": sorted(aliases.get(p.id, [])),
+                "access_place_id": p.access_place_id,
+                "access_minutes": p.access_minutes,
             }
             for p in ctx.session.scalars(select(PlaceRow).order_by(PlaceRow.id))
         ]
@@ -399,13 +417,9 @@ def get_location(ctx: OpContext, body: LocationIn) -> dict[str, Any]:
     if out.get("source") == "gps":
         return out
     directory = place_directory(ctx.session)
-    home_id = get_setting(ctx.session, "home_place_id")
-    home = directory.get(home_id) if home_id else None
-    stays = [
-        DeclaredStay(place, datetime.fromisoformat(s["start"]), datetime.fromisoformat(s["end"]))
-        for s in get_setting(ctx.session, "stays", []) or []
-        if (place := directory.get(s["place_id"])) is not None
-    ]
+    home = residence_base(ctx.session, directory)
+    alternation = residence_alternation(ctx.session, directory, ctx.tz)
+    stays = declared_stays(ctx.session, directory)
     try:
         planned = planned_place(at, stays)
     except AmbiguousLocationError:
@@ -413,6 +427,9 @@ def get_location(ctx: OpContext, body: LocationIn) -> dict[str, Any]:
         return out
     if planned is not None:
         out.update(source="planned_location", place_id=planned.id, place_name=planned.name)
+    elif alternation is not None:
+        residence = alternation.residence_at(at)
+        out.update(source="residence_alternation", place_id=residence.id, place_name=residence.name)
     elif home is not None:
         out.update(source="home", place_id=home.id, place_name=home.name)
     else:
@@ -465,6 +482,7 @@ def get_rules(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         ],
         "category_windows": _category_windows(ctx.session),
         "planned_locations": get_setting(ctx.session, "stays", []) or [],
+        "residence_alternation": get_setting(ctx.session, ALTERNATION_SETTING),
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
         "activity_hours": get_setting(ctx.session, "activity_hours")
         or {"start": "06:00", "end": "22:00"},
@@ -1279,6 +1297,17 @@ class PlaceIn(Strict):
     aliases: list[str] | None = Field(
         default=None, max_length=50, description="Full alias list; omitted = keep the current ones"
     )
+    access_place_id: str | None = Field(
+        default=None,
+        description="Known place where public transport is reached from here (e.g. a bus stop "
+        "the user is driven to); '' removes it. Needs access_minutes. Omitted = unchanged",
+    )
+    access_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=240,
+        description="Duration to reach the access place, as stated by the user (never guessed)",
+    )
 
 
 @operation(
@@ -1292,6 +1321,28 @@ class PlaceIn(Strict):
 def upsert_place(ctx: OpContext, body: PlaceIn) -> dict[str, Any]:
     row = ctx.session.get(PlaceRow, body.place_id) or PlaceRow(id=body.place_id)
     row.name, row.latitude, row.longitude = body.name, body.latitude, body.longitude
+    if body.access_place_id == "":
+        if body.access_minutes is not None:
+            raise OpError("durée d'accès donnée sans point d'accès")
+        row.access_place_id, row.access_minutes = None, None
+    elif body.access_place_id is not None:
+        if body.access_place_id == body.place_id:
+            raise OpError("le point d'accès doit être un autre lieu")
+        if ctx.session.get(PlaceRow, body.access_place_id) is None:
+            raise OpError(
+                f"point d'accès inconnu : {body.access_place_id} (créez-le d'abord avec "
+                "upsert_place, avec des coordonnées données par l'utilisateur)"
+            )
+        if body.access_minutes is None:
+            raise OpError(
+                "durée d'accès inconnue : demandez combien de minutes il faut pour rejoindre "
+                "le point d'accès (jamais devinée)"
+            )
+        row.access_place_id, row.access_minutes = body.access_place_id, body.access_minutes
+    elif body.access_minutes is not None:
+        if row.access_place_id is None:
+            raise OpError("durée d'accès donnée sans point d'accès")
+        row.access_minutes = body.access_minutes
     ctx.session.add(row)
     ctx.session.flush()
     if body.aliases is None:
@@ -1333,6 +1384,10 @@ def place_uses(session: Session, place_id: str, now: datetime, tz: ZoneInfo) -> 
     uses: list[str] = []
     if get_setting(session, "home_place_id") == place_id:
         uses.append("domicile configuré")
+    uses += [
+        f"point d'accès de {row.name}"
+        for row in session.scalars(select(PlaceRow).where(PlaceRow.access_place_id == place_id))
+    ]
     titles = list(
         session.scalars(
             select(ActivityRow.title).where(
@@ -1387,6 +1442,13 @@ class SettingsChangeIn(Strict):
         default=None, pattern=r"^device_tracker\.[a-z0-9_]{1,200}$"
     )
     horizon_days: int | None = Field(default=None, ge=1, le=42)
+    max_journey_minutes: int | None = Field(
+        default=None,
+        ge=30,
+        le=600,
+        description="Longest acceptable door-to-door journey; longer itineraries are rejected "
+        "as unrealistic (default 180)",
+    )
     buffer_minutes: int | None = Field(default=None, ge=0, le=120)
     departure_reminder_minutes: list[Annotated[int, Field(ge=0, le=240)]] | None = Field(
         default=None, max_length=5, description="Minutes before the advised leave time"
@@ -1609,7 +1671,8 @@ class LocationIntentIn(Strict):
 @operation(
     "set_planned_location",
     "Where the user WILL be (base for the days covered, e.g. 'tomorrow I sleep at dad's'). "
-    "Used to infer future travel origins; never changes the real GPS position.",
+    "Temporary exception to the residence alternation: it never shifts the recurrence. Used "
+    "to infer future travel origins; never changes the real GPS position.",
     LocationIntentIn,
     mutates=True,
     replan=True,
@@ -1655,6 +1718,116 @@ def clear_planned_location(ctx: OpContext, body: ClearLocationIn) -> dict[str, A
     ]
     set_setting(ctx.session, "stays", stays)
     return {"planned_locations": stays}
+
+
+class ResidenceAlternationIn(Strict):
+    residences: list[str] = Field(
+        min_length=1,
+        max_length=4,
+        description="Place ids in rotation order; the first one is the residence in force from "
+        "the stated change on",
+    )
+    from_date: date = Field(
+        description="Local date of ONE change the user stated (e.g. 'this Friday evening I go "
+        "to dad's' -> that Friday, residences=[dad, mum])"
+    )
+    switch_at: str = Field(
+        default="12:00",
+        pattern=r"^\d{2}:\d{2}$",
+        description="Local time of every change: before it the previous residence (morning), "
+        "from it the next one (evening)",
+    )
+    period_days: int = Field(default=7, ge=1, le=28, description="7 = one week each")
+
+
+def _alternation_out(ctx: OpContext, periods: int) -> dict[str, Any]:
+    directory = place_directory(ctx.session)
+    alternation = residence_alternation(ctx.session, directory, ctx.tz)
+    if alternation is None:
+        return {"residence_alternation": None}
+    stays = declared_stays(ctx.session, directory)
+    first = alternation.index_at(ctx.now)
+    upcoming = []
+    for index in range(first, first + periods):
+        start, end = alternation.switch_moment(index), alternation.switch_moment(index + 1)
+        place = alternation.residences[index % len(alternation.residences)]
+        exceptions = [
+            {"place_id": x.place.id, "start": x.start.isoformat(), "end": x.end.isoformat()}
+            for x in stays
+            if x.start < end and start < x.end
+        ]
+        upcoming.append(
+            {
+                "start": max(start, ctx.now).isoformat(),
+                "end": end.isoformat(),
+                "place_id": place.id,
+                "place_name": place.name,
+                "exceptions": exceptions,
+            }
+        )
+    return {
+        "residence_alternation": get_setting(ctx.session, ALTERNATION_SETTING),
+        "periods": upcoming,
+    }
+
+
+@operation(
+    "set_residence_alternation",
+    "Recurring residence schedule from ONE dated statement: residences rotate every period_days "
+    "at switch_at (e.g. weekly on Friday: morning at the previous residence, evening at the "
+    "next). Replaces the current schedule (permanent change). One-off changes are planned "
+    "locations (set_planned_location) and never shift this recurrence.",
+    ResidenceAlternationIn,
+    mutates=True,
+    replan=True,
+)
+def set_residence_alternation(ctx: OpContext, body: ResidenceAlternationIn) -> dict[str, Any]:
+    if len(set(body.residences)) != len(body.residences):
+        raise OpError("une résidence est citée deux fois")
+    for place_id in body.residences:
+        _place_exists(ctx, place_id)
+    try:
+        time.fromisoformat(body.switch_at)
+    except ValueError as exc:
+        raise OpError(f"heure de changement invalide : {body.switch_at}") from exc
+    set_setting(
+        ctx.session,
+        ALTERNATION_SETTING,
+        {
+            "residences": body.residences,
+            "first_day": body.from_date.isoformat(),
+            "switch_at": body.switch_at,
+            "period_days": body.period_days,
+        },
+    )
+    return _alternation_out(ctx, 4)
+
+
+@operation(
+    "clear_residence_alternation",
+    "Remove the recurring residence schedule (planned locations are kept).",
+    NoInput,
+    mutates=True,
+    replan=True,
+)
+def clear_residence_alternation(ctx: OpContext, _: NoInput) -> dict[str, Any]:
+    set_setting(ctx.session, ALTERNATION_SETTING, None)
+    return {"residence_alternation": None}
+
+
+class ResidenceScheduleIn(Strict):
+    periods: int = Field(default=4, ge=1, le=12)
+
+
+@operation(
+    "get_residence_schedule",
+    "The residence alternation and its next periods (residence, start, end), with the planned "
+    "locations (temporary exceptions) overlapping each period.",
+    ResidenceScheduleIn,
+    mutates=False,
+)
+def get_residence_schedule(ctx: OpContext, body: ResidenceScheduleIn) -> dict[str, Any]:
+    return _alternation_out(ctx, body.periods)
 
 
 # --- reminders, proposals, notifications ---
@@ -2017,8 +2190,9 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
     arrive_before = body.arrive_before or destination.start
     if depart_after is None and arrive_before is None:
         raise OpError("indiquez au moins un départ minimal ou une arrivée maximale")
+    routing = access_routing(ctx.session, ctx.routing)
     result = _search(
-        ctx.routing,
+        routing,
         origin.coordinates,
         destination.coordinates,
         body,
@@ -2029,7 +2203,7 @@ def search_journey(ctx: OpContext, body: JourneyIn) -> dict[str, Any]:
     result["from"], result["to"] = origin.name, destination.name
     if body.return_depart_after is not None or body.return_arrive_before is not None:
         result["return"] = _search(
-            ctx.routing,
+            routing,
             destination.coordinates,
             origin.coordinates,
             body,

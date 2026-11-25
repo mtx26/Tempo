@@ -45,7 +45,7 @@ from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import Occupied, PlacedSession, validate_plan, validate_schedule
 from tempo.timeutil import Interval, utc
 from tempo.transport.itinerary import CachedRouting, Objective, TripQuery, find_trips
-from tempo.transport.location import DeclaredStay, LocatedEvent, base_at
+from tempo.transport.location import Alternation, DeclaredStay, LocatedEvent, base_at
 from tempo.transport.places import Place
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
 from tempo.transport.travel import (
@@ -55,6 +55,7 @@ from tempo.transport.travel import (
     TravelBlock,
     TravelStatus,
     plan_day_travel,
+    subtract,
     travel_aware_study_windows,
 )
 
@@ -126,6 +127,8 @@ class PlanningInput:
     locked_blocks: list[PlannedBlock] = field(default_factory=list)
     previous_blocks: list[PlannedBlock] = field(default_factory=list)
     stays: list[DeclaredStay] = field(default_factory=list)
+    alternation: Alternation | None = None
+    """Recurring residence schedule; ``stays`` are exceptions to it."""
     preferences: Preferences = field(default_factory=Preferences)
     buffer: timedelta = DEFAULT_BUFFER
     solver_seconds: float = 10.0
@@ -314,6 +317,33 @@ def _activity_travel(
     )
 
 
+def _away_spans(
+    events: list[LocatedEvent], travel: list[TravelBlock], tz: ZoneInfo
+) -> list[tuple[datetime, datetime]]:
+    """Per local day, from the first departure to the last return of the outings to fixed
+    commitments (unknown or impossible returns included, as routed conservatively): the user
+    is not at the base then."""
+    spans: dict[date, tuple[datetime, datetime]] = {}
+    for start, end in [(e.start, e.end) for e in events] + [
+        (b.start, b.end) for b in travel if b.end > b.start
+    ]:
+        day = start.astimezone(tz).date()
+        low, high = spans.get(day, (start, end))
+        spans[day] = (min(low, start, key=utc), max(high, end, key=utc))
+    return list(spans.values())
+
+
+def _at_base(
+    request: TrainingRequest, away: list[tuple[datetime, datetime]]
+) -> tuple[Interval, ...] | None:
+    """Where a session without a place may go: at the residence in force, i.e. outside the
+    outings to fixed commitments (and inside its category windows when it has some)."""
+    if request.place is not None:
+        return request.allowed
+    windows = request.allowed or (Interval(request.earliest_start, request.latest_end),)
+    return tuple(part for window in windows for part in subtract(window, away))
+
+
 def _worth_going_back(
     previous: LocatedEvent,
     following: LocatedEvent,
@@ -369,7 +399,7 @@ def _route_days(
     tz, now = data.timezone, utc(data.now)
 
     def base(at: datetime) -> Place | None:
-        return base_at(at, data.stays, data.home)
+        return base_at(at, data.stays, data.home, data.alternation)
 
     travel: list[TravelBlock] = []
     days: dict[date, list[LocatedEvent]] = {}
@@ -433,6 +463,8 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     fixed_located = [LocatedEvent(c.start, c.end, c.place) for c in fixed if c.place is not None]
     # Journeys between fixed commitments first: flexible activities are placed around them.
     fixed_travel = _route_days(fixed_located, data, routing, [], [])
+    # Sessions without a place happen at the residence: never during an outing (B08).
+    away = _away_spans(fixed_located, fixed_travel, data.timezone)
 
     # Flexible activities (trainings, personal outings, located task sessions)
     flexible: list[FlexibleActivity] = []
@@ -442,7 +474,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
             continue
         anchor = request.preferred_start or max(request.earliest_start, data.now, key=utc)
         before, after = _activity_travel(
-            request, base_at(anchor, data.stays, data.home), routing, issues
+            request, base_at(anchor, data.stays, data.home, data.alternation), routing, issues
         )
         earliest = max(request.earliest_start, data.now, key=utc) + before
         if utc(earliest) >= utc(request.latest_end):
@@ -462,7 +494,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 sequence_group=request.sequence_group,
                 sequence_index=request.sequence_index,
                 min_days_after_previous=request.min_days_after_previous,
-                allowed=request.allowed,
+                allowed=_at_base(request, away),
                 soft_target=None if request.strict else request.target,
             )
         )
@@ -481,8 +513,14 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         )
         return PlanningOutcome(OutcomeStatus.NO_SOLUTION, None, issues=issues, conflicts=conflicts)
     for missing in activity_plan.unplaced:
-        rule = " and its category windows" if by_id[missing].allowed is not None else ""
-        issues.append(f"activity '{by_id[missing].title}': no free slot in its window{rule}")
+        request = by_id[missing]
+        where = " à la résidence" if request.place is None else ""
+        rule = " et ses plages horaires" if request.allowed is not None else ""
+        issues.append(
+            f"« {request.title} » : aucun créneau libre{where} dans sa période{rule} sans "
+            "enfreindre les contraintes (trajets compris) ; proposition : un autre jour, une "
+            "période plus large ou une séance plus courte (à dire à l'assistant)"
+        )
     for outside in activity_plan.outside_hours:
         warnings.append(f"activity '{by_id[outside].title}' placed outside the activity hours")
 

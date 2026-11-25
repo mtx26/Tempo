@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from tempo import __version__
 from tempo.api.app import create_app
 from tempo.config import Settings
 
@@ -35,7 +36,7 @@ def test_status_with_valid_token_returns_version_and_timezone() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["timezone"] == "Europe/Brussels"
-    assert body["version"] == "0.1.0"
+    assert body["version"] == __version__
 
 
 def test_openapi_schema_is_not_exposed() -> None:

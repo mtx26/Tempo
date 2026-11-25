@@ -5,7 +5,7 @@ against a REAL MOTIS v2.11.4 (Brussels and nationwide data, recorded fixtures, l
 transport or format problem raises ``RoutingUnavailableError`` — never partial data.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -101,6 +101,9 @@ def _error_text(response: httpx2.Response) -> str:
 
 
 class MotisClient:
+    accepts_max_travel = True
+    """``plan`` takes ``max_travel`` (MOTIS ``maxTravelTime``): see ``transport.access``."""
+
     def __init__(
         self,
         base_url: str,
@@ -121,6 +124,7 @@ class MotisClient:
         time: datetime,
         *,
         arrive_by: bool,
+        max_travel: timedelta | None = None,
     ) -> list[Journey]:
         if time.tzinfo is None or time.utcoffset() is None:
             raise ValueError("query time must be timezone-aware")
@@ -130,6 +134,8 @@ class MotisClient:
             "time": time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "arriveBy": "true" if arrive_by else "false",
         }
+        if max_travel is not None:  # native MOTIS limit (minutes) on the whole journey
+            params["maxTravelTime"] = str(max(1, int(max_travel.total_seconds() // 60)))
         try:
             response = self._http.get(self._base_url + PLAN_PATH, params=params)
         except httpx2.HTTPError as exc:

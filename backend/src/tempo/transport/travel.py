@@ -251,7 +251,8 @@ def plan_day_travel(
     return plan
 
 
-def _subtract(window: Interval, busy: list[tuple[datetime, datetime]]) -> list[Interval]:
+def subtract(window: Interval, busy: list[tuple[datetime, datetime]]) -> list[Interval]:
+    """Parts of ``window`` outside every busy span."""
     pieces: list[Interval] = []
     cursor = utc(window.start)
     end = utc(window.end)
@@ -329,5 +330,5 @@ def travel_aware_study_windows(
                 busy.append((e_end, max(w_end, e_end)))
             else:
                 busy.append((e_end, utc(back.arrival)))
-        result.windows.extend(_subtract(window.interval, busy))
+        result.windows.extend(subtract(window.interval, busy))
     return result
