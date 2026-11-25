@@ -10,3 +10,11 @@ def test_http_client_request_lines_are_silenced() -> None:
     for name in ("httpx2", "httpx", "httpcore"):
         assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
     assert logging.getLogger("tempo").getEffectiveLevel() <= logging.INFO
+
+
+def test_version_comes_from_the_package_metadata() -> None:
+    from importlib.metadata import version
+
+    import tempo
+
+    assert tempo.__version__ == version("tempo-backend") != "0.0.0"
