@@ -131,7 +131,7 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             assert [t["id"] for t in tasks] == [task["id"]]
             assert tasks[0]["remaining_minutes"] == 90 and tasks[0]["hard_deadline"] is False
             start = datetime.now(UTC) + timedelta(days=2)
-            await op(
+            concert = await op(
                 "create_event",
                 {
                     "title": "Concert",
@@ -168,6 +168,9 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
                 await op("create_task", {"title": ""})
             with pytest.raises(api_module.TempoApiError):
                 await op("delete_place", {"place_id": "home"})  # still the home place
+            with pytest.raises(api_module.TempoApiError, match="Concert"):
+                await op("delete_place", {"place_id": "club"})  # still used: never silent
+            await op("cancel_event", {"activity_id": concert["result"]["activity"]["id"]})
             await op("delete_place", {"place_id": "club"})
 
     asyncio.run(scenario())
