@@ -1,9 +1,9 @@
-"""Prepare the nine Docker secrets of the Swarm stack in deploy/secrets/swarm/ (git-ignored).
+"""Prepare the ten Docker secrets of the Swarm stack in deploy/secrets/swarm/ (git-ignored).
 
 One file per secret, named like the secret: create each in Portainer (Secrets > Add secret,
 paste the file content) or with ``docker secret create <name> <file>``. Generated values
-(database passwords and URLs, API token) are written once and never rotated by a re-run; the
-user's credentials already validated locally are copied from deploy/secrets/. Prints no value.
+(database passwords and URLs, API and calendar tokens) are written once and never rotated by
+a re-run; the user's credentials already validated locally are copied from deploy/secrets/. Prints no value.
 
     python deploy/make_swarm_secrets.py
 """
@@ -42,6 +42,7 @@ def main() -> int:
     )
     write_once("tempo_database_url", f"postgresql+psycopg://tempo_app:{app}@postgres:5432/tempo")
     write_once("tempo_api_token", secrets.token_urlsafe(32))
+    write_once("tempo_calendar_token", secrets.token_urlsafe(32))
     missing = []
     for name in COPIED:
         source = SOURCE / name
@@ -53,7 +54,7 @@ def main() -> int:
     if missing:
         print("MISSING (put them in deploy/secrets/ first):", ", ".join(missing))
         return 1
-    print(f"9 secrets ready in {TARGET}")
+    print(f"10 secrets ready in {TARGET}")
     return 0
 
 

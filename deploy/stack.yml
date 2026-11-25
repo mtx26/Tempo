@@ -69,7 +69,8 @@ services:
       TEMPO_MOTIS_URL: http://routing:8080
       # Gemini on Vertex AI (TEMPO_LLM_MODEL defaults to gemini-3.5-flash-lite).
       TEMPO_VERTEX_PROJECT_ID: ${TEMPO_VERTEX_PROJECT_ID:?set TEMPO_VERTEX_PROJECT_ID}
-    secrets: [tempo_api_token, tempo_database_url, tempo_gcp_credentials]
+    # tempo_calendar_token: secret path of the read-only iCalendar feed /calendar/<token>.ics.
+    secrets: [tempo_api_token, tempo_calendar_token, tempo_database_url, tempo_gcp_credentials]
     # During a token rotation add: tempo_api_token_previous.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
@@ -206,6 +207,7 @@ secrets:
   tempo_owner_database_url: {external: true}
   tempo_database_url: {external: true}
   tempo_api_token: {external: true}
+  tempo_calendar_token: {external: true}
   tempo_ics_url: {external: true}
   tempo_bmc_partner_key: {external: true}
   tempo_gcp_credentials: {external: true}

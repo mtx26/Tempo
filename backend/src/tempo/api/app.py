@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
@@ -13,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from tempo import __version__
 from tempo.api.assistant import router as assistant_router
 from tempo.api.auth import FailureLimiter, token_matches
+from tempo.api.calendar_feed import calendar_router
 from tempo.api.location import router as location_router
 from tempo.assistant.agent import build_assistant
 from tempo.config import Settings
@@ -41,6 +43,7 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url=None,
     )
     app.state.timezone = ZoneInfo(settings.timezone)
+    app.state.clock = lambda: datetime.now(UTC)
     app.state.assistant = build_assistant(settings)
     app.state.routing = (
         MotisClient(settings.motis_url, timeout_seconds=30) if settings.motis_url else None
@@ -81,4 +84,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     app.include_router(location_router, dependencies=[Depends(require_token)])
     app.include_router(assistant_router, dependencies=[Depends(require_token)])
+    if settings.calendar_token is not None:
+        token = settings.calendar_token.get_secret_value().encode()
+        app.include_router(calendar_router(token, limiter))
     return app

@@ -134,6 +134,7 @@ Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou de
 | Paramètre | Service | Rôle |
 |---|---|---|
 | `tempo_api_token` (secret) | api | Jeton de service saisi dans Home Assistant : `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
+| `tempo_calendar_token` (secret) | api | Jeton du flux iCalendar en lecture seule `/calendar/<jeton>.ics` (agenda du téléphone) ; distinct de `tempo_api_token`. Sans lui, pas de flux. |
 | `tempo_api_token_previous` (secret, temporaire) | api | Ancien jeton accepté pendant une rotation. |
 | `tempo_database_url` (secret) | api, worker | `postgresql+psycopg://tempo_app:<mdp>@postgres:5432/tempo`. |
 | `TEMPO_VERTEX_PROJECT_ID`, secret `tempo_gcp_credentials`, `TEMPO_LLM_MODEL` (`gemini-3.5-flash-lite` par défaut), `TEMPO_VERTEX_REGION` (`global` par défaut) | api, worker | LLM facultatif (assistant conversationnel et e-mails du coach) : Gemini sur Google Cloud Vertex AI. Projet Google Cloud (API Vertex AI / Agent Platform activée) et clé JSON d'un compte de service ayant le rôle Vertex AI User ; le modèle doit être accessible au projet. Sans projet ou sans clé : mode déterministe. Chaque appel journalise une ligne `llm usage` (usage, modèle, latence, jetons d'entrée dont servis par le cache implicite, de sortie, de réflexion), jamais le contenu. |
@@ -165,13 +166,13 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
    `api` publie donc un seul port sur le nœud, `TEMPO_API_PORT` (défaut `18000`, mode `host`).
    L'intégration utilise `http://<IP du serveur>:18000` ; jeton obligatoire, tentatives
    limitées. Ne pas ouvrir ce port sur Internet (box/pare-feu).
-4. **Secrets** : `python deploy/make_swarm_secrets.py` écrit les 9 fichiers dans
-   `deploy/secrets/swarm/` (ignoré par git ; mots de passe, URL de base et jeton générés une
-   fois, clés validées recopiées). Dans Portainer, *Secrets > Add secret* : nom = nom du
-   fichier, contenu = contenu du fichier : `tempo_owner_db_password`, `tempo_app_db_password`,
-   `tempo_owner_database_url`, `tempo_database_url`, `tempo_api_token`, `tempo_ics_url`,
-   `tempo_bmc_partner_key`, `tempo_gcp_credentials` (JSON du compte de service),
-   `tempo_training_imap_password`.
+4. **Secrets** : `python deploy/make_swarm_secrets.py` écrit les 10 fichiers dans
+   `deploy/secrets/swarm/` (ignoré par git ; mots de passe, URL de base et jetons générés une
+   fois, clés validées recopiées), puis `sh deploy/push_secrets.sh <hôte ssh>` les crée sur le
+   serveur par l'entrée standard de SSH (aucune valeur affichée ; secrets existants gardés) :
+   `tempo_owner_db_password`, `tempo_app_db_password`, `tempo_owner_database_url`,
+   `tempo_database_url`, `tempo_api_token`, `tempo_calendar_token`, `tempo_ics_url`,
+   `tempo_bmc_partner_key`, `tempo_gcp_credentials`, `tempo_training_imap_password`.
 5. **Pile** : *Stacks > Add stack*, nom `tempo`, *Web editor* = contenu de `deploy/stack.yml`,
    *Environment variables* (valeurs dans `deploy/.env`, ignoré par git) : `TEMPO_VERSION`
    (`0.1.0`), `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`,
@@ -189,7 +190,14 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
 8. **Mettre à jour** : sauvegarde, nouvelle étiquette `vX.Y.Z`, puis *Update the stack* avec
    `TEMPO_VERSION` (stop-first, retour arrière automatique). Retour arrière : version
    précédente ; les migrations sont en avant uniquement (restaurer la sauvegarde si besoin).
-9. **Rotation du jeton** : nouveau secret déployé comme `tempo_api_token`, l'ancien en
+9. **Agenda du téléphone** (facultatif) : publier uniquement le chemin `/calendar/` par un
+   tunnel Cloudflare (*Zero Trust > Networks > Tunnels > Public Hostname* : chemin
+   `^/calendar/`, service `http://localhost:18000`, sans application Cloudflare Access sur
+   ce nom d'hôte car un agenda ne peut pas s'y authentifier), puis s'abonner sur l'iPhone à
+   `https://<hôte>/calendar/<tempo_calendar_token>.ics` (*Réglages > Calendrier > Comptes >
+   Ajouter un compte > Autre > Ajouter un calendrier avec abonnement*). L'URL est le secret :
+   la régénérer = nouveau secret et nouvel abonnement.
+10. **Rotation du jeton** : nouveau secret déployé comme `tempo_api_token`, l'ancien en
    `tempo_api_token_previous`, mettre à jour Home Assistant, retirer l'ancien.
 
 Exploitation :

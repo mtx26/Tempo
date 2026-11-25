@@ -45,6 +45,11 @@ class Settings(LlmSettings):
     """Previous token, still accepted during a rotation (Docker secret
     ``tempo_api_token_previous``). Remove it once Home Assistant uses the new token."""
 
+    calendar_token: SecretStr | None = Field(default=None, min_length=MIN_TOKEN_LENGTH)
+    """Secret path segment of the read-only iCalendar feed ``/calendar/<token>.ics`` (Docker
+    secret ``tempo_calendar_token``), distinct from the API token: calendar apps cannot send a
+    header, so the URL itself is the credential. Unset: no feed."""
+
     database_url: SecretStr | None = None
     """SQLAlchemy URL of PostgreSQL (e.g. from the Docker secret ``tempo_database_url``)."""
 
@@ -54,7 +59,7 @@ class Settings(LlmSettings):
     timezone: str = "Europe/Brussels"
     """IANA timezone used to interpret local wall-clock planning rules."""
 
-    @field_validator("api_token", "api_token_previous")
+    @field_validator("api_token", "api_token_previous", "calendar_token")
     @classmethod
     def _non_trivial_token(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None:
@@ -74,6 +79,11 @@ class Settings(LlmSettings):
             and previous.get_secret_value() == self.api_token.get_secret_value()
         ):
             raise ValueError("api_token_previous must differ from api_token")
+        calendar = self.calendar_token
+        if calendar is not None and calendar.get_secret_value() in {
+            t.decode() for t in self.accepted_tokens()
+        }:
+            raise ValueError("calendar_token must differ from the API tokens")
         return self
 
     def accepted_tokens(self) -> tuple[bytes, ...]:
