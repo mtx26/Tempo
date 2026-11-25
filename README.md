@@ -153,11 +153,12 @@ coordonnées d'un lieu sont fournies par l'utilisateur, jamais devinées.
 Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm). La pile
 `deploy/stack.yml` est autonome : images GHCR, aucun fichier du dépôt à monter.
 
-1. **Images** : `git tag v0.1.0 && git push origin v0.1.0`. Après les tests, la CI publie
-   `ghcr.io/mtx26/tempo-backend`, `tempo-routing` (MOTIS v2.11.4 + `routing/config/belgium.yml`)
-   et `tempo-postgres` (postgres 16 + rôles et scripts de sauvegarde), étiquette `0.1.0`.
-   Paquets privés : dans Portainer, *Registries > Add registry > Custom registry*, URL
-   `ghcr.io`, identifiant GitHub et un jeton (classic) limité à `read:packages`.
+1. **Images** (CI `.github/workflows/ci.yml`) : tests à chaque push et pull request ; si ils
+   passent, publication automatique sur GHCR de `ghcr.io/mtx26/tempo-backend`,
+   `tempo-routing` (MOTIS v2.11.4 + `routing/config/belgium.yml`) et `tempo-postgres`
+   (postgres 16 + rôles et scripts de sauvegarde) : `latest` et `sha-<court>` à chaque push
+   sur `main`, `X.Y.Z` pour une étiquette `vX.Y.Z` (version à figer dans `TEMPO_VERSION`).
+   Images publiques : aucun registre à déclarer dans Portainer.
 2. **Serveur** : MOTIS et la mise à jour des données tournent sur le nœud manager (volume
    local partagé) ; prévoir ~8 Go de RAM libres (MOTIS : 6 Go max).
 3. **Réseau partagé avec Home Assistant** : la pile Tempo crée elle-même le réseau overlay
