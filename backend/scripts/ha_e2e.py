@@ -26,6 +26,7 @@ TOKEN = Path(sys.argv[1]).read_text().strip()
 BACK = {"Authorization": f"Bearer {TOKEN}"}
 CLIENT_ID = f"{HA}/"
 results: list[tuple[str, bool, str]] = []
+sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # Windows consoles
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:

@@ -21,6 +21,7 @@ TOKEN = Path(sys.argv[1]).read_text().strip()
 H = {"Authorization": f"Bearer {TOKEN}"}
 TZ = ZoneInfo("Europe/Brussels")
 results: list[tuple[str, bool, str]] = []
+sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # Windows consoles
 http = httpx2.Client(timeout=120)
 
 

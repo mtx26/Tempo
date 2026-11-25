@@ -737,7 +737,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 
 | Besoin | État | Preuve / écart |
 |---|---|---|
-| B01 Conversation | Partiel | Agent Claude à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend ; **recette dans un vrai Home Assistant 2026.11.2** (Docker, `scripts/ha_e2e.py`, 15/15) : flux de configuration, agent de conversation Assist, ajout de tâche et question par la conversation (repli déterministe), refus de deviner, GPS du téléphone transmis et jugé fiable, liste de tâches à jour, aucun service métier ; budget de 60 s, panne du LLM après une modification sans rejeu, délai de 150 s côté HA (`test_assistant.py`). **Jamais exécuté avec un vrai LLM** (aucune clé) ; la recette HA réelle date d'avant ces changements. |
+| B01 Conversation | Partiel | Agent Claude à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend ; **recette dans un vrai Home Assistant 2026.11.2** (Docker, `scripts/ha_e2e.py`, 15/15) : flux de configuration, agent de conversation Assist, ajout de tâche et question par la conversation (repli déterministe), refus de deviner, GPS du téléphone transmis et jugé fiable, liste de tâches à jour, aucun service métier ; budget de 60 s, panne du LLM après une modification sans rejeu, délai de 150 s côté HA (`test_assistant.py`). **Jamais exécuté avec un vrai LLM** (aucune clé). |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente, séance unique située ; échéance stricte d'une séance située en heure locale, jamais repoussée, manquée signalée (`test_domain_rules.py`). |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, invalides) notifiés. **Flux iCal réel de l'université non testé** (URL non fournie). |
@@ -765,9 +765,11 @@ trajet direct entre deux activités, localisation future.
 Dernière exécution locale : backend **530 tests réussis, 0 ignoré** (PostgreSQL 16
 réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
 portail Belgian Mobility réel en anonyme), couverture 94 %, Ruff et mypy strict propres ;
-intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres. Les recettes
-`scripts/ha_e2e.py` (15/15) et `scripts/live_scenario.py` (15/15) datent d'avant les
-corrections de l'audit de conformité : **à rejouer**.
+intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres. Recettes rejouées
+le 25/11/2026 après les corrections de l'audit de conformité, base de développement vide :
+vrai Home Assistant 2026.11.2 (`scripts/ha_e2e.py`) 15/15 et pile complète avec worker, relais
+et MOTIS national (`scripts/live_scenario.py`) 15/15 ; jobs du worker sains, battement de santé
+actif.
 
 Bloquants nécessitant l'utilisateur : clé API Claude (tester B01 réellement), URL iCal de
 l'université, entité `device_tracker`, adresse de l'expéditeur du coach + accès IMAP, clé
