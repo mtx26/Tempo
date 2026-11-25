@@ -24,3 +24,4 @@ graphify-out/
 
 # graphify knowledge graph (local tool output, not versioned)
 graphify-out/
+temp.txt
