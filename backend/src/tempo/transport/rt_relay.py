@@ -363,7 +363,9 @@ def create_relay_app(relay: FeedRelay) -> FastAPI:
 def main() -> None:  # pragma: no cover - process entry point
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO)
+    from tempo.logs import configure_logging
+
+    configure_logging()
     try:
         relay = relay_from_settings(RelaySettings())
     except MissingKeyError as exc:

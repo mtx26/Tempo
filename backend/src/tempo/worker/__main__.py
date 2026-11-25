@@ -145,7 +145,9 @@ def mail_source(settings: WorkerSettings) -> MailSource | None:
 
 
 def main() -> None:  # pragma: no cover - process loop, jobs are tested individually
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    from tempo.logs import configure_logging
+
+    configure_logging()
     settings = WorkerSettings()
     tz = ZoneInfo(settings.timezone)
     engine = create_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)

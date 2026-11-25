@@ -5,8 +5,6 @@ Binds the container port on the internal overlay network only; Home Assistant re
 bearer token with rotation and a limiter of failed attempts (``api.auth``).
 """
 
-import logging
-
 import uvicorn
 
 from tempo.api.app import create_app
@@ -16,7 +14,9 @@ PORT = 8000
 
 
 def main() -> None:  # pragma: no cover - process entry point
-    logging.basicConfig(level=logging.INFO)
+    from tempo.logs import configure_logging
+
+    configure_logging()
     uvicorn.run(
         create_app(Settings()),  # values come from env / Docker secrets
         host="0.0.0.0",  # noqa: S104 - container port, internal overlay network only

@@ -287,7 +287,9 @@ def update_inputs(
 def main(argv: list[str]) -> int:
     import os
 
-    logging.basicConfig(level=logging.INFO)
+    from tempo.logs import configure_logging
+
+    configure_logging()
     if len(argv) not in (1, 2) or (len(argv) == 2 and argv[1] not in REGIONS):
         print(
             "usage: python -m tempo.transport.gtfs_update <input-folder> [belgium|brussels]",

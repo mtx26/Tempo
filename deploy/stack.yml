@@ -15,7 +15,9 @@ x-hardening: &hardening
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   read_only: true
-  tmpfs: [/tmp]
+  # Writable /tmp on the read-only root: Swarm ignores `tmpfs:`, it needs a tmpfs mount. Services
+  # with their own `volumes:` repeat this entry (their list replaces this one).
+  volumes: [{type: tmpfs, target: /tmp}]
 
 x-backend-image: &backend-image ${TEMPO_REGISTRY:-ghcr.io/mtx26}/tempo-backend:${TEMPO_VERSION:?set TEMPO_VERSION}
 
@@ -121,7 +123,7 @@ services:
       TEMPO_RELAY_STATE_FILE: /state/relay-state.json
     # Mandatory Belgian Mobility key: the relay refuses to start without it.
     secrets: [tempo_bmc_partner_key]
-    volumes: [relay-state:/state]
+    volumes: [relay-state:/state, {type: tmpfs, target: /tmp}]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
       interval: 60s
@@ -149,7 +151,7 @@ services:
         done
     # Mandatory Belgian Mobility key for the static GTFS downloads.
     secrets: [tempo_bmc_partner_key]
-    volumes: [routing-input:/routing-input]
+    volumes: [routing-input:/routing-input, {type: tmpfs, target: /tmp}]
     networks: [egress]
     deploy:
       replicas: 1
@@ -166,7 +168,7 @@ services:
     entrypoint: ["/opt/tempo/supervisor.sh"]
     environment:
       CHECK_SECONDS: "300"
-    volumes: [routing-input:/input:ro, routing-data:/data]
+    volumes: [routing-input:/input:ro, routing-data:/data, {type: tmpfs, target: /tmp}]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
       interval: 60s
