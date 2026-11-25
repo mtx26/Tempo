@@ -312,7 +312,7 @@ def test_ordinary_times_produce_no_dst_warning() -> None:
 
 
 def test_zero_duration_markers_are_not_invalid_and_only_reported_in_the_window() -> None:
-    """Real UMONS feed: holidays are zero-duration events at local midnight ("Congé
+    """Real university feed: holidays are zero-duration events at local midnight ("Congé
     (Toussaint)"). They are dated markers, not timed commitments and not broken data: never
     "invalid", and only reported when they fall inside the synchronised window."""
     data = _calendar(
