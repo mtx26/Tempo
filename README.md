@@ -148,35 +148,52 @@ téléphone, service `notify` facultatif, puis option *Utiliser la zone domicile
 Tempo*. Le reste (lieux, disponibilités, préférences, rappels) se dit à l'assistant ; les
 coordonnées d'un lieu sont fournies par l'utilisateur, jamais devinées.
 
-## Déploiement Swarm
+## Déploiement Swarm (Portainer)
 
-**Préparé et validé localement, jamais exécuté : nécessite une autorisation explicite.**
+Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm). La pile
+`deploy/stack.yml` est autonome : images GHCR, aucun fichier du dépôt à monter.
 
-1. **Prérequis** (gestionnaire Swarm) : registre accessible ; pousser `tempo-backend:<version>`
-   (`backend/Dockerfile`) et `tempo-routing:v2.11.4` (`routing/Dockerfile`) ; réseau overlay
-   partagé avec Home Assistant
-   (`docker network create -d overlay --attachable homeassistant_tempo`, ou `TEMPO_HA_NETWORK`) ;
-   `routing-update` et `routing` partagent un volume local : étiqueter leur nœud
-   (`docker node update --label-add tempo.routing=true <nœud>`) ; `postgres` reste sur un seul
-   nœud (volume local). Le volume de routage est construit par `routing-update` + `routing`
-   (~1,8 Go, ~3,5 min d'import), puis rafraîchi chaque nuit à 02:30 UTC.
-2. **Secrets** (`docker secret create <nom> <fichier>`, depuis `deploy/secrets/`) :
-   `tempo_owner_db_password`, `tempo_app_db_password`, `tempo_owner_database_url`,
-   `tempo_database_url`, `tempo_api_token`, `tempo_ics_url`, `tempo_bmc_partner_key`,
-   `tempo_gcp_credentials`, `tempo_training_imap_password`.
-3. **Réglages** dans `deploy/.env` (ignoré par git, jamais commité) : `TEMPO_REGISTRY`,
-   `TEMPO_VERSION`, `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_TRAINING_IMAP_HOST`,
-   `TEMPO_TRAINING_IMAP_USER`, `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID`
-   (une valeur manquante bloque le déploiement avec son nom). **Déployer** :
-   `set -a; . deploy/.env; set +a; docker stack deploy -c deploy/stack.yml tempo`.
-   Le job `migrate` met le schéma à jour (rôle propriétaire) puis redonne les droits au rôle
-   applicatif ; api et worker attendent le schéma.
-4. **Mettre à jour** : sauvegarde d'abord, puis même commande avec la nouvelle version
-   (stop-first, retour arrière automatique en cas d'échec). Retour arrière de code : redéployer
-   la version précédente ; les migrations sont en avant uniquement en production (restaurer la
-   sauvegarde si un schéma doit être annulé).
-5. **Rotation du jeton** : créer le nouveau secret, le déployer comme `tempo_api_token` avec
-   l'ancien en `tempo_api_token_previous`, mettre à jour Home Assistant, retirer l'ancien.
+1. **Images** : `git tag v0.1.0 && git push origin v0.1.0`. Après les tests, la CI publie
+   `ghcr.io/mtx26/tempo-backend`, `tempo-routing` (MOTIS v2.11.4 + `routing/config/belgium.yml`)
+   et `tempo-postgres` (postgres 16 + rôles et scripts de sauvegarde), étiquette `0.1.0`.
+   Paquets privés : dans Portainer, *Registries > Add registry > Custom registry*, URL
+   `ghcr.io`, identifiant GitHub et un jeton (classic) limité à `read:packages`.
+2. **Nœud** : `docker node update --label-add tempo.routing=true <nœud>` (MOTIS et la mise à
+   jour des données partagent un volume local). Prévoir ~8 Go de RAM libres (MOTIS : 6 Go max).
+3. **Réseau partagé avec Home Assistant** :
+   `docker network create -d overlay --attachable homeassistant_tempo`, puis y relier le
+   conteneur Home Assistant existant (`docker network connect homeassistant_tempo <conteneur>`,
+   ou `networks:` externe dans sa pile). Seul `api` rejoint ce réseau ; aucun port Tempo n'est
+   publié. Autre nom : variable `TEMPO_HA_NETWORK`. Home Assistant en `network_mode: host` ne
+   peut pas rejoindre un overlay : publier alors le port de `api` en mode `host` et bloquer
+   le port 8000 au pare-feu sauf depuis l'hôte.
+4. **Secrets** : `python deploy/make_swarm_secrets.py` écrit les 9 fichiers dans
+   `deploy/secrets/swarm/` (ignoré par git ; mots de passe, URL de base et jeton générés une
+   fois, clés validées recopiées). Dans Portainer, *Secrets > Add secret* : nom = nom du
+   fichier, contenu = contenu du fichier : `tempo_owner_db_password`, `tempo_app_db_password`,
+   `tempo_owner_database_url`, `tempo_database_url`, `tempo_api_token`, `tempo_ics_url`,
+   `tempo_bmc_partner_key`, `tempo_gcp_credentials` (JSON du compte de service),
+   `tempo_training_imap_password`.
+5. **Pile** : *Stacks > Add stack*, nom `tempo`, *Web editor* = contenu de `deploy/stack.yml`,
+   *Environment variables* (valeurs dans `deploy/.env`, ignoré par git) : `TEMPO_VERSION`
+   (`0.1.0`), `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`,
+   `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID` ; facultatifs
+   `TEMPO_REGISTRY` (défaut `ghcr.io/mtx26`), `TEMPO_HA_NETWORK`. Une valeur manquante bloque
+   le déploiement avec son nom. *Deploy the stack*.
+6. **Premier démarrage** : `migrate` crée le schéma et redonne les droits à `tempo_app` ;
+   `routing-update` télécharge les GTFS et OSM (~1 Go), puis `routing` importe le graphe
+   (~4 min ; santé « starting » jusque-là). Vérifier : `tempo_api` sain, `tempo_rt-relay`
+   `/health` sans `last_error`.
+7. **Home Assistant** : dépôt privé, donc pas de HACS ; copier
+   `custom_components/tempo` (dépôt `tempo-homeassistant`) dans `config/custom_components/`,
+   redémarrer, ajouter l'intégration Tempo : URL `http://tempo_api:8000`, jeton =
+   `deploy/secrets/swarm/tempo_api_token`, « Vérifier le SSL » décoché (réseau interne),
+   puis le `device_tracker` du téléphone.
+8. **Mettre à jour** : sauvegarde, nouvelle étiquette `vX.Y.Z`, puis *Update the stack* avec
+   `TEMPO_VERSION` (stop-first, retour arrière automatique). Retour arrière : version
+   précédente ; les migrations sont en avant uniquement (restaurer la sauvegarde si besoin).
+9. **Rotation du jeton** : nouveau secret déployé comme `tempo_api_token`, l'ancien en
+   `tempo_api_token_previous`, mettre à jour Home Assistant, retirer l'ancien.
 
 Exploitation :
 - Santé : health checks `api` et `rt-relay` ; table `job_run` (exposée par `get_sources_status`

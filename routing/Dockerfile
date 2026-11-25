@@ -14,9 +14,12 @@ RUN apt-get update \
  && tar -xjf /tmp/motis.tar.bz2 -C /opt/motis \
  && rm /tmp/motis.tar.bz2 \
  && useradd --system --uid 10001 --home-dir /data motis \
- && mkdir -p /data && chown motis /data
+ && mkdir -p /data /config && chown motis /data
 
 COPY --chmod=0555 scripts/supervisor.sh /opt/tempo/supervisor.sh
+# Nationwide configuration baked in (realtime through the Tempo relay only): the Swarm stack
+# needs no file from the repository.
+COPY --chmod=0444 config/belgium.yml /config/config.yml
 
 USER motis
 WORKDIR /data

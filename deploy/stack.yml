@@ -1,7 +1,8 @@
-# Tempo production stack for Docker Swarm (Portainer). NOT DEPLOYED — deploying requires the
-# user's explicit approval (CLAUDE.md). Validate with:
-#   TEMPO_REGISTRY=... TEMPO_VERSION=... docker stack config -c deploy/stack.yml
-# Runbook: README.md "Déploiement Swarm".
+# Tempo production stack for Docker Swarm, deployed by the user through Portainer
+# (Stacks > Add stack > Web editor: paste this file). Self-contained: images from GHCR, no file
+# from the repository. Environment variables, secrets and networks: README.md "Déploiement
+# Swarm (Portainer)". Local check:
+#   set -a; . deploy/.env; set +a; docker stack config -c deploy/stack.yml
 #
 # Network model (no Tempo port is published; Home Assistant is the only UI):
 #   ha       external overlay shared with Home Assistant -> only `api` joins it
@@ -15,20 +16,17 @@ x-hardening: &hardening
   read_only: true
   tmpfs: [/tmp]
 
-x-backend-image: &backend-image ${TEMPO_REGISTRY:?set TEMPO_REGISTRY}/tempo-backend:${TEMPO_VERSION:?set TEMPO_VERSION}
+x-backend-image: &backend-image ${TEMPO_REGISTRY:-ghcr.io/mtx26}/tempo-backend:${TEMPO_VERSION:?set TEMPO_VERSION}
 
 services:
   postgres:
-    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
+    # Official postgres 16 + Tempo role initialisation (deploy/postgres.Dockerfile).
+    image: ${TEMPO_REGISTRY:-ghcr.io/mtx26}/tempo-postgres:${TEMPO_VERSION:?set TEMPO_VERSION}
     environment:
       POSTGRES_DB: tempo
       POSTGRES_USER: tempo_owner
       POSTGRES_PASSWORD_FILE: /run/secrets/tempo_owner_db_password
     secrets: [tempo_owner_db_password, tempo_app_db_password]
-    configs:
-      - source: init_roles
-        target: /docker-entrypoint-initdb.d/10-roles.sh
-        mode: 0555
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tempo_owner -d tempo"]
@@ -154,14 +152,13 @@ services:
 
   routing:
     <<: *hardening
-    image: ${TEMPO_REGISTRY}/tempo-routing:v2.11.4
+    # MOTIS v2.11.4 + config/belgium.yml baked in (routing/Dockerfile).
+    image: ${TEMPO_REGISTRY:-ghcr.io/mtx26}/tempo-routing:${TEMPO_VERSION:?set TEMPO_VERSION}
     # Supervisor: serves /data/current, re-imports into a new graph when READY changes, switches
     # only on success, keeps the previous graph (rollback) and restarts MOTIS if it crashes.
     entrypoint: ["/opt/tempo/supervisor.sh"]
     environment:
       CHECK_SECONDS: "300"
-    configs:
-      - {source: motis_config, target: /config/config.yml, mode: 0444}
     volumes: [routing-input:/input:ro, routing-data:/data]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
@@ -178,7 +175,7 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]  # postgres image entry needs these
     security_opt: ["no-new-privileges:true"]
-    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
+    image: ${TEMPO_REGISTRY:-ghcr.io/mtx26}/tempo-postgres:${TEMPO_VERSION:?set TEMPO_VERSION}
     command: ["sh", "-c", "while true; do sh /scripts/backup.sh || echo 'BACKUP FAILED'; sleep 86400; done"]
     environment:
       PGHOST: postgres
@@ -188,20 +185,11 @@ services:
       BACKUP_DIR: /backups
       BACKUP_KEEP_DAYS: "14"
     secrets: [tempo_owner_db_password]
-    configs:
-      - {source: backup_sh, target: /scripts/backup.sh, mode: 0555}
-      - {source: restore_drill_sh, target: /scripts/restore_drill.sh, mode: 0555}
     volumes: [backups:/backups]
     networks: [backend]
     deploy:
       replicas: 1
       resources: {limits: {memory: 512M}}
-
-configs:
-  init_roles: {file: ./db/init-roles.sh}
-  motis_config: {file: ../routing/config/belgium.yml}
-  backup_sh: {file: ./backup/backup.sh}
-  restore_drill_sh: {file: ./backup/restore_drill.sh}
 
 secrets:
   tempo_owner_db_password: {external: true}
