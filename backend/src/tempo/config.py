@@ -4,6 +4,7 @@ Secrets are typed ``SecretStr`` so they never appear in ``repr`` or logs.
 """
 
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -14,7 +15,26 @@ MIN_DISTINCT_TOKEN_CHARS = 16
 DOCKER_SECRETS_DIR = Path("/run/secrets")
 
 
-class Settings(BaseSettings):
+class LlmSettings(BaseSettings):
+    """Optional LLM access, shared by the API (conversation) and the worker (coach e-mails).
+
+    ``anthropic``: Claude API, key in the Docker secret ``tempo_anthropic_api_key``.
+    ``vertex``: Claude on Google Cloud Vertex AI, billed by the Google Cloud project; a service
+    account key file (Docker secret ``tempo_gcp_credentials``) with the Vertex AI User role.
+    Without complete settings, no LLM is used: Tempo works fully without one."""
+
+    llm_provider: Literal["anthropic", "vertex"] = "anthropic"
+    llm_model: str = Field(default="claude-sonnet-5-5", pattern=r"^claude-[a-z0-9-]{3,60}$")
+    """Same identifier on the Claude API and on Vertex AI (enable it in the Model Garden)."""
+    anthropic_api_key: SecretStr | None = None
+    """Optional (Docker secret ``tempo_anthropic_api_key``), provider ``anthropic``."""
+    vertex_project_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+    vertex_region: str = Field(default="global", pattern=r"^[a-z0-9-]{2,40}$")
+    vertex_credentials_file: Path = DOCKER_SECRETS_DIR / "tempo_gcp_credentials"
+    """Service-account JSON key (never in the image or the repository)."""
+
+
+class Settings(LlmSettings):
     model_config = SettingsConfigDict(
         env_prefix="TEMPO_",
         extra="ignore",
@@ -32,10 +52,6 @@ class Settings(BaseSettings):
 
     database_url: SecretStr | None = None
     """SQLAlchemy URL of PostgreSQL (e.g. from the Docker secret ``tempo_database_url``)."""
-
-    anthropic_api_key: SecretStr | None = None
-    """Optional (Docker secret ``tempo_anthropic_api_key``): enables AI interpretation of text
-    the deterministic parser does not understand. Tempo works fully without it."""
 
     motis_url: str | None = None
     """MOTIS base URL: lets the assistant search journeys and re-plan synchronously."""

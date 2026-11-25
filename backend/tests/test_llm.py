@@ -1,6 +1,8 @@
-"""Claude interpreter: request shape and failure handling (SDK call replaced, no network)."""
+"""LLM access: provider choice, request shape and failure handling (SDK replaced, no network)."""
 
+import json
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,33 +14,93 @@ from pydantic import SecretStr
 from tempo.ai.llm import (
     FALLBACK_BETA,
     MAX_INPUT_CHARS,
-    MODEL,
     ClaudeInterpreter,
     Extraction,
+    LlmClient,
     build_interpreter,
+    build_llm_client,
 )
+from tempo.config import LlmSettings
 
-KEY = SecretStr("sk-test")
 TODAY = date(2026, 12, 7)
 
 
-def interpreter_with(behaviour: Any) -> tuple[ClaudeInterpreter, list[dict[str, Any]]]:
+def settings(**values: Any) -> LlmSettings:
+    return LlmSettings(_env_file=None, **values)
+
+
+def interpreter_with(
+    behaviour: Any, *, server_fallbacks: bool = True
+) -> tuple[ClaudeInterpreter, list[dict[str, Any]]]:
     calls: list[dict[str, Any]] = []
-    interp = ClaudeInterpreter(KEY)
 
     def parse(**kwargs: Any) -> Any:
         calls.append(kwargs)
         return behaviour(kwargs)
 
-    interp._client = SimpleNamespace(  # type: ignore[assignment]
-        beta=SimpleNamespace(messages=SimpleNamespace(parse=parse))
+    llm = LlmClient(SimpleNamespace(parse=parse), "test", server_fallbacks=server_fallbacks)
+    return ClaudeInterpreter(llm, model="claude-sonnet-5-5"), calls
+
+
+def test_default_model_is_sonnet_and_no_key_means_no_llm() -> None:
+    assert settings().llm_model == "claude-sonnet-5-5"
+    assert build_interpreter(settings()) is None
+    keyed = build_llm_client(settings(anthropic_api_key=SecretStr("sk-test")), timeout=5)
+    assert keyed is not None and keyed.provider == "anthropic" and keyed.server_fallbacks
+
+
+def test_vertex_needs_a_project_and_a_credentials_file(tmp_path: Path) -> None:
+    missing = tmp_path / "absent.json"
+    assert build_llm_client(settings(llm_provider="vertex"), timeout=5) is None
+    incomplete = settings(
+        llm_provider="vertex", vertex_project_id="tempo-project", vertex_credentials_file=missing
     )
-    return interp, calls
+    assert build_llm_client(incomplete, timeout=5) is None
 
 
-def test_no_key_means_no_interpreter() -> None:
-    assert build_interpreter(None) is None
-    assert isinstance(build_interpreter(KEY), ClaudeInterpreter)
+def test_vertex_client_has_no_server_fallback(tmp_path: Path) -> None:
+    """Vertex AI rejects ``fallbacks``: never sent; a refusal takes the deterministic path."""
+    key = tmp_path / "sa.json"
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    key.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "tempo-project",
+                "private_key_id": "test",
+                "private_key": pem,
+                "client_email": "tempo@tempo-project.iam.gserviceaccount.com",
+                "client_id": "1",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    llm = build_llm_client(
+        settings(
+            llm_provider="vertex", vertex_project_id="tempo-project", vertex_credentials_file=key
+        ),
+        timeout=5,
+    )
+    assert llm is not None and llm.provider == "vertex"
+    assert not llm.server_fallbacks and llm.extra() == {}
+    interp, calls = interpreter_with(
+        lambda _: SimpleNamespace(stop_reason="end_turn", parsed_output=None),
+        server_fallbacks=False,
+    )
+    interp.extract("x", TODAY, [])
+    assert "fallbacks" not in calls[0] and "betas" not in calls[0]
 
 
 def test_request_shape_and_parsed_output() -> None:
@@ -48,7 +110,7 @@ def test_request_shape_and_parsed_output() -> None:
     )
     assert interp.extract("replanifie tout", TODAY, ["home", "club"]) is expected
     call = calls[0]
-    assert call["model"] == MODEL == "claude-opus-5-5"
+    assert call["model"] == "claude-sonnet-5-5"
     assert call["output_format"] is Extraction
     assert call["betas"] == [FALLBACK_BETA] and call["fallbacks"] == "default"
     assert call["output_config"] == {"effort": "low"}

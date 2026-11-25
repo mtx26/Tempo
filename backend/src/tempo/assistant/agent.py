@@ -12,17 +12,16 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 import anthropic
-from pydantic import SecretStr
 
+from tempo.ai.llm import LlmClient, build_llm_client
 from tempo.assistant.catalog import OpContext, run_operation, tool_definitions
+from tempo.config import LlmSettings
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-opus-5-5"
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_STEPS = 16
 MAX_RESULT_CHARS = 30_000
 CONVERSATION_BUDGET_SECONDS = 60.0
@@ -79,12 +78,6 @@ class Assistant(Protocol):
     def reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply: ...
 
 
-class MessagesClient(Protocol):
-    """The part of ``anthropic.Anthropic().beta.messages`` used here (fakes in tests)."""
-
-    def create(self, **kwargs: Any) -> Any: ...
-
-
 def _text(content: list[Any]) -> str:
     return "\n".join(b.text for b in content if getattr(b, "type", None) == "text").strip()
 
@@ -105,22 +98,13 @@ def _dump(result: dict[str, Any]) -> str:
 class ClaudeAssistant:
     def __init__(
         self,
-        api_key: SecretStr | None = None,
+        llm: LlmClient,
         *,
-        model: str = MODEL,
-        messages: MessagesClient | None = None,
-        timeout: float = CONVERSATION_BUDGET_SECONDS,
+        model: str,
         budget_seconds: float = CONVERSATION_BUDGET_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if messages is None:
-            if api_key is None:
-                raise ValueError("api_key or messages client required")
-            client = anthropic.Anthropic(
-                api_key=api_key.get_secret_value(), timeout=timeout, max_retries=1
-            )
-            messages = cast(MessagesClient, client.beta.messages)
-        self._messages: MessagesClient = messages
+        self._llm = llm
         self._model = model
         self._tools = tool_definitions()
         self._budget = budget_seconds
@@ -128,7 +112,7 @@ class ClaudeAssistant:
 
     def _call(self, conversation: list[dict[str, Any]], seconds: float) -> Any:
         try:
-            return self._messages.create(
+            return self._llm.messages.create(
                 timeout=seconds,
                 model=self._model,
                 max_tokens=16000,
@@ -136,8 +120,7 @@ class ClaudeAssistant:
                 tools=self._tools,
                 messages=conversation,
                 output_config={"effort": "medium"},
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
+                **self._llm.extra(),
             )
         except anthropic.AuthenticationError as exc:
             raise LLMUnavailableError("clé API invalide") from exc
@@ -222,5 +205,6 @@ def _partial(reason: str, operations: list[dict[str, Any]]) -> str:
     )
 
 
-def build_assistant(api_key: SecretStr | None) -> Assistant | None:
-    return None if api_key is None else ClaudeAssistant(api_key)
+def build_assistant(settings: LlmSettings) -> Assistant | None:
+    llm = build_llm_client(settings, timeout=CONVERSATION_BUDGET_SECONDS)
+    return None if llm is None else ClaudeAssistant(llm, model=settings.llm_model)

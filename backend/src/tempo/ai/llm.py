@@ -6,19 +6,23 @@ user request, and the planner decides feasibility. Tempo works fully without it:
 key is configured, ``build_interpreter`` returns ``None`` and callers report "not understood".
 
 Uses the official Anthropic SDK with structured outputs (``messages.parse`` + a Pydantic
-schema) and the server-side refusal fallback (``fallbacks="default"``).
+schema). Provider (``build_llm_client``, shared with the conversational agent): the Claude API,
+with the server-side refusal fallback (``fallbacks="default"``), or Claude on Google Cloud
+Vertex AI, which has no server-side fallback: a refusal there takes the deterministic path.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import date
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import anthropic
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field
+
+from tempo.config import LlmSettings
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-opus-5-5"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_INPUT_CHARS = 20_000
 
@@ -63,11 +67,58 @@ SYSTEM = (
 )
 
 
-class ClaudeInterpreter:
-    def __init__(self, api_key: SecretStr, *, model: str = MODEL, timeout: float = 60.0) -> None:
-        self._client = anthropic.Anthropic(
-            api_key=api_key.get_secret_value(), timeout=timeout, max_retries=2
+@dataclass(frozen=True, slots=True)
+class LlmClient:
+    """The configured provider's ``messages`` resource and what that provider supports."""
+
+    messages: Any
+    provider: str
+    server_fallbacks: bool
+    """Claude API only: refusals are re-run server-side (``fallbacks="default"``)."""
+
+    def extra(self) -> dict[str, Any]:
+        """Provider-specific request arguments."""
+        return {"betas": [FALLBACK_BETA], "fallbacks": "default"} if self.server_fallbacks else {}
+
+
+VERTEX_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+
+
+def build_llm_client(settings: LlmSettings, *, timeout: float) -> LlmClient | None:
+    """The configured LLM client, or None when the provider is not fully configured (Tempo
+    then works without LLM; the missing piece is logged, never guessed)."""
+    if settings.llm_provider == "vertex":
+        path = settings.vertex_credentials_file
+        if settings.vertex_project_id is None or not path.is_file():
+            logger.warning(
+                "LLM disabled: Vertex AI needs TEMPO_VERTEX_PROJECT_ID and the service-account "
+                "key file (secret tempo_gcp_credentials)"
+            )
+            return None
+        from google.oauth2 import service_account  # vertex extra of the SDK
+
+        credentials = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
+            str(path), scopes=list(VERTEX_SCOPES)
         )
+        vertex = anthropic.AnthropicVertex(
+            project_id=settings.vertex_project_id,
+            region=settings.vertex_region,
+            credentials=credentials,
+            timeout=timeout,
+            max_retries=1,
+        )
+        return LlmClient(vertex.messages, "vertex", server_fallbacks=False)
+    if settings.anthropic_api_key is None:
+        return None
+    client = anthropic.Anthropic(
+        api_key=settings.anthropic_api_key.get_secret_value(), timeout=timeout, max_retries=1
+    )
+    return LlmClient(client.beta.messages, "anthropic", server_fallbacks=True)
+
+
+class ClaudeInterpreter:
+    def __init__(self, llm: LlmClient, *, model: str) -> None:
+        self._llm = llm
         self._model = model
 
     def extract(self, text: str, today: date, place_ids: list[str]) -> Extraction | None:
@@ -79,15 +130,14 @@ class ClaudeInterpreter:
             f"Known place ids: {', '.join(place_ids) or 'none'}.\n\nMessage:\n{text}"
         )
         try:
-            response = self._client.beta.messages.parse(
+            response = self._llm.messages.parse(
                 model=self._model,
                 max_tokens=16000,
                 system=SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
                 output_format=Extraction,
                 output_config={"effort": "low"},
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
+                **self._llm.extra(),
             )
         except anthropic.AuthenticationError:
             logger.error("LLM: invalid API key")
@@ -104,8 +154,10 @@ class ClaudeInterpreter:
         if response.stop_reason == "refusal":
             logger.warning("LLM: request declined")
             return None
-        return response.parsed_output
+        parsed: Extraction | None = response.parsed_output
+        return parsed
 
 
-def build_interpreter(api_key: SecretStr | None) -> Interpreter | None:
-    return None if api_key is None else ClaudeInterpreter(api_key)
+def build_interpreter(settings: LlmSettings) -> Interpreter | None:
+    llm = build_llm_client(settings, timeout=60.0)
+    return None if llm is None else ClaudeInterpreter(llm, model=settings.llm_model)

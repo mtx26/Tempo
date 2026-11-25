@@ -150,7 +150,7 @@ supplémentaire.
 | Module | Responsabilité |
 |---|---|
 | `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) : **unique surface métier**, lectures comprises, pour l'IA, Home Assistant et tout client (`/v1/operations`). |
-| `assistant/agent.py` | Boucle d'appels d'outils Claude (Messages API, `claude-opus-5-5`, prompt système mis en cache, repli serveur `fallbacks`) ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
+| `assistant/agent.py` | Boucle d'appels d'outils Claude (Messages API, modèle réglable `TEMPO_LLM_MODEL`, `claude-sonnet-5-5` par défaut, prompt système mis en cache) ; fournisseur au choix (`ai/llm.py`, partagé avec l'interprète des e-mails) : API Claude (repli serveur `fallbacks` en cas de refus) ou Claude sur Google Cloud Vertex AI (compte de service ; pas de repli serveur, un refus suit le chemin déterministe) ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
 | `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`assistant/actions.py`, `assistant/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. `ai/` ne fait qu'interpréter (analyseur déterministe, LLM facultatif, application validée des imports). |
 | `api/` | FastAPI, cinq routes : `/health` (public), `/v1/status`, `/v1/conversation`, `/v1/operations` (liste et exécution), `/v1/location` (GPS réel poussé par HA : télémétrie, jamais une opération accessible au LLM). |
 | `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
@@ -711,7 +711,7 @@ flowchart TD
  BK --> DB
  end
  HA <-->|Réseau overlay privé, jeton| API
- API <--> L[API Claude facultative]
+ API <--> L[Claude facultatif : API Anthropic ou Vertex AI]
  I[iCal et IMAP autorisé] --> W
  G[GTFS et OSM] --> UP
  R[GTFS-RT Belgian Mobility] --> RT
@@ -790,7 +790,7 @@ autorisation de déploiement Swarm.
   `tempo-homeassistant` (HACS exige `custom_components/<domaine>/` à la racine d'un dépôt
   public). Aucun des deux n'est publié sans accord.
 - Python 3.13 + `uv` (verrou `backend/uv.lock`), Ruff, mypy `--strict`, pytest ; `tzdata`
-  explicite ; client HTTP `httpx2` ; SDK `anthropic` (modèle `claude-opus-5-5`).
+  explicite ; client HTTP `httpx2` ; SDK `anthropic` avec l'extra `vertex` ; modèle par défaut `claude-sonnet-5-5` (choix de coût : la conversation et les e-mails n'ont pas besoin d'Opus), fournisseur API Anthropic ou Vertex AI selon `TEMPO_LLM_PROVIDER`.
 - iCal : `icalendar` + `recurring-ical-events`, avec pré-analyse de la source car la
   bibliothèque ajoute un RECURRENCE-ID aux événements non récurrents et inverse silencieusement
   DTSTART/DTEND incohérents.

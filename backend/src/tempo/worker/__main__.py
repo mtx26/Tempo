@@ -13,11 +13,12 @@ from zoneinfo import ZoneInfo
 
 import httpx2
 from pydantic import SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.ai.llm import Interpreter, build_interpreter
+from tempo.config import LlmSettings
 from tempo.sync.training_mail import ImapSource, MailSource
 from tempo.transport.motis import MotisClient
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
@@ -42,7 +43,7 @@ HEARTBEAT = Path("/tmp/tempo-worker.alive")  # noqa: S108 - tmpfs of the read-on
 """Touched after every round: the container health check fails when it gets old."""
 
 
-class WorkerSettings(BaseSettings):
+class WorkerSettings(LlmSettings):
     model_config = SettingsConfigDict(
         env_prefix="TEMPO_",
         extra="ignore",
@@ -56,7 +57,6 @@ class WorkerSettings(BaseSettings):
     motis_url: str | None = None
     timezone: str = "Europe/Brussels"
     ics_interval_minutes: int = 30
-    anthropic_api_key: SecretStr | None = None
     training_imap_host: str | None = None
     training_imap_user: str | None = None
     training_imap_password: SecretStr | None = None
@@ -153,7 +153,7 @@ def main() -> None:  # pragma: no cover - process loop, jobs are tested individu
     routing: RoutingProvider = (
         MotisClient(settings.motis_url, timeout_seconds=30) if settings.motis_url else NoRouting()  # type: ignore[assignment]
     )
-    interpreter = build_interpreter(settings.anthropic_api_key)
+    interpreter = build_interpreter(settings)
     mail = mail_source(settings)
     if settings.ics_url is None:
         logger.warning("TEMPO_ICS_URL not set: university timetable sync disabled")

@@ -41,7 +41,7 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url=None,
     )
     app.state.timezone = ZoneInfo(settings.timezone)
-    app.state.assistant = build_assistant(settings.anthropic_api_key)
+    app.state.assistant = build_assistant(settings)
     app.state.routing = (
         MotisClient(settings.motis_url, timeout_seconds=30) if settings.motis_url else None
     )

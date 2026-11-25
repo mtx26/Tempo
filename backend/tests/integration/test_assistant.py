@@ -19,6 +19,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from tempo.ai.llm import LlmClient
 from tempo.api.app import create_app
 from tempo.assistant.agent import ClaudeAssistant, LLMUnavailableError
 from tempo.assistant.catalog import OpContext
@@ -61,6 +62,15 @@ class ScriptedMessages:
         return step
 
 
+def assistant(messages: Any, **options: Any) -> ClaudeAssistant:
+    """The agent over scripted Claude API messages (server-side fallbacks on)."""
+    return ClaudeAssistant(
+        LlmClient(messages, "anthropic", server_fallbacks=True),
+        model="claude-sonnet-5-5",
+        **options,
+    )
+
+
 def tool_results(request: dict[str, Any]) -> list[dict[str, Any]]:
     last = request["messages"][-1]
     assert last["role"] == "user"
@@ -92,9 +102,7 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
         response("end_turn", say("C'est noté : 15 h de physique et le dentiste jeudi.")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
-    reply = ClaudeAssistant(messages=llm).reply(
-        ctx, "15 h de physique avant vendredi et dentiste jeudi 21h", []
-    )
+    reply = assistant(llm).reply(ctx, "15 h de physique avant vendredi et dentiste jeudi 21h", [])
     assert reply.text.startswith("C'est noté")
     assert [o["name"] for o in reply.operations] == [
         "get_context",
@@ -135,7 +143,7 @@ def test_failed_operation_is_reported_to_the_model_and_rolled_back(session: Sess
         response("end_turn", say("Combien de temps dure la sortie ?")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
-    reply = ClaudeAssistant(messages=llm).reply(ctx, "ajoute une sortie vendredi soir", [])
+    reply = assistant(llm).reply(ctx, "ajoute une sortie vendredi soir", [])
     assert reply.text.endswith("?")
     result = tool_results(llm.requests[1])[0]
     assert result["is_error"] and "durée inconnue" in result["content"]
@@ -148,17 +156,17 @@ def test_unavailable_llm_raises_for_fallback(session: Session) -> None:
     llm = ScriptedMessages(anthropic.APIConnectionError(request=request))
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     with pytest.raises(LLMUnavailableError):
-        ClaudeAssistant(messages=llm).reply(ctx, "bonjour", [])
+        assistant(llm).reply(ctx, "bonjour", [])
     refused = ScriptedMessages(response("refusal"))
     with pytest.raises(LLMUnavailableError):
-        ClaudeAssistant(messages=refused).reply(ctx, "bonjour", [])
+        assistant(refused).reply(ctx, "bonjour", [])
 
 
 def test_runaway_loop_is_bounded(session: Session) -> None:
     seed(session)
     llm = ScriptedMessages(*[response("tool_use", tool_use("get_summary", {})) for _ in range(20)])
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
-    reply = ClaudeAssistant(messages=llm).reply(ctx, "boucle", [])
+    reply = assistant(llm).reply(ctx, "boucle", [])
     assert "trop longue" in reply.text and len(llm.requests) == 16
 
 
@@ -186,7 +194,7 @@ def test_conversation_route_keeps_context_and_falls_back(
     )
     app = create_app(Settings(api_token=TOKEN, database_url=database_url))
     with TestClient(app) as api:
-        app.state.assistant = ClaudeAssistant(messages=llm)
+        app.state.assistant = assistant(llm)
         first = api.post(
             "/v1/conversation",
             headers=AUTH,
@@ -288,7 +296,7 @@ def test_llm_outage_after_a_change_never_replays_the_request(session: Session) -
         anthropic.APIConnectionError(request=request),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
-    reply = ClaudeAssistant(messages=llm).reply(ctx, "ajoute 1 h de chimie", [])
+    reply = assistant(llm).reply(ctx, "ajoute 1 h de chimie", [])
     assert "indisponible" in reply.text and "create_task" in reply.text
     assert ctx.changed == ["create_task"]
 
@@ -301,8 +309,8 @@ def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
         response("end_turn", say("jamais atteint")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
-    assistant = ClaudeAssistant(messages=llm, budget_seconds=60, clock=lambda: next(ticks))
-    reply = assistant.reply(ctx, "ajoute bio", [])
+    agent = assistant(llm, budget_seconds=60, clock=lambda: next(ticks))
+    reply = agent.reply(ctx, "ajoute bio", [])
     assert "manque de temps" in reply.text and "create_task" in reply.text
     assert len(llm.requests) == 1
     assert llm.requests[0]["timeout"] == 60
