@@ -161,11 +161,10 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
    Images publiques : aucun registre à déclarer dans Portainer.
 2. **Serveur** : MOTIS et la mise à jour des données tournent sur le nœud manager (volume
    local partagé) ; prévoir ~8 Go de RAM libres (MOTIS : 6 Go max).
-3. **Réseau partagé avec Home Assistant** : la pile Tempo crée elle-même le réseau overlay
-   `tempo_ha` (seul `api` le rejoint ; aucun port Tempo n'est publié). Dans la pile Home
-   Assistant, ajouter `- tempo` aux `networks:` du service (en gardant ses réseaux actuels) et
-   déclarer `networks: {tempo: {external: true, name: tempo_ha}}` ; déployer Tempo d'abord.
-   Home Assistant en mode réseau `host` ne peut pas rejoindre un overlay.
+3. **Accès de Home Assistant** : Home Assistant tourne en conteneur avec le réseau `host` ;
+   `api` publie donc un seul port sur le nœud, `TEMPO_API_PORT` (défaut `18000`, mode `host`).
+   L'intégration utilise `http://<IP du serveur>:18000` ; jeton obligatoire, tentatives
+   limitées. Ne pas ouvrir ce port sur Internet (box/pare-feu).
 4. **Secrets** : `python deploy/make_swarm_secrets.py` écrit les 9 fichiers dans
    `deploy/secrets/swarm/` (ignoré par git ; mots de passe, URL de base et jeton générés une
    fois, clés validées recopiées). Dans Portainer, *Secrets > Add secret* : nom = nom du
@@ -177,15 +176,14 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
    *Environment variables* (valeurs dans `deploy/.env`, ignoré par git) : `TEMPO_VERSION`
    (`0.1.0`), `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`,
    `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID` ; facultatif
-   `TEMPO_REGISTRY` (défaut `ghcr.io/mtx26`). Une valeur manquante bloque
+   `TEMPO_REGISTRY` (défaut `ghcr.io/mtx26`), `TEMPO_API_PORT` (défaut `18000`). Une valeur manquante bloque
    le déploiement avec son nom. *Deploy the stack*.
 6. **Premier démarrage** : `migrate` crée le schéma et redonne les droits à `tempo_app` ;
    `routing-update` télécharge les GTFS et OSM (~1 Go), puis `routing` importe le graphe
    (~4 min ; santé « starting » jusque-là). Vérifier : `tempo_api` sain, `tempo_rt-relay`
    `/health` sans `last_error`.
-7. **Home Assistant** : dépôt privé, donc pas de HACS ; copier
-   `custom_components/tempo` (dépôt `tempo-homeassistant`) dans `config/custom_components/`,
-   redémarrer, ajouter l'intégration Tempo : URL `http://tempo_api:8000`, jeton =
+7. **Home Assistant** : HACS, dépôt personnalisé `https://github.com/mtx26/tempo-homeassistant`
+   (catégorie Intégration), télécharger « Tempo », redémarrer, ajouter l'intégration Tempo : URL `http://<IP du serveur>:18000`, jeton =
    `deploy/secrets/swarm/tempo_api_token`, « Vérifier le SSL » décoché (réseau interne),
    puis le `device_tracker` du téléphone.
 8. **Mettre à jour** : sauvegarde, nouvelle étiquette `vX.Y.Z`, puis *Update the stack* avec

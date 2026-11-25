@@ -4,9 +4,9 @@
 # Swarm (Portainer)". Local check:
 #   set -a; . deploy/.env; set +a; docker stack config -c deploy/stack.yml
 #
-# Network model (no Tempo port is published; Home Assistant is the only UI):
-#   ha       overlay "tempo_ha" created by this stack, joined by Home Assistant's own stack
-#            (external network) -> only `api` joins it
+# Network model (Home Assistant is the only UI):
+#   api      publishes ONE port on the node (TEMPO_API_PORT, default 18000, mode host) for Home
+#            Assistant running with host networking; bearer token required, auth rate-limited
 #   backend  internal: api, worker, migrate, postgres, backup
 #   routing  internal: worker, rt-relay, routing (MOTIS)
 #   egress   outbound Internet: worker (iCal, IMAP, LLM), rt-relay (Belgian Mobility gateway)
@@ -70,8 +70,11 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
       retries: 3
+    # Home Assistant (host network) calls http://<server IP>:${TEMPO_API_PORT:-18000}.
+    ports:
+      - {target: 8000, published: "${TEMPO_API_PORT:-18000}", protocol: tcp, mode: host}
     # egress: only needed for the LLM (Vertex AI).
-    networks: [backend, ha, routing, egress]
+    networks: [backend, routing, egress]
     deploy:
       replicas: 1  # in-memory auth limiter: exactly one replica
       resources: {limits: {memory: 1G}}
@@ -214,5 +217,3 @@ networks:
   backend: {driver: overlay, internal: true}
   routing: {driver: overlay, internal: true}
   egress: {driver: overlay}
-  # Created here; Home Assistant's stack declares it as external (name: tempo_ha).
-  ha: {driver: overlay, attachable: true, name: tempo_ha}
