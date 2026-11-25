@@ -7,7 +7,7 @@ Why a relay (ARCHITECTURE.md "Belgian feeds"):
   an HTTP ``429`` pauses EVERY feed (``Retry-After`` in seconds or as an HTTP date, never
   shortened); copies that are still fresh keep being served, then MOTIS routes on the static
   timetable;
-- with a key, the relay calls the key-checking host ``api.belgianmobility.io``;
+- with a key, the relay calls the Standard host ``feeds.KEYED_HOST``;
 - the ``bmc-partner-key`` stays in a Docker secret of this service and is never written to the
   MOTIS configuration stored in the routing data volume;
 - feeds are validated (decodable, fresh) and TEC is repaired (``gtfsrt.prepare``) before MOTIS

@@ -501,13 +501,15 @@ Faits vérifiés le 23/11/2026 par requêtes réelles :
   sans temps réel) suivent le GTFS statique.
 - Quotas indicatifs (conditions d'utilisation §5) : anonyme 100/jour et 10/min ; Standard
   12 000/jour et 500/min ; au-delà, le portail peut répondre 429.
-- Deux hôtes, mêmes chemins (base de connaissances du portail) : l'hôte anonyme ci-dessus ne
-  contrôle aucune clé (25/11/2026 : 200 avec la vraie clé, une fausse ou aucune) ; l'hôte
-  « avec clé » `api.belgianmobility.io` la contrôle (401 « missing subscription key » sans clé,
-  « invalid subscription key » avec une mauvaise). Avec une clé, le relais et la mise à jour
-  des GTFS statiques utilisent donc `api.belgianmobility.io` (`Feed.url_for`), en-tête
-  `bmc-partner-key` (`Ocp-Apim-Subscription-Key` y est vu comme une clé absente). Les hôtes
-  `opendata-discovery-gtfs-*` de la documentation n'ont toujours pas de DNS.
+- Deux hôtes, mêmes chemins, centralisés dans `transport/feeds.py` (seuls destinataires de la
+  clé) : anonyme `api-management-discovery-production.azure-api.net` ; avec clé
+  `api-management-opendata-production.azure-api.net`, celui des requêtes « Try it » du portail
+  développeur pour l'abonnement Standard, en-tête `bmc-partner-key`. Vérifié le 25/11/2026 :
+  les 6 flux temps réel et les 4 GTFS statiques répondent 200 sur l'hôte avec clé ; les deux
+  hôtes répondent aussi 200 avec une fausse clé ou sans clé, donc l'imputation au quota
+  Standard ne se voit que dans les rapports du portail développeur. TripUpdates avec
+  `unroll=off` (paramètre du portail : arrêts sans prévision omis, données identiques, ~30 %
+  plus léger).
 - Interrogation avec clé : TripUpdates toutes les minutes (l'éditeur publie toutes les 30 s),
   alertes toutes les 5 min, pour les six flux : 5 184 requêtes/jour, soit 43 % du quota
   (54 % du plafond de 80 % que le relais s'impose) ; s'y ajoutent au plus 4 téléchargements

@@ -42,14 +42,15 @@ def test_urls_are_https_and_realtime_requests_protobuf() -> None:
         assert item.url.startswith("https://api-management-discovery-production.azure-api.net/")
         assert item.url_for(AccessTier.ANONYMOUS) == item.url
     for item in REALTIME:
-        assert item.url.endswith("?format=protobuf")
+        assert "format=protobuf" in item.url.split("?")[1]
+    for item in REALTIME:
+        assert ("unroll=off" in item.url) is (item.kind is FeedKind.TRIP_UPDATES)
 
 
 def test_keyed_tiers_use_the_authenticated_host_with_the_same_path() -> None:
-    """Knowledge base, "Use with API key": api.belgianmobility.io checks the key (verified
-    2026-11-25: 401 without key or with a wrong key); the anonymous host ignores any key."""
+    """Developer portal "Try it" (Standard subscription) uses the opendata host."""
     anonymous = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed/"
-    keyed = "https://api.belgianmobility.io/api/gtfs/feed/"
+    keyed = "https://api-management-opendata-production.azure-api.net/api/gtfs/feed/"
     for item in FEEDS:
         url = item.url_for(AccessTier.STANDARD)
         assert url.startswith(keyed)

@@ -3,19 +3,17 @@
 Every URL below was fetched successfully on 2026-11-23 (anonymous access, HTTP 200, protobuf
 for realtime, ZIP for static) — see ARCHITECTURE.md "Belgian feeds". Nothing here is guessed:
 
-- Two hosts, same paths (portal knowledge base): anonymous samples use
-  ``api-management-discovery-production.azure-api.net``, which serves without checking any key;
-  "Use with API key" samples use ``api.belgianmobility.io``, which checks the key (verified
-  2026-11-25: 401 "missing subscription key" without it, "invalid subscription key" with a
-  wrong one). A keyed tier therefore MUST use ``api.belgianmobility.io`` (``Feed.url_for``).
-  The portal also documents ``opendata-discovery-gtfs-*.api.production.belgianmobility.io``;
-  those names did not resolve in public DNS (2026-11-23 and 2026-11-25): NOT used.
-- Realtime is JSON by default on this host; ``?format=protobuf`` is mandatory (the JSON
-  transcoding mangles int64 fields).
+- Two hosts, same paths (``PORTAL_HOSTS``, the only hosts that ever receive the key):
+  anonymous ``ANONYMOUS_HOST``; with a key ``KEYED_HOST``, the host of the developer portal's
+  "Try it" requests for the Standard subscription (``Feed.url_for``). On 2026-11-25 both
+  answered 200 for every feed with a valid, a wrong or no key: quota attribution to the
+  subscription is visible only in the developer portal reports.
+- Realtime is JSON by default; ``?format=protobuf`` is mandatory (the JSON transcoding mangles
+  int64 fields). Trip updates use ``unroll=off`` (portal parameter, both hosts): stops without
+  a prediction are omitted, realtime data identical, ~30 % smaller.
 - Quotas come from the portal terms §5 (indicative): anonymous 100 requests/day and 10/minute;
   free Standard account 12 000/day and 500/minute; beyond them the portal may answer HTTP 429.
-  The key travels in header ``bmc-partner-key`` (FAQ: not the Azure default
-  ``Ocp-Apim-Subscription-Key``, which the keyed host reports as a missing key).
+  The key travels in header ``bmc-partner-key`` (portal FAQ and "Try it" requests).
 - STIB-MIVB publishes no GTFS-RT: MOTIS routes STIB on its static GTFS.
 """
 
@@ -24,8 +22,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 
-BASE_URL = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed"
-KEYED_BASE_URL = "https://api.belgianmobility.io/api/gtfs/feed"
+ANONYMOUS_HOST = "api-management-discovery-production.azure-api.net"
+KEYED_HOST = "api-management-opendata-production.azure-api.net"
+PORTAL_HOSTS = frozenset({ANONYMOUS_HOST, KEYED_HOST})
+FEED_PATH = "/api/gtfs/feed"
 KEY_HEADER = "bmc-partner-key"
 SECONDS_PER_DAY = 86_400
 
@@ -68,17 +68,21 @@ SAFETY_FRACTION = 0.8
 class Feed:
     operator: Operator
     kind: FeedKind
-    url: str
+    path: str
+    """Below ``FEED_PATH``, identical on both hosts."""
     publisher_interval: timedelta
     """How often the publisher refreshes the feed (portal catalogue)."""
     needs_repair: bool = False
     """True when Tempo must sanitise the feed before MOTIS can use it (see ``gtfsrt``)."""
 
     def url_for(self, tier: "AccessTier") -> str:
-        """Anonymous host without a key; the key-checking host for every keyed tier."""
-        if tier is AccessTier.ANONYMOUS:
-            return self.url
-        return KEYED_BASE_URL + self.url.removeprefix(BASE_URL)
+        host = ANONYMOUS_HOST if tier is AccessTier.ANONYMOUS else KEYED_HOST
+        return f"https://{host}{FEED_PATH}/{self.path}"
+
+    @property
+    def url(self) -> str:
+        """Anonymous URL."""
+        return self.url_for(AccessTier.ANONYMOUS)
 
     @property
     def is_realtime(self) -> bool:
@@ -94,12 +98,12 @@ _RT = timedelta(seconds=30)
 
 
 def _static(operator: Operator) -> Feed:
-    return Feed(operator, FeedKind.STATIC, f"{BASE_URL}/{operator.value}/static", _DAILY)
+    return Feed(operator, FeedKind.STATIC, f"{operator.value}/static", _DAILY)
 
 
 def _rt(operator: Operator, kind: FeedKind, path: str, *, repair: bool = False) -> Feed:
-    url = f"{BASE_URL}/{operator.value}/rt/{path}?format=protobuf"
-    return Feed(operator, kind, url, _RT, needs_repair=repair)
+    query = "format=protobuf&unroll=off" if kind is FeedKind.TRIP_UPDATES else "format=protobuf"
+    return Feed(operator, kind, f"{operator.value}/rt/{path}?{query}", _RT, needs_repair=repair)
 
 
 FEEDS: tuple[Feed, ...] = (

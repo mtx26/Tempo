@@ -29,7 +29,14 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx2
 
-from tempo.transport.feeds import FEEDS, KEY_HEADER, AccessTier, FeedKind, Operator
+from tempo.transport.feeds import (
+    FEEDS,
+    KEY_HEADER,
+    PORTAL_HOSTS,
+    AccessTier,
+    FeedKind,
+    Operator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +162,6 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp.replace(path)
 
 
-PORTAL_HOSTS = frozenset(
-    {"api-management-discovery-production.azure-api.net", "api.belgianmobility.io"}
-)
 MAX_REDIRECTS = 5
 REDIRECTS = frozenset({301, 302, 303, 307, 308})
 

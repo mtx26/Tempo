@@ -88,7 +88,7 @@ def test_tec_is_served_repaired_with_the_key_header() -> None:
     assert request.headers[KEY_HEADER] == KEY.get_secret_value()
     tec = feed(Operator.TEC, FeedKind.TRIP_UPDATES)
     assert str(request.url) == tec.url_for(AccessTier.STANDARD)
-    assert request.url.host == "api.belgianmobility.io"
+    assert request.url.host == "api-management-opendata-production.azure-api.net"
 
 
 def test_cached_within_interval_and_refetched_after() -> None:
