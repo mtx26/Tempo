@@ -5,7 +5,8 @@
 #   set -a; . deploy/.env; set +a; docker stack config -c deploy/stack.yml
 #
 # Network model (no Tempo port is published; Home Assistant is the only UI):
-#   ha       external overlay shared with Home Assistant -> only `api` joins it
+#   ha       overlay "tempo_ha" created by this stack, joined by Home Assistant's own stack
+#            (external network) -> only `api` joins it
 #   backend  internal: api, worker, migrate, postgres, backup
 #   routing  internal: worker, rt-relay, routing (MOTIS)
 #   egress   outbound Internet: worker (iCal, IMAP, LLM), rt-relay (Belgian Mobility gateway)
@@ -147,8 +148,8 @@ services:
     deploy:
       replicas: 1
       resources: {limits: {memory: 1G}}
-      # routing-input is a local volume shared with `routing`: both on the same labelled node.
-      placement: {constraints: [node.labels.tempo.routing == true]}
+      # routing-input is a local volume shared with `routing`: both on the manager node.
+      placement: {constraints: [node.role == manager]}
 
   routing:
     <<: *hardening
@@ -169,7 +170,7 @@ services:
     deploy:
       replicas: 1
       resources: {limits: {memory: 6G}}
-      placement: {constraints: [node.labels.tempo.routing == true]}
+      placement: {constraints: [node.role == manager]}
 
   backup:
     cap_drop: [ALL]
@@ -213,4 +214,5 @@ networks:
   backend: {driver: overlay, internal: true}
   routing: {driver: overlay, internal: true}
   egress: {driver: overlay}
-  ha: {external: true, name: "${TEMPO_HA_NETWORK:-homeassistant_tempo}"}
+  # Created here; Home Assistant's stack declares it as external (name: tempo_ha).
+  ha: {driver: overlay, attachable: true, name: tempo_ha}

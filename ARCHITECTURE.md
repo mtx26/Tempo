@@ -750,7 +750,7 @@ flowchart TD
   health checks (API, relais, worker par battement, MOTIS) ; retries bornés ; calculs en UTC,
   règles en heure locale (sûr aux changements d'heure). Mise à jour des données de routage
   chaque nuit (02:30 UTC) sur le nœud qui porte MOTIS (volume local partagé, contrainte de
-  placement `node.labels.tempo.routing`).
+  placement `node.role == manager`).
 - Performance : horizon glissant (14 jours par défaut, cibles lointaines conservées en part
   proportionnelle), séries matérialisées sur 60 jours, solveur limité à 10 s.
 - Pas de dépendance à Claude Code en production.

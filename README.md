@@ -158,15 +158,13 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
    et `tempo-postgres` (postgres 16 + rôles et scripts de sauvegarde), étiquette `0.1.0`.
    Paquets privés : dans Portainer, *Registries > Add registry > Custom registry*, URL
    `ghcr.io`, identifiant GitHub et un jeton (classic) limité à `read:packages`.
-2. **Nœud** : `docker node update --label-add tempo.routing=true <nœud>` (MOTIS et la mise à
-   jour des données partagent un volume local). Prévoir ~8 Go de RAM libres (MOTIS : 6 Go max).
-3. **Réseau partagé avec Home Assistant** :
-   `docker network create -d overlay --attachable homeassistant_tempo`, puis y relier le
-   conteneur Home Assistant existant (`docker network connect homeassistant_tempo <conteneur>`,
-   ou `networks:` externe dans sa pile). Seul `api` rejoint ce réseau ; aucun port Tempo n'est
-   publié. Autre nom : variable `TEMPO_HA_NETWORK`. Home Assistant en `network_mode: host` ne
-   peut pas rejoindre un overlay : publier alors le port de `api` en mode `host` et bloquer
-   le port 8000 au pare-feu sauf depuis l'hôte.
+2. **Serveur** : MOTIS et la mise à jour des données tournent sur le nœud manager (volume
+   local partagé) ; prévoir ~8 Go de RAM libres (MOTIS : 6 Go max).
+3. **Réseau partagé avec Home Assistant** : la pile Tempo crée elle-même le réseau overlay
+   `tempo_ha` (seul `api` le rejoint ; aucun port Tempo n'est publié). Dans la pile Home
+   Assistant, ajouter `- tempo` aux `networks:` du service (en gardant ses réseaux actuels) et
+   déclarer `networks: {tempo: {external: true, name: tempo_ha}}` ; déployer Tempo d'abord.
+   Home Assistant en mode réseau `host` ne peut pas rejoindre un overlay.
 4. **Secrets** : `python deploy/make_swarm_secrets.py` écrit les 9 fichiers dans
    `deploy/secrets/swarm/` (ignoré par git ; mots de passe, URL de base et jeton générés une
    fois, clés validées recopiées). Dans Portainer, *Secrets > Add secret* : nom = nom du
@@ -177,8 +175,8 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
 5. **Pile** : *Stacks > Add stack*, nom `tempo`, *Web editor* = contenu de `deploy/stack.yml`,
    *Environment variables* (valeurs dans `deploy/.env`, ignoré par git) : `TEMPO_VERSION`
    (`0.1.0`), `TEMPO_VERTEX_PROJECT_ID`, `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`,
-   `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID` ; facultatifs
-   `TEMPO_REGISTRY` (défaut `ghcr.io/mtx26`), `TEMPO_HA_NETWORK`. Une valeur manquante bloque
+   `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID` ; facultatif
+   `TEMPO_REGISTRY` (défaut `ghcr.io/mtx26`). Une valeur manquante bloque
    le déploiement avec son nom. *Deploy the stack*.
 6. **Premier démarrage** : `migrate` crée le schéma et redonne les droits à `tempo_app` ;
    `routing-update` télécharge les GTFS et OSM (~1 Go), puis `routing` importe le graphe
