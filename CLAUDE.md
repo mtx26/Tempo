@@ -43,11 +43,6 @@ les commentaires et la documentation technique peuvent être en anglais ou en fr
 - Quand une dépendance externe manque (clé, URL, serveur), le documenter dans
   `ARCHITECTURE.md` §12 et continuer le travail indépendant.
 
-## Outillage
-Agents et skills du projet dans `.claude/` ; Superpowers (brainstorming, plans, TDD, débogage
-systématique) s'il est installé. Lire la documentation installée plutôt que deviner une
-commande.
-
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

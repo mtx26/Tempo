@@ -1,6 +1,6 @@
 ---
 name: tempo-schedule
-description: Model and test planning constraints: fixed iCal, flexible study with soft targets, 90-minute preference, alternating subjects, training flexible except races, mandatory travel, protected approvals.
+description: "Model and test planning constraints: fixed iCal, flexible study with soft targets, 90-minute preference, alternating subjects, training flexible except races, mandatory travel, protected approvals."
 ---
 # tempo-schedule
 

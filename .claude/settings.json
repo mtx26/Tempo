@@ -14,7 +14,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/Users/mtx_2/.local/bin/graphify.EXE hook-guard search",
+            "command": "graphify hook-guard search",
             "timeout": 10
           }
         ]
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/Users/mtx_2/.local/bin/graphify.EXE hook-guard read",
+            "command": "graphify hook-guard read",
             "timeout": 10
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/Users/mtx_2/.local/bin/graphify.EXE hook-guard compact",
+            "command": "graphify hook-guard compact",
             "timeout": 10
           }
         ]

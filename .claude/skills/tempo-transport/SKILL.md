@@ -1,6 +1,6 @@
 ---
 name: tempo-transport
-description: Verify MOTIS and Belgian feed integration, real-time caveats (STIB: static GTFS only), arrival-by, phone GPS, future event-chain origin, walking, transfers, safety buffers, alerts.
+description: "Verify MOTIS and Belgian feed integration, real-time caveats (STIB: static GTFS only), arrival-by, phone GPS, future event-chain origin, walking, transfers, safety buffers, alerts."
 ---
 # tempo-transport
 
