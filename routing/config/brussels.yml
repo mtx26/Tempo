@@ -6,9 +6,9 @@ osm: /input/osm.pbf
 timetable:
   first_day: TODAY
   num_days: 30
-  # Anonymous Belgian Mobility quota is 100 requests/day: poll every 30 min (48/day).
-  # With a free Standard account key this can drop to 60 s (see ARCHITECTURE.md §6).
-  update_interval: 1800
+  # Realtime only through the Tempo relay (it holds the key and the quota), as in belgium.yml.
+  update_interval: 30
+  incremental_rt_update: false
   http_timeout: 30
   default_timezone: Europe/Brussels
   datasets:
@@ -17,7 +17,8 @@ timetable:
     sncb:
       path: /input/sncb.gtfs.zip
       rt:
-        - url: https://api-management-discovery-production.azure-api.net/api/gtfs/feed/nmbssncb/rt/trip-update?format=protobuf
+        - url: http://tempo-rt-relay:8090/feeds/nmbssncb/trip-updates.pbf
+        - url: http://tempo-rt-relay:8090/feeds/nmbssncb/alerts.pbf
 street_routing: true
 osr_footpath: true
 geocoding: false

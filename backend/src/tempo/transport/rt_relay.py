@@ -7,9 +7,10 @@ Why a relay (ARCHITECTURE.md "Belgian feeds"):
   an HTTP ``429`` pauses EVERY feed (``Retry-After`` in seconds or as an HTTP date, never
   shortened); copies that are still fresh keep being served, then MOTIS routes on the static
   timetable;
-- with a key, the relay calls the Standard host ``feeds.KEYED_HOST``;
-- the ``bmc-partner-key`` stays in a Docker secret of this service and is never written to the
-  MOTIS configuration stored in the routing data volume;
+- the ``bmc-partner-key`` is mandatory (Docker secret ``tempo_bmc_partner_key``: the relay
+  refuses to start without it) and is never written to the MOTIS configuration stored in the
+  routing data volume; a rejected key (HTTP 401/403) is reported as such in the log and in
+  ``/health``;
 - feeds are validated (decodable, fresh) and TEC is repaired (``gtfsrt.prepare``) before MOTIS
   sees them. A stale or broken feed is answered with HTTP 503 — never served as live data. MOTIS
   (``incremental_rt_update: false``) then drops its realtime state for that feed: verified live
@@ -32,16 +33,17 @@ from pathlib import Path
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tempo import __version__
 from tempo.transport.feeds import (
     FEEDS,
     KEY_HEADER,
-    AccessTier,
+    KEY_SECRET,
     Feed,
     FeedKind,
+    MissingKeyError,
     Operator,
     PollingPlan,
     check_budget,
@@ -56,10 +58,6 @@ USER_AGENT = f"tempo-rt-relay/{__version__}"
 DEFAULT_BACKOFF = timedelta(minutes=5)
 MAX_BACKOFF = timedelta(hours=1)
 WINDOW = timedelta(hours=24)
-ANONYMOUS_PLAN = PollingPlan(trip_updates=timedelta(minutes=30), service_alerts=timedelta(hours=6))
-"""Anonymous tier (100 requests/day): SNCB trip updates only, every 30 minutes. With the 10 min
-freshness limit, live data is then available only ~10 of every 30 minutes (documented)."""
-ANONYMOUS_FEEDS: tuple[Feed, ...] = (feed(Operator.SNCB, FeedKind.TRIP_UPDATES),)
 KIND_PATHS = {"trip-updates": FeedKind.TRIP_UPDATES, "alerts": FeedKind.SERVICE_ALERTS}
 
 
@@ -68,16 +66,19 @@ class RelaySettings(BaseSettings):
         env_prefix="TEMPO_RELAY_",
         extra="ignore",
         hide_input_in_errors=True,
+        populate_by_name=True,
         secrets_dir=DOCKER_SECRETS_DIR if DOCKER_SECRETS_DIR.is_dir() else None,
     )
 
-    bmc_partner_key: SecretStr | None = None
-    """Belgian Mobility Standard key (Docker secret ``tempo_relay_bmc_partner_key``)."""
+    bmc_partner_key: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices(KEY_SECRET, "TEMPO_BMC_PARTNER_KEY")
+    )
+    """Belgian Mobility key, mandatory (Docker secret ``tempo_bmc_partner_key``)."""
     trip_updates_seconds: int | None = None
     alerts_seconds: int | None = None
     feeds: str | None = None
-    """Comma-separated ``<operator>/<trip-updates|alerts>`` (default: depends on the tier).
-    Any choice must still fit the tier's quota budget, otherwise the relay refuses to start."""
+    """Comma-separated ``<operator>/<trip-updates|alerts>`` (default: all six). Any choice must
+    still fit the quota budget, otherwise the relay refuses to start."""
     state_file: Path | None = None
     """JSON request log (rolling 24 h) on a persistent volume, so restarts keep the quota."""
 
@@ -125,9 +126,8 @@ class FeedRelay:
         self,
         feeds: Iterable[Feed],
         plan: PollingPlan,
-        tier: AccessTier,
         *,
-        key: SecretStr | None = None,
+        key: SecretStr,
         http_client: httpx2.Client | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         state_file: Path | None = None,
@@ -135,16 +135,10 @@ class FeedRelay:
         self._feeds = {(f.operator, f.kind): f for f in feeds}
         if any(not f.is_realtime for f in self._feeds.values()):
             raise ValueError("the relay serves realtime feeds only")
-        if tier is AccessTier.STANDARD and key is None:
-            raise ValueError("the standard tier needs a bmc-partner-key")
-        self._budget = check_budget(self._feeds.values(), plan, tier)
+        self._budget = check_budget(self._feeds.values(), plan)
         self._plan = plan
-        self.tier = tier
-        headers = {"User-Agent": USER_AGENT}
-        if key is not None:
-            headers[KEY_HEADER] = key.get_secret_value()
         self._http = http_client or httpx2.Client(timeout=30.0)
-        self._headers = headers
+        self._headers = {"User-Agent": USER_AGENT, KEY_HEADER: key.get_secret_value()}
         self._clock = clock
         self._entries = {k: _Entry() for k in self._feeds}
         self._locks = {k: threading.Lock() for k in self._feeds}
@@ -231,7 +225,7 @@ class FeedRelay:
             entry.last_error = refused
             return
         try:
-            response = self._http.get(item.url_for(self.tier), headers=self._headers)
+            response = self._http.get(item.url, headers=self._headers)
         except httpx2.HTTPError as exc:
             self._backoff(entry, now, f"{item.name}: {type(exc).__name__}")
             return
@@ -293,7 +287,6 @@ class FeedRelay:
             }
         paused = self._paused_until
         return {
-            "tier": self.tier.value,
             "paused_until": None if paused is None or paused <= now else paused.isoformat(),
             "requests_last_24h": self.requests_last_24h,
             "allowed_per_day": self._budget.allowed_per_day,
@@ -317,22 +310,24 @@ def retry_after(value: str, now: datetime) -> timedelta | None:
 
 def relay_from_settings(settings: RelaySettings) -> FeedRelay:
     if settings.bmc_partner_key is None:
-        plan, feeds, tier = ANONYMOUS_PLAN, ANONYMOUS_FEEDS, AccessTier.ANONYMOUS
-    else:
-        plan, tier = PollingPlan(), AccessTier.STANDARD
-        feeds = tuple(f for f in FEEDS if f.is_realtime)
-    if settings.feeds is not None:
-        feeds = parse_feeds(settings.feeds)
-    tu_seconds, alert_seconds = settings.trip_updates_seconds, settings.alerts_seconds
+        raise MissingKeyError
+    feeds = (
+        tuple(f for f in FEEDS if f.is_realtime)
+        if settings.feeds is None
+        else parse_feeds(settings.feeds)
+    )
+    default, tu_seconds, alert_seconds = (
+        PollingPlan(),
+        settings.trip_updates_seconds,
+        settings.alerts_seconds,
+    )
     plan = PollingPlan(
-        trip_updates=plan.trip_updates if tu_seconds is None else timedelta(seconds=tu_seconds),
-        service_alerts=(
-            plan.service_alerts if alert_seconds is None else timedelta(seconds=alert_seconds)
-        ),
+        trip_updates=default.trip_updates if tu_seconds is None else timedelta(seconds=tu_seconds),
+        service_alerts=default.service_alerts
+        if alert_seconds is None
+        else timedelta(seconds=alert_seconds),
     )
-    return FeedRelay(
-        feeds, plan, tier, key=settings.bmc_partner_key, state_file=settings.state_file
-    )
+    return FeedRelay(feeds, plan, key=settings.bmc_partner_key, state_file=settings.state_file)
 
 
 def create_relay_app(relay: FeedRelay) -> FastAPI:
@@ -355,7 +350,7 @@ def create_relay_app(relay: FeedRelay) -> FastAPI:
         except (ValueError, KeyError) as exc:
             raise HTTPException(status_code=404, detail="unknown feed") from exc
         if not relay.enabled(op, feed_kind):
-            raise HTTPException(status_code=404, detail="feed not enabled for this tier")
+            raise HTTPException(status_code=404, detail="feed not enabled")
         try:
             payload = relay.get(op, feed_kind)
         except RelayUnavailableError as exc:
@@ -369,7 +364,10 @@ def main() -> None:  # pragma: no cover - process entry point
     import uvicorn
 
     logging.basicConfig(level=logging.INFO)
-    relay = relay_from_settings(RelaySettings())
+    try:
+        relay = relay_from_settings(RelaySettings())
+    except MissingKeyError as exc:
+        raise SystemExit(str(exc)) from None
     uvicorn.run(
         create_relay_app(relay),
         host="0.0.0.0",  # noqa: S104 - container port, internal overlay network only

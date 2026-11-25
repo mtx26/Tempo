@@ -1,8 +1,7 @@
-"""Integration tests against the REAL Belgian Mobility portal (anonymous tier).
+"""Integration tests against the REAL Belgian Mobility gateway, with the user's key.
 
-Opt-in only: set ``TEMPO_TEST_PORTAL_LIVE=1``. Each run spends 3 requests of the anonymous quota
-(100/day, 10/minute shared by everything on this IP), so it is never run by default or in CI.
-Optional ``TEMPO_TEST_BMC_KEY`` runs the same checks with a Standard key (key-header check).
+Opt-in only: set ``TEMPO_TEST_BMC_KEY`` (Standard key). Each run spends 3 requests of the
+quota, so it is never run by default or in CI.
 
 Assertions are invariants (decodable, fresh, TEC repaired), not counts: live content changes.
 """
@@ -13,15 +12,14 @@ from datetime import timedelta
 import pytest
 from pydantic import SecretStr
 
-from tempo.transport.feeds import AccessTier, FeedKind, Operator, PollingPlan, feed
+from tempo.transport.feeds import FeedKind, Operator, PollingPlan, feed
 from tempo.transport.gtfsrt import decode, summarize
 from tempo.transport.rt_relay import FeedRelay
 
-LIVE = os.environ.get("TEMPO_TEST_PORTAL_LIVE") == "1"
 KEY = os.environ.get("TEMPO_TEST_BMC_KEY")
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not LIVE, reason="TEMPO_TEST_PORTAL_LIVE!=1: real portal not queried"),
+    pytest.mark.skipif(not KEY, reason="TEMPO_TEST_BMC_KEY not set: real gateway not queried"),
 ]
 DAILY = PollingPlan(trip_updates=timedelta(days=1), service_alerts=timedelta(days=1))
 SELECTED = (
@@ -33,9 +31,7 @@ SELECTED = (
 
 @pytest.fixture(scope="module")
 def relay() -> FeedRelay:
-    if KEY:
-        return FeedRelay(SELECTED, DAILY, AccessTier.STANDARD, key=SecretStr(KEY))
-    return FeedRelay(SELECTED, DAILY, AccessTier.ANONYMOUS)
+    return FeedRelay(SELECTED, DAILY, key=SecretStr(KEY or ""))
 
 
 def test_tec_trip_updates_are_live_and_repaired(relay: FeedRelay) -> None:

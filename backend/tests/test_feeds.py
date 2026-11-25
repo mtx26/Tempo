@@ -6,7 +6,6 @@ import pytest
 
 from tempo.transport.feeds import (
     FEEDS,
-    AccessTier,
     FeedKind,
     Operator,
     PollingPlan,
@@ -39,22 +38,13 @@ def test_stib_has_no_realtime_feed() -> None:
 
 def test_urls_are_https_and_realtime_requests_protobuf() -> None:
     for item in FEEDS:
-        assert item.url.startswith("https://api-management-discovery-production.azure-api.net/")
-        assert item.url_for(AccessTier.ANONYMOUS) == item.url
+        assert item.url.startswith(
+            "https://api-management-opendata-production.azure-api.net/api/gtfs/feed/"
+        )
     for item in REALTIME:
         assert "format=protobuf" in item.url.split("?")[1]
     for item in REALTIME:
         assert ("unroll=off" in item.url) is (item.kind is FeedKind.TRIP_UPDATES)
-
-
-def test_keyed_tiers_use_the_authenticated_host_with_the_same_path() -> None:
-    """Developer portal "Try it" (Standard subscription) uses the opendata host."""
-    anonymous = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed/"
-    keyed = "https://api-management-opendata-production.azure-api.net/api/gtfs/feed/"
-    for item in FEEDS:
-        url = item.url_for(AccessTier.STANDARD)
-        assert url.startswith(keyed)
-        assert url.removeprefix(keyed) == item.url.removeprefix(anonymous)
 
 
 def test_only_tec_is_repaired() -> None:
@@ -62,7 +52,7 @@ def test_only_tec_is_repaired() -> None:
 
 
 def test_default_plan_for_all_realtime_feeds_fits_the_standard_quota() -> None:
-    result = check_budget(REALTIME, PollingPlan(), AccessTier.STANDARD)
+    result = check_budget(REALTIME, PollingPlan())
     # Trip updates every minute, alerts every 5 minutes: 3 x 1440 + 3 x 288 polls.
     assert result.requests_per_day == 3 * 1440 + 3 * 288
     assert result.allowed_per_day == 9_600
@@ -71,30 +61,25 @@ def test_default_plan_for_all_realtime_feeds_fits_the_standard_quota() -> None:
     assert result.requests_per_minute_peak <= 6
 
 
-def test_all_realtime_feeds_do_not_fit_the_anonymous_quota() -> None:
-    with pytest.raises(QuotaExceededError, match="anonymous"):
-        check_budget(REALTIME, PollingPlan(), AccessTier.ANONYMOUS)
-
-
-def test_anonymous_tier_allows_one_feed_every_thirty_minutes() -> None:
-    plan = PollingPlan(trip_updates=timedelta(minutes=30))
-    sncb = [feed(Operator.SNCB, FeedKind.TRIP_UPDATES)]
-    assert check_budget(sncb, plan, AccessTier.ANONYMOUS).requests_per_day == 48
-
-
 def test_polling_faster_than_the_publisher_is_refused() -> None:
     plan = PollingPlan(trip_updates=timedelta(seconds=10))
     with pytest.raises(ValueError, match="faster than the publisher"):
-        budget(REALTIME, plan, AccessTier.STANDARD)
+        budget(REALTIME, plan)
 
 
 def test_static_feeds_count_one_request_per_day() -> None:
     static = [f for f in FEEDS if not f.is_realtime]
-    assert budget(static, PollingPlan(), AccessTier.ANONYMOUS).requests_per_day == 4
+    assert budget(static, PollingPlan()).requests_per_day == 4
 
 
 def test_peak_minute_over_quota_is_refused() -> None:
-    many = REALTIME * 2  # 12 simultaneous requests > 10/minute anonymous
+    many = REALTIME * 84  # 504 simultaneous requests > 500/minute
     plan = PollingPlan(trip_updates=timedelta(days=1), service_alerts=timedelta(days=1))
     with pytest.raises(QuotaExceededError, match="minute"):
-        check_budget(many, plan, AccessTier.ANONYMOUS)
+        check_budget(many, plan)
+
+
+def test_more_than_the_daily_quota_is_refused() -> None:
+    plan = PollingPlan(trip_updates=timedelta(seconds=30), service_alerts=timedelta(seconds=30))
+    with pytest.raises(QuotaExceededError, match="requests/day"):
+        check_budget(REALTIME, plan)  # 6 x 2880 = 17 280 > 9 600

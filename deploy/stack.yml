@@ -7,7 +7,7 @@
 #   ha       external overlay shared with Home Assistant -> only `api` joins it
 #   backend  internal: api, worker, migrate, postgres, backup
 #   routing  internal: worker, rt-relay, routing (MOTIS)
-#   egress   outbound Internet: worker (iCal, IMAP, LLM), rt-relay (Belgian Mobility portal)
+#   egress   outbound Internet: worker (iCal, IMAP, LLM), rt-relay (Belgian Mobility gateway)
 
 x-hardening: &hardening
   cap_drop: [ALL]
@@ -110,7 +110,8 @@ services:
     command: ["python", "-m", "tempo.transport.rt_relay"]
     environment:
       TEMPO_RELAY_STATE_FILE: /state/relay-state.json
-    # Standard tier: add the secret tempo_relay_bmc_partner_key (Belgian Mobility key).
+    # Mandatory Belgian Mobility key: the relay refuses to start without it.
+    secrets: [tempo_bmc_partner_key]
     volumes: [relay-state:/state]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
@@ -137,7 +138,8 @@ services:
         python -m tempo.transport.gtfs_update /routing-input || echo 'UPDATE FAILED';
         sleep $$(( ($$(date -u -d 'tomorrow 02:30' +%s) - $$(date -u +%s)) % 86400 + 1 ));
         done
-    # Optional: secret tempo_bmc_partner_key (Standard tier) for the portal requests.
+    # Mandatory Belgian Mobility key for the static GTFS downloads.
+    secrets: [tempo_bmc_partner_key]
     volumes: [routing-input:/routing-input]
     networks: [egress]
     deploy:
@@ -204,6 +206,7 @@ secrets:
   tempo_database_url: {external: true}
   tempo_api_token: {external: true}
   tempo_ics_url: {external: true}
+  tempo_bmc_partner_key: {external: true}
 
 volumes:
   pgdata: {}

@@ -68,13 +68,14 @@ class Portal:
         return httpx2.Response(200, content=body, headers={"etag": etag})
 
 
+GATEWAY = "api-management-opendata-production.azure-api.net"
 SOURCES = [
-    Source("stib.gtfs.zip", "https://api-management-discovery-production.azure-api.net/stib", True),
+    Source("stib.gtfs.zip", "https://api-management-opendata-production.azure-api.net/stib", True),
     Source("osm.pbf", "https://geofabrik.example/osm", False, timedelta(days=7)),
 ]
 
 
-def run(folder: Path, portal: Portal, now: datetime, key: str | None = None) -> object:
+def run(folder: Path, portal: Portal, now: datetime, key: str = "k") -> object:
     client = httpx2.Client(transport=httpx2.MockTransport(portal))
     return update_inputs(folder, client, key=key, clock=lambda: now, only=SOURCES)
 
@@ -129,7 +130,7 @@ def test_server_errors_are_reported(tmp_path: Path) -> None:
         return httpx2.Response(503)
 
     client = httpx2.Client(transport=httpx2.MockTransport(down))
-    report = update_inputs(tmp_path, client, clock=lambda: NOW, only=SOURCES)
+    report = update_inputs(tmp_path, client, key="k", clock=lambda: NOW, only=SOURCES)
     assert report.failed == {"stib.gtfs.zip": "HTTP 503", "osm.pbf": "HTTP 503"}
     assert not (tmp_path / "READY").exists()
 
@@ -139,7 +140,7 @@ def test_key_is_never_forwarded_to_a_redirect_target_and_http_is_refused(tmp_pat
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        if request.url.host == "api-management-discovery-production.azure-api.net":
+        if request.url.host == "api-management-opendata-production.azure-api.net":
             return httpx2.Response(302, headers={"location": "https://blob.thirdparty.example/f"})
         return httpx2.Response(200, content=gtfs(), headers={"etag": '"b"'})
 
@@ -178,13 +179,11 @@ def test_sources_per_region() -> None:
     }
     assert national["tec.gtfs.zip"].forbid_frequencies
     assert not national["stib.gtfs.zip"].forbid_frequencies
-    keyed = {s.name: s for s in sources(keyed=True)}
-    for name, source in keyed.items():
+    for name, source in national.items():
         if name != "osm.pbf":
             assert source.url.startswith(
                 "https://api-management-opendata-production.azure-api.net/api/gtfs/feed/"
             )
-            assert source.url.split("/feed/")[1] == national[name].url.split("/feed/")[1]
     brussels = {s.name for s in sources("brussels")}
     assert brussels == {"stib.gtfs.zip", "sncb.gtfs.zip", "osm.pbf"}
     with pytest.raises(ValueError, match="region"):
@@ -203,7 +202,20 @@ def test_entry_point_reports_json_and_exit_code(
         return gtfs_update.UpdateReport([], [], [], {"stib.gtfs.zip": "timeout"}, None)
 
     monkeypatch.setattr(gtfs_update, "update_inputs", fake)
+    monkeypatch.delenv("TEMPO_BMC_PARTNER_KEY", raising=False)
+    assert gtfs_update.main([str(tmp_path), "brussels"]) == 2  # no key: clear error, no request
+    assert "tempo_bmc_partner_key" in capsys.readouterr().err and not seen
+    monkeypatch.setenv("TEMPO_BMC_PARTNER_KEY", "k")
     assert gtfs_update.main([str(tmp_path), "brussels"]) == 1  # nothing usable: job fails
     assert seen["region"] == "brussels" and seen["folder"] == tmp_path
     assert json.loads(capsys.readouterr().out)["failed"] == {"stib.gtfs.zip": "timeout"}
     assert gtfs_update.main([str(tmp_path), "mars"]) == 2
+
+
+def test_rejected_key_is_reported_as_such(tmp_path: Path) -> None:
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401 if request.url.host == GATEWAY else 200, content=b"pbf")
+
+    client = httpx2.Client(transport=httpx2.MockTransport(refuse))
+    report = update_inputs(tmp_path, client, key="bad", clock=lambda: NOW, only=SOURCES[:1])
+    assert report.failed == {"stib.gtfs.zip": "HTTP 401 (Belgian Mobility key rejected)"}

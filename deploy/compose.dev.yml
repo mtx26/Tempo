@@ -7,7 +7,7 @@
 # Ports are published on 127.0.0.1 only. The relay and PostgreSQL have no published port.
 # The routing volume must exist (README.md "MOTIS local"). Re-import it with
 # routing/config/belgium.yml FIRST: a volume imported with an older config polls the portal
-# directly (anonymous quota). Dev limitation: the `front` network (needed for the 127.0.0.1 ports)
+# directly. The Belgian Mobility key (./secrets/tempo_bmc_partner_key) is mandatory. Dev limitation: the `front` network (needed for the 127.0.0.1 ports)
 # gives api and routing outbound Internet; the Swarm stack must not.
 name: tempo-dev
 
@@ -82,7 +82,7 @@ services:
     command: ["python", "-m", "tempo.transport.rt_relay"]
     environment:
       TEMPO_RELAY_STATE_FILE: /state/relay-state.json
-    # Standard key (optional): add the secret tempo_relay_bmc_partner_key here.
+    secrets: [tempo_bmc_partner_key]
     read_only: true
     tmpfs: [/tmp]
     volumes: [relay-state:/state]
@@ -105,6 +105,7 @@ services:
     networks: [routing, backend, front]
 
 secrets:
+  tempo_bmc_partner_key: {file: ./secrets/tempo_bmc_partner_key}
   postgres_password: {file: ./secrets/postgres_password}
   tempo_database_url: {file: ./secrets/tempo_database_url}
   tempo_api_token: {file: ./secrets/tempo_api_token}

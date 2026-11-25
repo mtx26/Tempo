@@ -12,8 +12,8 @@ from pydantic import SecretStr
 from tempo.transport.feeds import (
     FEEDS,
     KEY_HEADER,
-    AccessTier,
     FeedKind,
+    MissingKeyError,
     Operator,
     PollingPlan,
     QuotaExceededError,
@@ -65,15 +65,13 @@ def make_relay(
     portal: Portal,
     clock: Clock,
     *,
-    tier: AccessTier = AccessTier.STANDARD,
     feeds: tuple = REALTIME,  # type: ignore[type-arg]
     plan: PollingPlan | None = None,
 ) -> FeedRelay:
     return FeedRelay(
         feeds,
         plan or PollingPlan(),
-        tier,
-        key=KEY if tier is AccessTier.STANDARD else None,
+        key=KEY,
         http_client=httpx2.Client(transport=httpx2.MockTransport(portal)),
         clock=clock,
     )
@@ -86,8 +84,7 @@ def test_tec_is_served_repaired_with_the_key_header() -> None:
     assert all(not e.trip_update.trip.HasField("start_time") for e in decode(payload).entity)
     request = portal.requests[0]
     assert request.headers[KEY_HEADER] == KEY.get_secret_value()
-    tec = feed(Operator.TEC, FeedKind.TRIP_UPDATES)
-    assert str(request.url) == tec.url_for(AccessTier.STANDARD)
+    assert str(request.url) == feed(Operator.TEC, FeedKind.TRIP_UPDATES).url
     assert request.url.host == "api-management-opendata-production.azure-api.net"
 
 
@@ -102,16 +99,6 @@ def test_cached_within_interval_and_refetched_after() -> None:
     relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
     assert len(portal.requests) == 2
     assert relay.requests_last_24h == 2
-
-
-def test_anonymous_relay_never_sends_a_key() -> None:
-    portal, clock = Portal(), Clock()
-    sncb = (feed(Operator.SNCB, FeedKind.TRIP_UPDATES),)
-    plan = PollingPlan(trip_updates=timedelta(minutes=30))
-    relay = make_relay(portal, clock, tier=AccessTier.ANONYMOUS, feeds=sncb, plan=plan)
-    relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES)
-    assert KEY_HEADER not in portal.requests[0].headers
-    assert portal.requests[0].url.host == "api-management-discovery-production.azure-api.net"
 
 
 def test_429_without_cache_is_unavailable_and_backs_off() -> None:
@@ -165,7 +152,6 @@ def test_network_error_is_unavailable() -> None:
     relay = FeedRelay(
         REALTIME,
         PollingPlan(),
-        AccessTier.STANDARD,
         key=KEY,
         http_client=httpx2.Client(transport=httpx2.MockTransport(broken)),
         clock=Clock(),
@@ -177,19 +163,19 @@ def test_network_error_is_unavailable() -> None:
 def test_rolling_budget_is_enforced_and_persisted(tmp_path: Path) -> None:
     portal, clock = Portal(), Clock()
     state = tmp_path / "relay-state.json"
-    full = [(clock.now - timedelta(hours=23, minutes=59 - i % 50)).isoformat() for i in range(80)]
+    full = [(clock.now - timedelta(hours=23, minutes=59 - i % 50)).isoformat() for i in range(9600)]
     state.write_text(json.dumps({"requests": full}), encoding="utf-8")
     sncb = (feed(Operator.SNCB, FeedKind.TRIP_UPDATES),)
     plan = PollingPlan(trip_updates=timedelta(minutes=30))
     relay = FeedRelay(
         sncb,
         plan,
-        AccessTier.ANONYMOUS,
+        key=KEY,
         http_client=httpx2.Client(transport=httpx2.MockTransport(portal)),
         clock=clock,
         state_file=state,
     )
-    assert relay.requests_last_24h == 80
+    assert relay.requests_last_24h == 9600
     with pytest.raises(RelayUnavailableError, match="budget"):
         relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES)
     assert not portal.requests
@@ -209,7 +195,6 @@ def test_restart_keeps_the_request_log(tmp_path: Path) -> None:
         return FeedRelay(
             REALTIME,
             PollingPlan(),
-            AccessTier.STANDARD,
             key=KEY,
             http_client=httpx2.Client(transport=httpx2.MockTransport(portal)),
             clock=clock,
@@ -225,7 +210,7 @@ def test_corrupt_state_file_refuses_to_start(tmp_path: Path) -> None:
     for content in ("not json", '{"requests": ["2026-11-23T10:00:00"]}', '{"x": 1}'):
         state.write_text(content, encoding="utf-8")
         with pytest.raises(ValueError, match="state file"):
-            FeedRelay(REALTIME, PollingPlan(), AccessTier.STANDARD, key=KEY, state_file=state)
+            FeedRelay(REALTIME, PollingPlan(), key=KEY, state_file=state)
 
 
 def test_retry_after_zero_still_backs_off_and_long_retry_after_is_honoured() -> None:
@@ -253,8 +238,8 @@ def test_budget_exhaustion_is_logged_once(caplog: pytest.LogCaptureFixture) -> N
     portal, clock = Portal(), Clock()
     sncb = (feed(Operator.SNCB, FeedKind.TRIP_UPDATES),)
     plan = PollingPlan(trip_updates=timedelta(minutes=30))
-    relay = make_relay(portal, clock, tier=AccessTier.ANONYMOUS, feeds=sncb, plan=plan)
-    relay._sent.extend([clock.now] * 80)
+    relay = make_relay(portal, clock, feeds=sncb, plan=plan)
+    relay._sent.extend([clock.now] * 9600)
     for _ in range(3):
         with pytest.raises(RelayUnavailableError):
             relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES)
@@ -276,37 +261,35 @@ def _restamp(data: bytes, when: datetime) -> bytes:
 def test_disabled_feed_is_a_key_error() -> None:
     sncb = (feed(Operator.SNCB, FeedKind.TRIP_UPDATES),)
     plan = PollingPlan(trip_updates=timedelta(minutes=30))
-    relay = make_relay(Portal(), Clock(), tier=AccessTier.ANONYMOUS, feeds=sncb, plan=plan)
+    relay = make_relay(Portal(), Clock(), feeds=sncb, plan=plan)
     with pytest.raises(KeyError):
         relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
 
 
 def test_construction_guards() -> None:
-    with pytest.raises(ValueError, match="needs a bmc-partner-key"):
-        FeedRelay(REALTIME, PollingPlan(), AccessTier.STANDARD)
+    fast = PollingPlan(trip_updates=timedelta(seconds=30), service_alerts=timedelta(seconds=30))
     with pytest.raises(QuotaExceededError):
-        FeedRelay(REALTIME, PollingPlan(), AccessTier.ANONYMOUS)
+        FeedRelay(REALTIME, fast, key=KEY)
     with pytest.raises(ValueError, match="realtime feeds only"):
-        FeedRelay(FEEDS, PollingPlan(), AccessTier.STANDARD, key=KEY)
+        FeedRelay(FEEDS, PollingPlan(), key=KEY)
 
 
-def test_settings_without_key_select_the_anonymous_sncb_plan() -> None:
-    relay = relay_from_settings(RelaySettings())
-    assert relay.tier is AccessTier.ANONYMOUS
-    assert relay.enabled(Operator.SNCB, FeedKind.TRIP_UPDATES)
-    assert not relay.enabled(Operator.TEC, FeedKind.TRIP_UPDATES)
+def test_missing_key_is_a_clear_startup_error() -> None:
+    with pytest.raises(MissingKeyError, match="tempo_bmc_partner_key"):
+        relay_from_settings(RelaySettings(_env_file=None))
 
 
 def test_settings_with_key_enable_all_six_realtime_feeds() -> None:
     relay = relay_from_settings(RelaySettings(bmc_partner_key=KEY, alerts_seconds=900))
-    assert relay.tier is AccessTier.STANDARD
     for item in REALTIME:
         assert relay.enabled(item.operator, item.kind)
 
 
 def test_settings_reject_an_over_quota_override() -> None:
     with pytest.raises(QuotaExceededError):
-        relay_from_settings(RelaySettings(trip_updates_seconds=60))  # anonymous, 1440/day
+        relay_from_settings(
+            RelaySettings(bmc_partner_key=KEY, trip_updates_seconds=30, alerts_seconds=30)
+        )
 
 
 def test_http_endpoints() -> None:
@@ -328,22 +311,12 @@ def test_http_endpoints() -> None:
     assert client.get("/openapi.json").status_code == 404
 
 
-def test_anonymous_app_reports_disabled_feeds_as_404() -> None:
-    sncb = (feed(Operator.SNCB, FeedKind.TRIP_UPDATES),)
-    plan = PollingPlan(trip_updates=timedelta(minutes=30))
-    relay = make_relay(Portal(), Clock(), tier=AccessTier.ANONYMOUS, feeds=sncb, plan=plan)
-    client = TestClient(create_relay_app(relay))
-    assert client.get("/feeds/tec/trip-updates.pbf").status_code == 404
-
-
 def test_feed_selection_setting() -> None:
     settings = RelaySettings(
+        bmc_partner_key=KEY,
         feeds="tec/trip-updates, delijn/alerts,tec/trip-updates",
-        trip_updates_seconds=86_400,
-        alerts_seconds=86_400,
     )
     relay = relay_from_settings(settings)
-    assert relay.tier is AccessTier.ANONYMOUS
     assert relay.enabled(Operator.TEC, FeedKind.TRIP_UPDATES)
     assert relay.enabled(Operator.DE_LIJN, FeedKind.SERVICE_ALERTS)
     assert not relay.enabled(Operator.SNCB, FeedKind.TRIP_UPDATES)
@@ -356,16 +329,6 @@ def test_feed_selection_rejects_unknown_or_empty_values() -> None:
         parse_feeds("tec/static")
     with pytest.raises(ValueError, match="no realtime feed"):
         parse_feeds(" , ")
-
-
-def test_anonymous_selection_of_all_feeds_needs_daily_intervals() -> None:
-    every = ",".join(
-        f"{op}/{k}" for op in ("tec", "nmbssncb", "delijn") for k in ("trip-updates", "alerts")
-    )
-    with pytest.raises(QuotaExceededError):
-        relay_from_settings(RelaySettings(feeds=every))
-    daily = RelaySettings(feeds=every, trip_updates_seconds=86_400, alerts_seconds=86_400)
-    assert relay_from_settings(daily).allowed_per_day == 80
 
 
 def test_429_pauses_every_feed_because_the_quota_is_per_account() -> None:

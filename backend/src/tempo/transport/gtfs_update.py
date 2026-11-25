@@ -31,10 +31,11 @@ import httpx2
 
 from tempo.transport.feeds import (
     FEEDS,
+    HOST,
     KEY_HEADER,
-    PORTAL_HOSTS,
-    AccessTier,
+    KEY_SECRET,
     FeedKind,
+    MissingKeyError,
     Operator,
 )
 
@@ -74,9 +75,7 @@ REGIONS: dict[str, tuple[frozenset[Operator], str]] = {
 }
 
 
-def sources(region: str = "belgium", *, keyed: bool = False) -> list[Source]:
-    """Inputs of a region; ``keyed`` = a portal key is configured, so the static GTFS come from
-    the key-checking host (``Feed.url_for``) and count against that key's quota."""
+def sources(region: str = "belgium") -> list[Source]:
     if region not in REGIONS:
         raise ValueError(f"unknown region {region!r}; choose from {sorted(REGIONS)}")
     operators, osm = REGIONS[region]
@@ -84,7 +83,7 @@ def sources(region: str = "belgium", *, keyed: bool = False) -> list[Source]:
     static = [
         Source(
             f"{feed.operator.name.lower().replace('_', '')}.gtfs.zip",
-            feed.url_for(AccessTier.STANDARD if keyed else AccessTier.ANONYMOUS),
+            feed.url,
             True,
             forbid_frequencies=feed.operator in repaired,
         )
@@ -179,14 +178,14 @@ def _download(
     client: httpx2.Client, url: str, headers: dict[str, str], key: str | None, target: Path
 ) -> _Download:
     """Stream ``url`` into ``target`` with a size cap. Redirects are followed manually: every hop
-    must stay https, and the portal key is sent ONLY to the portal hosts (httpx keeps custom
+    must stay https, and the gateway key is sent ONLY to the gateway host (httpx keeps custom
     headers across hosts, which would leak it to a third-party redirect target)."""
     for _ in range(MAX_REDIRECTS + 1):
         parts = urlsplit(url)
         if parts.scheme != "https":
             return _Download(0, error="refusing non-https URL")
         hop = dict(headers)
-        if key and parts.hostname in PORTAL_HOSTS:
+        if key and parts.hostname == HOST:
             hop[KEY_HEADER] = key
         try:
             with client.stream("GET", url, headers=hop, follow_redirects=False) as response:
@@ -214,7 +213,7 @@ def update_inputs(
     folder: Path,
     client: httpx2.Client,
     *,
-    key: str | None = None,
+    key: str,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     only: list[Source] | None = None,
     region: str = "belgium",
@@ -224,7 +223,7 @@ def update_inputs(
     state = _load(state_path)
     now = clock()
     report = UpdateReport([], [], [], {}, None)
-    for source in only or sources(region, keyed=key is not None):
+    for source in only or sources(region):
         entry = state.get(source.name, {})
         last_check = entry.get("checked_at")
         if last_check and now - datetime.fromisoformat(last_check) < source.min_interval:
@@ -242,7 +241,8 @@ def update_inputs(
                 report.unchanged.append(source.name)
                 continue
             if result.error or result.status != 200:
-                report.failed[source.name] = result.error or f"HTTP {result.status}"
+                rejected = " (Belgian Mobility key rejected)" if result.status in (401, 403) else ""
+                report.failed[source.name] = result.error or f"HTTP {result.status}{rejected}"
                 continue
             if result.size == 0:
                 report.failed[source.name] = "empty download"
@@ -294,9 +294,12 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
-    key_file = Path("/run/secrets/tempo_bmc_partner_key")
+    key_file = Path("/run/secrets") / KEY_SECRET
     key = key_file.read_text(encoding="utf-8").strip() if key_file.exists() else None
     key = key or os.environ.get("TEMPO_BMC_PARTNER_KEY")
+    if not key:
+        print(str(MissingKeyError()), file=sys.stderr)
+        return 2
     with httpx2.Client(timeout=600.0) as client:
         report = update_inputs(
             Path(argv[0]), client, key=key, region=argv[1] if len(argv) == 2 else "belgium"

@@ -65,7 +65,7 @@ Variables de test facultatives (sinon les tests concernés sont **ignorés avec 
 jamais réussis en silence) : `TEMPO_TEST_MOTIS_URL` (MOTIS Bruxelles),
 `TEMPO_TEST_MOTIS_BE_URL` (MOTIS national), `TEMPO_TEST_HA_REPO=../../tempo-homeassistant`
 (contrat avec le vrai client HA), `TEMPO_TEST_IMAP=127.0.0.1` (serveur IMAP GreenMail),
-`TEMPO_TEST_PORTAL_LIVE=1` et `TEMPO_TEST_BMC_KEY` (portail Belgian Mobility réel).
+`TEMPO_TEST_BMC_KEY` (passerelle Belgian Mobility réelle, 3 requêtes).
 
 Si `dev_postgres.py` expire après un arrêt brutal, PostgreSQL démarre souvent quand même sur le
 port affiché (voir `.pgdata/log`). Serveur IMAP de test :
@@ -78,6 +78,7 @@ Intégration Home Assistant (Linux ou WSL uniquement) : voir le README de `tempo
 
 ```bash
 export PATH="$LOCALAPPDATA/Programs/DockerDesktop/resources/bin:$PATH"
+export TEMPO_BMC_PARTNER_KEY="$(cat deploy/secrets/tempo_bmc_partner_key)"  # clé obligatoire
 (cd backend && uv run python -m tempo.transport.gtfs_update ../routing/data/brussels brussels)  # ou belgium
 docker build -t tempo-routing:v2.11.4 routing
 W="$(cygpath -w "$PWD/routing")"
@@ -140,7 +141,7 @@ Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou de
 | `TEMPO_TIMEZONE` | api, worker | `Europe/Brussels` par défaut. |
 | `tempo_ics_url` (secret) | worker | URL iCal de l'université (contient souvent un jeton personnel). |
 | `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`, `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID`, secret `tempo_training_imap_password` | worker | Import du programme du coach : seule l'adresse exacte autorisée est lue, et seulement si le serveur de réception désigné par `TEMPO_TRAINING_AUTHSERV_ID` (premier mot de son en-tête `Authentication-Results`, ex. `mx.google.com`) a validé DMARC ou DKIM pour le domaine de l'expéditeur. Désactivé tant que tout n'est pas défini. |
-| `tempo_relay_bmc_partner_key` / `tempo_bmc_partner_key` (secrets, facultatifs) | relais / mise à jour des données | Clé Belgian Mobility Standard (data.belgianmobility.io), envoyée à `api-management-opendata-production.azure-api.net` dans l'en-tête `bmc-partner-key` : temps réel SNCB, TEC et De Lijn (trajets chaque minute, alertes toutes les 5 min, 43 % du quota de 12 000/jour). Sans clé : SNCB seulement, toutes les 30 min. État et pause éventuelle après un 429 : `GET /health` du relais (`paused_until`, `requests_last_24h`, `last_error`). |
+| `tempo_bmc_partner_key` (secret, **obligatoire**) | relais / mise à jour des données | Clé Belgian Mobility Standard (data.belgianmobility.io), envoyée uniquement à `api-management-opendata-production.azure-api.net` dans l'en-tête `bmc-partner-key` : horaires statiques et temps réel SNCB, TEC et De Lijn (trajets chaque minute, alertes toutes les 5 min, 43 % du quota de 12 000/jour). Sans clé, le relais refuse de démarrer et la mise à jour s'arrête avec un message explicite ; une clé refusée (401/403) est signalée comme telle. État et pause éventuelle après un 429 : `GET /health` du relais (`paused_until`, `requests_last_24h`, `last_error`). |
 
 Côté Home Assistant (intégration) : URL interne du backend, jeton, `device_tracker` du
 téléphone, service `notify` facultatif, puis option *Utiliser la zone domicile comme domicile

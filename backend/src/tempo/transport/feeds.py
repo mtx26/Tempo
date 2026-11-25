@@ -1,33 +1,39 @@
 """Registry of the Belgian public transport feeds used by Tempo, and the polling quota budget.
 
-Every URL below was fetched successfully on 2026-11-23 (anonymous access, HTTP 200, protobuf
-for realtime, ZIP for static) — see ARCHITECTURE.md "Belgian feeds". Nothing here is guessed:
+Only the authenticated Belgian Mobility gateway is used (ARCHITECTURE.md "Belgian feeds"):
 
-- Two hosts, same paths (``PORTAL_HOSTS``, the only hosts that ever receive the key):
-  anonymous ``ANONYMOUS_HOST``; with a key ``KEYED_HOST``, the host of the developer portal's
-  "Try it" requests for the Standard subscription (``Feed.url_for``). On 2026-11-25 both
-  answered 200 for every feed with a valid, a wrong or no key: quota attribution to the
-  subscription is visible only in the developer portal reports.
+- ``HOST`` is the gateway of the developer portal's requests for the Standard subscription; the
+  key (mandatory, never optional) travels in header ``bmc-partner-key`` and is sent to this host
+  only. All six realtime feeds and the four static GTFS answered 200 there on 2026-11-25.
 - Realtime is JSON by default; ``?format=protobuf`` is mandatory (the JSON transcoding mangles
-  int64 fields). Trip updates use ``unroll=off`` (portal parameter, both hosts): stops without
-  a prediction are omitted, realtime data identical, ~30 % smaller.
-- Quotas come from the portal terms §5 (indicative): anonymous 100 requests/day and 10/minute;
-  free Standard account 12 000/day and 500/minute; beyond them the portal may answer HTTP 429.
-  The key travels in header ``bmc-partner-key`` (portal FAQ and "Try it" requests).
+  int64 fields). Trip updates use ``unroll=off`` (portal parameter): stops without a prediction
+  are omitted, realtime data identical, ~30 % smaller.
+- Quota from the portal terms §5 (indicative): Standard 12 000 requests/day and 500/minute;
+  beyond them the portal may answer HTTP 429.
 - STIB-MIVB publishes no GTFS-RT: MOTIS routes STIB on its static GTFS.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 
-ANONYMOUS_HOST = "api-management-discovery-production.azure-api.net"
-KEYED_HOST = "api-management-opendata-production.azure-api.net"
-PORTAL_HOSTS = frozenset({ANONYMOUS_HOST, KEYED_HOST})
-FEED_PATH = "/api/gtfs/feed"
+HOST = "api-management-opendata-production.azure-api.net"
+BASE_URL = f"https://{HOST}/api/gtfs/feed"
 KEY_HEADER = "bmc-partner-key"
+KEY_SECRET = "tempo_bmc_partner_key"  # noqa: S105 - Docker secret name, not a value
+"""Docker secret holding the key, shared by the relay and the routing data update."""
 SECONDS_PER_DAY = 86_400
+
+
+class MissingKeyError(RuntimeError):
+    """No Belgian Mobility key: the gateway is never called without one."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"Belgian Mobility key missing: create the Docker secret {KEY_SECRET} "
+            "(Standard subscription key from data.belgianmobility.io)"
+        )
 
 
 class Operator(StrEnum):
@@ -45,44 +51,26 @@ class FeedKind(StrEnum):
     SERVICE_ALERTS = "gtfs-rt-alerts"
 
 
-class AccessTier(StrEnum):
-    ANONYMOUS = "anonymous"
-    STANDARD = "standard"
-
-
 @dataclass(frozen=True, slots=True)
 class Quota:
     per_day: int
     per_minute: int
 
 
-QUOTAS: Mapping[AccessTier, Quota] = {
-    AccessTier.ANONYMOUS: Quota(per_day=100, per_minute=10),
-    AccessTier.STANDARD: Quota(per_day=12_000, per_minute=500),
-}
+QUOTA = Quota(per_day=12_000, per_minute=500)
 SAFETY_FRACTION = 0.8
-"""Plan at most 80 % of a quota: the terms say limits may change at any time."""
+"""Plan at most 80 % of the quota: the terms say limits may change at any time."""
 
 
 @dataclass(frozen=True, slots=True)
 class Feed:
     operator: Operator
     kind: FeedKind
-    path: str
-    """Below ``FEED_PATH``, identical on both hosts."""
+    url: str
     publisher_interval: timedelta
     """How often the publisher refreshes the feed (portal catalogue)."""
     needs_repair: bool = False
     """True when Tempo must sanitise the feed before MOTIS can use it (see ``gtfsrt``)."""
-
-    def url_for(self, tier: "AccessTier") -> str:
-        host = ANONYMOUS_HOST if tier is AccessTier.ANONYMOUS else KEYED_HOST
-        return f"https://{host}{FEED_PATH}/{self.path}"
-
-    @property
-    def url(self) -> str:
-        """Anonymous URL."""
-        return self.url_for(AccessTier.ANONYMOUS)
 
     @property
     def is_realtime(self) -> bool:
@@ -98,12 +86,13 @@ _RT = timedelta(seconds=30)
 
 
 def _static(operator: Operator) -> Feed:
-    return Feed(operator, FeedKind.STATIC, f"{operator.value}/static", _DAILY)
+    return Feed(operator, FeedKind.STATIC, f"{BASE_URL}/{operator.value}/static", _DAILY)
 
 
 def _rt(operator: Operator, kind: FeedKind, path: str, *, repair: bool = False) -> Feed:
     query = "format=protobuf&unroll=off" if kind is FeedKind.TRIP_UPDATES else "format=protobuf"
-    return Feed(operator, kind, f"{operator.value}/rt/{path}?{query}", _RT, needs_repair=repair)
+    url = f"{BASE_URL}/{operator.value}/rt/{path}?{query}"
+    return Feed(operator, kind, url, _RT, needs_repair=repair)
 
 
 FEEDS: tuple[Feed, ...] = (
@@ -131,12 +120,12 @@ def feed(operator: Operator, kind: FeedKind) -> Feed:
 
 @dataclass(frozen=True, slots=True)
 class PollingPlan:
-    """How often each feed kind is fetched from the portal (one request per fetch).
+    """How often each feed kind is fetched from the gateway (one request per fetch).
 
-    Default = Standard tier: trip updates every minute (publisher refresh: 30 s), alerts every
-    5 minutes. All six realtime feeds: 5 184 requests/day, 43 % of the 12 000/day quota and
-    54 % of the 80 % planning cap, leaving room for static downloads, retries and quota changes;
-    peak 6 requests in a minute (quota 500)."""
+    Trip updates every minute (publisher refresh: 30 s), alerts every 5 minutes. All six
+    realtime feeds: 5 184 requests/day, 43 % of the 12 000/day quota and 54 % of the 80 %
+    planning cap, leaving room for static downloads, retries and quota changes; peak 6
+    requests in a minute (quota 500)."""
 
     trip_updates: timedelta = timedelta(minutes=1)
     service_alerts: timedelta = timedelta(minutes=5)
@@ -151,7 +140,7 @@ class PollingPlan:
 
 
 class QuotaExceededError(ValueError):
-    """The polling plan would exceed the portal quota of the access tier."""
+    """The polling plan would exceed the gateway quota."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,14 +148,14 @@ class Budget:
     requests_per_day: int
     requests_per_minute_peak: int
     allowed_per_day: int
-    """``SAFETY_FRACTION`` of the tier's daily quota."""
+    """``SAFETY_FRACTION`` of the daily quota."""
 
     @property
     def fits(self) -> bool:
         return self.requests_per_day <= self.allowed_per_day
 
 
-def budget(feeds: Iterable[Feed], plan: PollingPlan, tier: AccessTier) -> Budget:
+def budget(feeds: Iterable[Feed], plan: PollingPlan) -> Budget:
     """Requests/day needed by ``plan`` for ``feeds``; the peak minute assumes every feed is
     due at the same time (worst case)."""
     selected = list(feeds)
@@ -176,26 +165,23 @@ def budget(feeds: Iterable[Feed], plan: PollingPlan, tier: AccessTier) -> Budget
         if seconds < item.publisher_interval.total_seconds() or seconds <= 0:
             raise ValueError(f"{item.name}: polling faster than the publisher refreshes it")
         per_day += -(-SECONDS_PER_DAY // int(seconds))  # ceil
-    quota = QUOTAS[tier]
     return Budget(
         requests_per_day=per_day,
         requests_per_minute_peak=len(selected),
-        allowed_per_day=int(quota.per_day * SAFETY_FRACTION),
+        allowed_per_day=int(QUOTA.per_day * SAFETY_FRACTION),
     )
 
 
-def check_budget(feeds: Iterable[Feed], plan: PollingPlan, tier: AccessTier) -> Budget:
-    selected = list(feeds)
-    result = budget(selected, plan, tier)
-    quota = QUOTAS[tier]
+def check_budget(feeds: Iterable[Feed], plan: PollingPlan) -> Budget:
+    result = budget(feeds, plan)
     if not result.fits:
         raise QuotaExceededError(
             f"{result.requests_per_day} requests/day exceed {result.allowed_per_day} "
-            f"({int(SAFETY_FRACTION * 100)} % of the {tier.value} quota {quota.per_day}/day)"
+            f"({int(SAFETY_FRACTION * 100)} % of the quota {QUOTA.per_day}/day)"
         )
-    if result.requests_per_minute_peak > quota.per_minute:
+    if result.requests_per_minute_peak > QUOTA.per_minute:
         raise QuotaExceededError(
             f"{result.requests_per_minute_peak} simultaneous requests exceed "
-            f"{quota.per_minute}/minute ({tier.value})"
+            f"{QUOTA.per_minute}/minute"
         )
     return result

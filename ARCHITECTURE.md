@@ -495,29 +495,29 @@ flowchart LR
  M <-->|/api/v6/plan| C[Client Tempo]
 ```
 
-Faits vérifiés le 23/11/2026 par requêtes réelles :
+Faits vérifiés par requêtes réelles (23 et 25/11/2026) :
 - Belgian Mobility Open Data : 4 GTFS statiques + TripUpdates et Alerts pour TEC, SNCB et
-  De Lijn, hôte `api-management-discovery-production.azure-api.net/api/gtfs/feed/<op>/...`
-  (`?format=protobuf` obligatoire pour le temps réel). L'hôte documenté
-  `opendata-discovery-gtfs-realtime...` n'avait pas d'enregistrement DNS. STIB : GTFS statique
-  seulement. MOTIS est la seule source d'itinéraires : les trajets STIB (et tout exploitant
-  sans temps réel) suivent le GTFS statique.
-- Quotas indicatifs (conditions d'utilisation §5) : anonyme 100/jour et 10/min ; Standard
-  12 000/jour et 500/min ; au-delà, le portail peut répondre 429.
-- Deux hôtes, mêmes chemins, centralisés dans `transport/feeds.py` (seuls destinataires de la
-  clé) : anonyme `api-management-discovery-production.azure-api.net` ; avec clé
-  `api-management-opendata-production.azure-api.net`, celui des requêtes « Try it » du portail
-  développeur pour l'abonnement Standard, en-tête `bmc-partner-key`. Vérifié le 25/11/2026 :
-  les 6 flux temps réel et les 4 GTFS statiques répondent 200 sur l'hôte avec clé ; les deux
-  hôtes répondent aussi 200 avec une fausse clé ou sans clé, donc l'imputation au quota
-  Standard ne se voit que dans les rapports du portail développeur. TripUpdates avec
-  `unroll=off` (paramètre du portail : arrêts sans prévision omis, données identiques, ~30 %
-  plus léger).
-- Interrogation avec clé : TripUpdates toutes les minutes (l'éditeur publie toutes les 30 s),
-  alertes toutes les 5 min, pour les six flux : 5 184 requêtes/jour, soit 43 % du quota
-  (54 % du plafond de 80 % que le relais s'impose) ; s'y ajoutent au plus 4 téléchargements
-  statiques par jour. MOTIS interroge le relais (interne, gratuit) toutes les 30 s : une copie
-  fraîche l'atteint en moins de 30 s.
+  De Lijn, uniquement par la passerelle authentifiée
+  `api-management-opendata-production.azure-api.net/api/gtfs/feed/<op>/...` (centralisée dans
+  `transport/feeds.py`), clé **obligatoire** dans l'en-tête `bmc-partner-key`, envoyée à ce
+  seul hôte. Aucun accès anonyme. `?format=protobuf` obligatoire pour le temps réel ;
+  TripUpdates avec `unroll=off` (arrêts sans prévision omis, données identiques, ~30 % plus
+  léger). STIB : GTFS statique seulement. MOTIS est la seule source d'itinéraires : les
+  trajets STIB (et tout exploitant sans temps réel) suivent le GTFS statique.
+- Quota indicatif (conditions d'utilisation §5) : Standard 12 000/jour et 500/min ; au-delà,
+  la passerelle peut répondre 429.
+- Clé absente : le relais refuse de démarrer et la mise à jour des données s'arrête, chacun
+  avec un message nommant le secret `tempo_bmc_partner_key` ; clé refusée (401/403) :
+  journalisée et visible dans `/health` du relais, ou dans le rapport de la mise à jour.
+- Interrogation : TripUpdates toutes les minutes (l'éditeur publie toutes les 30 s), alertes
+  toutes les 5 min, pour les six flux : 5 184 requêtes/jour, soit 43 % du quota (54 % du
+  plafond de 80 % que le relais s'impose) ; s'y ajoutent au plus 4 téléchargements statiques
+  par jour. MOTIS interroge le relais (interne, gratuit) toutes les 30 s.
+- Ce que fait MOTIS nativement (v2.11.4, sources lues) et que Tempo ne refait pas : interrogation
+  à intervalle fixe, en-têtes par flux, abandon du temps réel d'un flux en échec
+  (`incremental_rt_update: false`), donc retour aux horaires statiques. Ce qu'il ne fait pas,
+  seule raison d'être du relais : quota, 429/`Retry-After`, rejet d'un flux périmé, réparation
+  des `start_time` TEC.
 - Relais (`transport/rt_relay.py`, une seule réplique) : détient la clé, plafonne à 80 % du
   quota, recul exponentiel. Un 429 suspend **tous** les flux (le quota est par compte) jusqu'à
   `Retry-After` (secondes ou date HTTP, jamais raccourci, au moins 5 min) ; un 401/403 est
@@ -787,16 +787,13 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution complète : backend **536 tests réussis, 0 ignoré** (PostgreSQL 16
-réel, MOTIS Bruxelles et MOTIS national réels, contrat avec le vrai client HA, IMAP GreenMail,
-portail Belgian Mobility réel en anonyme), couverture 94 %, Ruff et mypy strict propres ;
-intégration HA 63 tests réussis (WSL Ubuntu), mypy strict et Ruff propres. Recettes rejouées
-le 25/11/2026 après la réorganisation en couches (`timeutil`, `db/store`, conflits
-centralisés), base de développement vide : vrai Home Assistant 2026.11.2 (`scripts/ha_e2e.py`)
-15/15 et pile complète avec worker, relais et MOTIS national (`scripts/live_scenario.py`)
-15/15 ; jobs du worker sains. Après le correctif iCal (repères de durée nulle) : 537 tests, dont 514
-réussis sur PostgreSQL et 23 ignorés faute des services Docker (MOTIS, IMAP, contrat HA,
-portail), que ce correctif ne touche pas.
+Dernière exécution complète (25/11/2026, après la suppression de l'accès anonyme Belgian
+Mobility) : backend **541 tests réussis, 0 ignoré** (PostgreSQL 16 réel, MOTIS Bruxelles et
+MOTIS national réels réimportés, contrat avec le vrai client HA, IMAP GreenMail, passerelle
+Belgian Mobility réelle avec la clé) ; Ruff et mypy strict propres. Pile de développement avec
+la vraie clé : relais sain (6 flux, aucune erreur), MOTIS résout 100 % des TripUpdates TEC ;
+`scripts/live_scenario.py` 15/15 et vrai Home Assistant 2026.11.2 (`scripts/ha_e2e.py`) 15/15.
+Intégration HA inchangée depuis sa dernière exécution (63 tests réussis).
 
 Bloquants nécessitant l'utilisateur : compte de service Vertex AI et choix du modèle Gemini (tester B01 réellement), installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de
