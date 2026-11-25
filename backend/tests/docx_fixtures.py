@@ -1,62 +1,59 @@
-"""Synthetic coach plans (.docx) reproducing the documented format (ARCHITECTURE.md).
+"""Synthetic coach plans (.docx) with the structure of the coach's real documents.
 
-No real personal data: built in memory from the structure described by the user, until an
-anonymised real document is provided.
+Structure observed on the real plans (2026-11): a 1x2 table ``S3 | 23 au 29/11/2026``, then a
+table whose first row is one merged cell (e.g. the athlete's VMA) and whose other rows are a
+label followed by seven cells, Monday..Sunday, without weekday names. The text below is
+invented: no real personal data.
 """
 
 import io
 
 from docx import Document
 
-DAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+THEME = "Thème de la séance"
 
-# Rows: objective, theme, detailed content; columns Monday..Sunday ("" = no training).
+# Rows: label, then Monday..Sunday ("" = no training).
 EXAMPLE_WEEK = {
-    "Objectif": ["", "", "Évaluer la VMA", "", "Endurance", "", "Endurance + force"],
-    "Séance": [
-        "Repos",
+    "Objectif": [
         "",
-        "Test VMA",
         "",
-        "Endurance fondamentale 1h15'",
+        "Préparation \nHivernale",
         "",
-        "Sortie longue 1h25'",
+        "Préparation \nHivernale",
+        "",
+        "Préparation \nHivernale",
     ],
+    THEME: ["Repos", "", "Test VMA", "", "Endurance\nFondamentale", "", "Sortie\nLongue"],
     "Contenu": [
         "",
         "",
-        "RAC : 10'\nTest VMA sur piste (protocole demi-Cooper)",
+        "RAC : 10 \u2018\nTest VMA sur piste",
         "",
-        'Footing en aisance respiratoire\nEn fin de footing : 3x80m r 30"',
+        "1h15\u2019\nEn fin de footing 3x80m en déroulant\nr 30\u2019\u2019",
         "",
-        "Terrain vallonné\nAccélérations en côte",
+        "1h25\u2019\nSur parcours vallonné avec accélérations en côtes",
     ],
 }
 
 
 def plan_docx(
-    title: str = "Semaine du 23 au 29/11/2026",
+    week_range: str = "23 au 29/11/2026",
     week: dict[str, list[str]] | None = None,
     *,
-    title_in_table: bool = False,
-    days: list[str] | None = None,
+    label: str = "S3",
+    banner: str = "VMA 17,4",
 ) -> bytes:
-    document = Document()
-    document.add_paragraph("Plan Matis")
-    if not title_in_table:
-        document.add_paragraph(title)
     rows = week or EXAMPLE_WEEK
-    header = days or DAYS
-    table = document.add_table(rows=1 + len(rows) + (1 if title_in_table else 0), cols=8)
-    offset = 0
-    if title_in_table:
-        table.rows[0].cells[0].text = title
-        offset = 1
-    table.rows[offset].cells[0].text = ""
-    for index, day in enumerate(header):
-        table.rows[offset].cells[index + 1].text = day
-    for row_index, (label, cells) in enumerate(rows.items(), start=offset + 1):
-        table.rows[row_index].cells[0].text = label
+    width = 1 + max(len(cells) for cells in rows.values())
+    document = Document()
+    heading = document.add_table(rows=1, cols=2)
+    heading.rows[0].cells[0].text = label
+    heading.rows[0].cells[1].text = week_range
+    table = document.add_table(rows=1 + len(rows), cols=width)
+    merged = table.rows[0].cells[0].merge(table.rows[0].cells[width - 1])
+    merged.text = banner
+    for row_index, (name, cells) in enumerate(rows.items(), start=1):
+        table.rows[row_index].cells[0].text = name
         for column, value in enumerate(cells, start=1):
             table.rows[row_index].cells[column].text = value
     buffer = io.BytesIO()

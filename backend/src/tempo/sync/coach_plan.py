@@ -1,16 +1,17 @@
 """Weekly training plan from the coach's ``.docx`` attachment (ARCHITECTURE.md §6).
 
-Format: a date range ``Semaine du 23 au 29/11/2026`` and one table whose header row holds the
-weekdays (Monday..Sunday) and whose other rows (objective, theme, detailed instructions) hold the
-session of each day; empty columns mean no training.
+Format of the coach's real documents (observed 2026-11): a small table ``S3 | 23 au 29/11/2026``
+(week number, Monday..Sunday range), then a table whose rows are a label (``Objectif``,
+``Thème de la séance``, ``Contenu``) followed by seven cells, Monday..Sunday, without weekday
+names; a merged row (e.g. ``VMA 17,4``) is not a day row. Empty cells mean no training.
 
 Rules implemented here (deterministic, nothing invented):
 - the full text of every row is kept verbatim in the session notes;
-- the total duration is read ONLY from the session/theme row (where the coach writes it, e.g.
-  ``Endurance fondamentale 1h15'``) and only when exactly one explicit duration is there.
-  Durations in the detailed instructions belong to parts of the session (``RAC : 10'``, ``r 30"``,
-  ``20' footing``, repetitions) and are never summed or promoted to a total. Otherwise the
-  duration is None: "to confirm" by the user;
+- the total duration is the single explicit duration of the theme row; otherwise the first line
+  of the content row when that line is ONLY a duration (``1h15'``, any apostrophe). Durations
+  inside the instructions belong to parts of the session (``RAC : 10'``, ``r 30''``,
+  repetitions) and are never summed or promoted to a total. Otherwise the duration is None:
+  "to confirm" by the user;
 - a session whose theme says rest (``Repos``) is not a training;
 - a competition keyword (course, compétition, cross, semi, marathon, trail) marks a race; it is
   never scheduled without the user's approval (fixed commitment).
@@ -34,7 +35,8 @@ MAX_ROWS = 60
 MAX_COLUMNS = 20
 MAX_PARAGRAPHS = 500
 MAX_UNCOMPRESSED = 20_000_000
-WEEKDAYS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
+DAY_COLUMNS = 7
+"""Columns after the row label: Monday..Sunday, in this order."""
 REST_WORDS = ("repos", "off", "rien")
 RACE_WORDS = (
     "competition",
@@ -51,8 +53,11 @@ PART_PREFIX = re.compile(
     r"\s*[:=]?\s*$"
 )
 _DURATION = re.compile(r"(?<![\d.])(\d{1,2})\s*h\s*(\d{2})?\s*'?|(?<![\dx.])(\d{1,3})\s*'(?!')")
+_QUOTES = str.maketrans(
+    {"\u2019": "'", "\u2018": "'", "\u2032": "'", "\u201d": '"', "\u201c": '"', "\u2033": '"'}
+)
 _WEEK = re.compile(
-    r"semaine\s+du\s+(?P<d1>\d{1,2})(?:[/.](?P<m1>\d{1,2}))?(?:[/.](?P<y1>\d{4}))?"
+    r"(?<!\d)(?P<d1>\d{1,2})(?:[/.](?P<m1>\d{1,2}))?(?:[/.](?P<y1>\d{4}))?"
     r"\s+au\s+(?P<d2>\d{1,2})[/.](?P<m2>\d{1,2})[/.](?P<y2>\d{4})"
 )
 
@@ -85,7 +90,7 @@ class WeeklyPlan:
 def total_duration(text: str) -> int | None:
     """The single explicit total duration in ``text`` (minutes), else None."""
     totals: set[int] = set()
-    plain = _plain(text)
+    plain = _plain(text).translate(_QUOTES)
     for match in _DURATION.finditer(plain):
         prefix = plain[max(0, match.start() - 25) : match.start()]
         if PART_PREFIX.search(prefix) or re.search(r"\d\s*x\s*$", prefix):
@@ -121,18 +126,28 @@ def _week(texts: list[str], today: date) -> tuple[date, date]:
         if start.weekday() != 0 or (end - start).days != 6:
             raise PlanFormatError(f"week range {start}..{end} is not Monday..Sunday")
         return start, end
-    raise PlanFormatError("no 'Semaine du ... au ...' range found")
+    raise PlanFormatError("no '<d> au <d>/<m>/<yyyy>' week range found")
 
 
-def _weekday_columns(grid: list[list[str]]) -> tuple[int, dict[int, int]] | None:
-    for row_index, row in enumerate(grid):
-        columns: dict[int, int] = {}
-        for column_index, cell in enumerate(row):
-            name = _plain(cell).strip()
-            if name in WEEKDAYS:
-                columns[column_index] = WEEKDAYS.index(name)
-        if len(columns) >= 5:
-            return row_index, columns
+def _day_rows(grid: list[list[str]]) -> list[tuple[str, list[str]]]:
+    """Rows made of a label and exactly seven day cells (merged banner rows are skipped)."""
+    return [
+        (row[0].strip(), row[1:])
+        for row in grid
+        if len(row) == 1 + DAY_COLUMNS and row[0].strip() and len(set(row)) > 1
+    ]
+
+
+def _duration(entries: list[tuple[str, str]], theme: str) -> int | None:
+    """Theme-row duration, else a content first line that is only a duration (``1h15'``)."""
+    minutes = total_duration(theme)
+    if minutes is not None:
+        return minutes
+    for label, value in entries:
+        if _plain(label).startswith("contenu"):
+            first = _plain(value.splitlines()[0]).translate(_QUOTES).strip()
+            if _DURATION.fullmatch(first):
+                return total_duration(first)
     return None
 
 
@@ -168,20 +183,17 @@ def _parse_document(document: Any, today: date) -> WeeklyPlan:
         texts += [cell for row in grid for cell in row]
     monday, sunday = _week(texts, today)
     for grid in grids:
-        found = _weekday_columns(grid)
-        if found is None:
+        rows = _day_rows(grid)
+        if not rows:
             continue
-        header_row, columns = found
-        cells: dict[int, list[tuple[str, str]]] = {d: [] for d in range(7)}
-        for row in grid[header_row + 1 :]:
-            label = row[0].strip() if row else ""
-            for column_index, weekday in columns.items():
-                value = row[column_index].strip() if column_index < len(row) else ""
-                if value:
+        cells: dict[int, list[tuple[str, str]]] = {d: [] for d in range(DAY_COLUMNS)}
+        for label, days in rows:
+            for weekday, raw in enumerate(days):
+                if value := raw.strip():
                     cells[weekday].append((label, value))
         plan = WeeklyPlan(monday, sunday)
         order = 0
-        for weekday in range(7):
+        for weekday in range(DAY_COLUMNS):
             entries = cells[weekday]
             if not entries:
                 continue
@@ -192,20 +204,20 @@ def _parse_document(document: Any, today: date) -> WeeklyPlan:
                 (v for label, v in entries if _plain(label).startswith(("seance", "theme"))),
                 values[0],
             )
-            first_line = theme.splitlines()[0].strip()
-            if any(re.fullmatch(rf"\s*{w}\s*", _plain(first_line)) for w in REST_WORDS):
+            title = " ".join(theme.split())
+            if any(re.fullmatch(rf"\s*{w}\s*", _plain(title)) for w in REST_WORDS):
                 continue
             plan.sessions.append(
                 PlanSession(
                     weekday=weekday,
                     day=monday + timedelta(days=weekday),
-                    title=first_line[:300],
+                    title=title[:300],
                     notes=body[:10_000],
-                    duration_minutes=total_duration(theme),
+                    duration_minutes=_duration(entries, theme),
                     is_race=any(word in plain for word in RACE_WORDS),
                     order=order,
                 )
             )
             order += 1
         return plan
-    raise PlanFormatError("no weekly table with Monday..Sunday columns found")
+    raise PlanFormatError("no table with a label and seven Monday..Sunday columns found")

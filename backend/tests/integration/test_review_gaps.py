@@ -29,7 +29,7 @@ from tempo.sync.coach_import import apply_weekly_plan
 from tempo.sync.coach_plan import parse_plan_docx
 from tempo.sync.ics_repository import get_or_create_source
 from tempo.worker.jobs import departure_job
-from tests.docx_fixtures import EXAMPLE_WEEK, plan_docx
+from tests.docx_fixtures import EXAMPLE_WEEK, THEME, plan_docx
 from tests.integration.test_planning_service import seed
 from tests.test_engine import FakeRouting
 
@@ -95,7 +95,7 @@ def test_coach_change_on_protected_session_becomes_a_proposal(
         s.commit()
         row_id = row.id
     week = {k: list(v) for k, v in EXAMPLE_WEEK.items()}
-    week["Séance"][4] = "Endurance fondamentale 1h05'"
+    week[THEME][4] = "Endurance fondamentale 1h05'"
     with sessions() as s:
         apply_weekly_plan(
             s, parse_plan_docx(plan_docx(week=week), today), tz=TZ, today=today, origin="m2"

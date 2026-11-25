@@ -428,8 +428,11 @@ flowchart TD
   serveur de réception de l'utilisateur (son `authserv-id`, réglage obligatoire) a enregistré
   DMARC aligné sur `header.from` ou DKIM aligné sur le domaine de l'expéditeur, dans le plus
   récent `Authentication-Results` à son nom (un en-tête écrit par l'expéditeur n'est jamais
-  cru) ; boîte en lecture seule ; plan lu dans le `.docx` (colonnes lundi→dimanche, notation
-  `1h15'`, `10'`, `30"`, `3x80m`). Jour suggéré (plan ou texte de l'e-mail) = préférence
+  cru) ; boîte en lecture seule ; plan lu dans le `.docx` au format réel du coach (tableau
+  « S3 | 23 au 29/11/2026 », puis lignes « Objectif », « Thème de la séance », « Contenu » suivies
+  de 7 colonnes lundi→dimanche sans noms de jours ; ligne fusionnée ignorée ; apostrophes
+  typographiques acceptées). Durée totale : celle du thème, sinon la première ligne du contenu
+  si elle n'est qu'une durée (`1h15'`) ; `RAC : 10'`, `r 30''`, `3x80m` restent des parties. Jour suggéré (plan ou texte de l'e-mail) = préférence
   souple dans la semaine ; contenu conservé ; durée absente ⇒
   `to_confirm` (jamais devinée) ; ordre et récupération de la semaine conservés (au plus 2 jours
   imposés) ; plan renvoyé ⇒ remplacement sans doublon, séances faites/verrouillées/modifiées par

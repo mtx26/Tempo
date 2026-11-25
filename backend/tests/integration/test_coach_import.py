@@ -22,7 +22,7 @@ from tempo.sync.coach_import import apply_weekly_plan
 from tempo.sync.coach_plan import parse_plan_docx
 from tempo.sync.training_mail import MailMessage
 from tempo.worker.jobs import training_mail_job
-from tests.docx_fixtures import EXAMPLE_WEEK, plan_docx
+from tests.docx_fixtures import EXAMPLE_WEEK, THEME, plan_docx
 from tests.test_engine import FakeRouting
 
 pytestmark = pytest.mark.integration
@@ -63,8 +63,8 @@ def test_import_then_resend_unchanged_modified_and_shortened(
     first = rows(sessions)
     assert [(r.title, r.status, r.duration_minutes) for r in first] == [
         ("Test VMA", "to_confirm", None),
-        ("Endurance fondamentale 1h15'", "active", 75),
-        ("Sortie longue 1h25'", "active", 85),
+        ("Endurance Fondamentale", "active", 75),
+        ("Sortie Longue", "active", 85),
     ]
     assert {r.sequence_group for r in first} == {"coach_plan:2026-11-23"}
     assert [r.sequence_index for r in first] == [0, 1, 2]
@@ -73,8 +73,8 @@ def test_import_then_resend_unchanged_modified_and_shortened(
     assert [r.id for r in rows(sessions)] == [r.id for r in first]
 
     week = {k: list(v) for k, v in EXAMPLE_WEEK.items()}
-    week["Séance"][4] = "Endurance fondamentale 1h05'"
-    week["Séance"][6] = ""
+    week[THEME][4] = "Endurance fondamentale 1h05'"
+    week[THEME][6] = ""
     week["Objectif"][6] = ""
     week["Contenu"][6] = ""
     import_plan(sessions, plan_docx(week=week), "m3")
@@ -93,7 +93,7 @@ def test_user_edits_are_never_overwritten(sessions: sessionmaker[Session]) -> No
         row.notes, row.user_modified = "ma version", True
         s.commit()
     week = {k: list(v) for k, v in EXAMPLE_WEEK.items()}
-    week["Séance"][4] = "Endurance fondamentale 1h05'"
+    week[THEME][4] = "Endurance fondamentale 1h05'"
     import_plan(sessions, plan_docx(week=week), "m2")
     edited = next(r for r in rows(sessions) if r.preferred_day == date(2026, 11, 27))
     assert edited.notes == "ma version" and edited.duration_minutes == 75
