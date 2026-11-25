@@ -85,11 +85,18 @@ services:
     environment:
       TEMPO_MOTIS_URL: http://routing:8080
       # Coach e-mails stay disabled until these are set (README.md, configuration):
-      # TEMPO_TRAINING_IMAP_HOST, TEMPO_TRAINING_IMAP_USER, TEMPO_TRAINING_ALLOWED_SENDER
+      # TEMPO_TRAINING_IMAP_HOST, TEMPO_TRAINING_IMAP_USER, TEMPO_TRAINING_ALLOWED_SENDER,
+      # TEMPO_TRAINING_AUTHSERV_ID (receiving server whose DMARC/DKIM verdict is trusted)
     secrets:
       - tempo_database_url
       - tempo_ics_url
       # Optional: tempo_anthropic_api_key, tempo_training_imap_password
+    # Alive = one scheduling round finished in the last 5 minutes (a round includes a re-plan).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/tempo-worker.alive') > 300)"]
+      interval: 60s
+      start_period: 120s
+      retries: 3
     networks: [backend, routing, egress]
     deploy:
       replicas: 1  # jobs are not designed for concurrent workers
@@ -118,18 +125,25 @@ services:
   routing-update:
     <<: *hardening
     image: *backend-image
-    # Nightly conditional refresh of GTFS (4 feeds) + weekly OSM, validated, atomic; publishes
-    # /routing-input/READY only when something changed (ARCHITECTURE.md §6).
+    # Nightly (02:30 UTC) conditional refresh of GTFS (4 feeds) + weekly OSM, validated, atomic;
+    # publishes /routing-input/READY only when something changed (ARCHITECTURE.md §7). It runs
+    # once at start (empty volume), then every night (`$$` escapes `$` from stack interpolation).
     command:
       - sh
       - -c
-      - while true; do python -m tempo.transport.gtfs_update /routing-input || echo 'UPDATE FAILED'; sleep 86400; done
+      - >-
+        while true; do
+        python -m tempo.transport.gtfs_update /routing-input || echo 'UPDATE FAILED';
+        sleep $$(( ($$(date -u -d 'tomorrow 02:30' +%s) - $$(date -u +%s)) % 86400 + 1 ));
+        done
     # Optional: secret tempo_bmc_partner_key (Standard tier) for the portal requests.
     volumes: [routing-input:/routing-input]
     networks: [egress]
     deploy:
       replicas: 1
       resources: {limits: {memory: 1G}}
+      # routing-input is a local volume shared with `routing`: both on the same labelled node.
+      placement: {constraints: [node.labels.tempo.routing == true]}
 
   routing:
     <<: *hardening
@@ -142,10 +156,16 @@ services:
     configs:
       - {source: motis_config, target: /config/config.yml, mode: 0444}
     volumes: [routing-input:/input:ro, routing-data:/data]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 60s
+      start_period: 600s  # first graph import (national: ~4 min)
+      retries: 3
     networks: [routing]
     deploy:
       replicas: 1
       resources: {limits: {memory: 6G}}
+      placement: {constraints: [node.labels.tempo.routing == true]}
 
   backup:
     cap_drop: [ALL]

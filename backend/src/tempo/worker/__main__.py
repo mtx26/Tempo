@@ -37,6 +37,8 @@ from tempo.worker.jobs import (
 logger = logging.getLogger("tempo.worker")
 SECRETS_DIR = Path("/run/secrets")
 TICK_SECONDS = 30
+HEARTBEAT = Path("/tmp/tempo-worker.alive")  # noqa: S108 - tmpfs of the read-only container
+"""Touched after every round: the container health check fails when it gets old."""
 
 
 class WorkerSettings(BaseSettings):
@@ -179,6 +181,7 @@ def main() -> None:  # pragma: no cover - process loop, jobs are tested individu
             )
             last_ics = now if due_ics else last_ics
             last_departure = now if due_departure else last_departure
+            HEARTBEAT.touch()
             stop.wait(TICK_SECONDS)
     engine.dispose()
 

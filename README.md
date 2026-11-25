@@ -139,7 +139,7 @@ Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou de
 | `TEMPO_MOTIS_URL` | api, worker | `http://routing:8080`. |
 | `TEMPO_TIMEZONE` | api, worker | `Europe/Brussels` par défaut. |
 | `tempo_ics_url` (secret) | worker | URL iCal de l'université (contient souvent un jeton personnel). |
-| `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`, `TEMPO_TRAINING_ALLOWED_SENDER`, secret `tempo_training_imap_password` | worker | Import du programme du coach : seule l'adresse exacte autorisée est lue (DMARC/DKIM exigés par défaut). Désactivé tant que tout n'est pas défini. |
+| `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`, `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID`, secret `tempo_training_imap_password` | worker | Import du programme du coach : seule l'adresse exacte autorisée est lue, et seulement si le serveur de réception désigné par `TEMPO_TRAINING_AUTHSERV_ID` (premier mot de son en-tête `Authentication-Results`, ex. `mx.google.com`) a validé DMARC ou DKIM pour le domaine de l'expéditeur. Désactivé tant que tout n'est pas défini. |
 | `tempo_relay_bmc_partner_key` / `tempo_bmc_partner_key` (secrets, facultatifs) | relais / mise à jour des données | Clé Belgian Mobility Standard (temps réel TEC et De Lijn, quota du portail). Sans clé : SNCB seulement, toutes les 30 min. |
 
 Côté Home Assistant (intégration) : URL interne du backend, jeton, `device_tracker` du
@@ -155,8 +155,10 @@ coordonnées d'un lieu sont fournies par l'utilisateur, jamais devinées.
    (`backend/Dockerfile`) et `tempo-routing:v2.11.4` (`routing/Dockerfile`) ; réseau overlay
    partagé avec Home Assistant
    (`docker network create -d overlay --attachable homeassistant_tempo`, ou `TEMPO_HA_NETWORK`) ;
-   contrainte de placement de `routing` et `postgres` sur un nœud (volumes locaux). Le volume
-   de routage est construit par `routing-update` + `routing` (~1,8 Go, ~3,5 min d'import).
+   `routing-update` et `routing` partagent un volume local : étiqueter leur nœud
+   (`docker node update --label-add tempo.routing=true <nœud>`) ; `postgres` reste sur un seul
+   nœud (volume local). Le volume de routage est construit par `routing-update` + `routing`
+   (~1,8 Go, ~3,5 min d'import), puis rafraîchi chaque nuit à 02:30 UTC.
 2. **Secrets** (`docker secret create <nom> -`) : `tempo_owner_db_password`,
    `tempo_app_db_password`, `tempo_owner_database_url`, `tempo_database_url`,
    `tempo_api_token`, `tempo_ics_url`, et les secrets facultatifs ci-dessus.

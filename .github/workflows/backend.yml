@@ -32,7 +32,3 @@ jobs:
         run: |
           uv export --format requirements-txt --no-hashes --no-emit-project -o "$RUNNER_TEMP/req.txt"
           uvx pip-audit --disable-pip --no-deps -r "$RUNNER_TEMP/req.txt"
-      - name: Dependency vulnerability audit
-        run: |
-          uv export --format requirements-txt --no-hashes --no-emit-project -o "$RUNNER_TEMP/req.txt"
-          uvx pip-audit --disable-pip --no-deps -r "$RUNNER_TEMP/req.txt"
