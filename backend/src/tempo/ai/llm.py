@@ -18,12 +18,29 @@ from typing import Any, Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from tempo.config import LlmSettings
+from tempo.db.store import get_setting
 
 logger = logging.getLogger(__name__)
 
 MAX_INPUT_CHARS = 20_000
+LLM_MODEL_SETTING = "llm_model"
+"""Model chosen in Home Assistant (technical setting); unset = ``TEMPO_LLM_MODEL``."""
+NOT_TEXT_MODELS = (
+    "tts",
+    "image",
+    "embedding",
+    "live",
+    "transcribe",
+    "translate",
+    "audio",
+    "banana",
+    "omni",
+    "-exp-",
+)
+"""Name fragments of Gemini models that are not plain text-generation/tool-use models."""
 VERTEX_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 
 
@@ -111,6 +128,30 @@ def log_usage(purpose: str, model: str, response: Any, started: float) -> None:
     )
 
 
+def selectable_models(names: list[str]) -> list[str]:
+    """Gemini text-generation models (2.x and later) among ``names``, sorted."""
+    keep = {
+        name
+        for name in names
+        if name.startswith("gemini-")
+        and not name.startswith("gemini-1.")
+        and not any(fragment in name for fragment in NOT_TEXT_MODELS)
+    }
+    return sorted(keep)
+
+
+def list_models(client: Any) -> list[str]:
+    """Selectable Gemini models visible to the Vertex AI project."""
+    listed = client.models.list(config={"query_base": True, "page_size": 100})
+    return selectable_models([str(m.name).rsplit("/", 1)[-1] for m in listed])
+
+
+def selected_model(session: Session, default: str) -> str:
+    """The model chosen in Home Assistant, else the deployment default."""
+    value = get_setting(session, LLM_MODEL_SETTING)
+    return value if isinstance(value, str) and value else default
+
+
 def _prompt(text: str, today: date, place_ids: list[str]) -> str | None:
     """The interpretation request (None: text too long, not sent)."""
     if len(text) > MAX_INPUT_CHARS:
@@ -127,7 +168,8 @@ class GeminiInterpreter:
 
     def __init__(self, client: Any, *, model: str, timeout: float = 60.0) -> None:
         self._client = client
-        self._model = model
+        self.model = model
+        """Read from the database each worker round (``selected_model``)."""
         self._timeout = timeout
 
     def extract(self, text: str, today: date, place_ids: list[str]) -> Extraction | None:
@@ -145,7 +187,7 @@ class GeminiInterpreter:
         started = time.monotonic()
         try:
             response = self._client.models.generate_content(
-                model=self._model, contents=prompt, config=config
+                model=self.model, contents=prompt, config=config
             )
         except errors.APIError as exc:
             logger.warning("LLM: API error %s", exc.code)
@@ -153,7 +195,7 @@ class GeminiInterpreter:
         except (httpx.HTTPError, OSError):
             logger.warning("LLM: connection error")
             return None
-        log_usage("interpret", self._model, response, started)
+        log_usage("interpret", self.model, response, started)
         if not response.text:
             logger.warning("LLM: no answer (declined or empty)")
             return None

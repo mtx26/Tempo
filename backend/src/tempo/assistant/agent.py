@@ -17,9 +17,8 @@ from typing import Any, Protocol
 
 import httpx
 
-from tempo.ai.llm import build_gemini_client, log_usage
+from tempo.ai.llm import log_usage, selected_model
 from tempo.assistant.catalog import OpContext, run_operation, tool_definitions
-from tempo.config import LlmSettings
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +96,11 @@ class ModelTurn:
 
 
 class ChatModel(Protocol):
-    """What the tool loop needs from a provider. ``conversation`` is provider-specific state;
-    ``step`` appends the model's answer to it unchanged (thought signatures, tool ids)."""
+    """What the tool loop needs from a provider. ``conversation`` is provider-specific state
+    (including the model name used for the whole request); ``step`` appends the model's answer
+    to it unchanged (thought signatures, tool ids)."""
 
-    def open(self, history: list[dict[str, str]], text: str) -> Any: ...
+    def open(self, history: list[dict[str, str]], text: str, model: str) -> Any: ...
 
     def step(self, conversation: Any, seconds: float) -> ModelTurn: ...
 
@@ -129,19 +129,24 @@ class ToolLoopAssistant:
 
     def __init__(
         self,
-        model: ChatModel,
+        chat: ChatModel,
         *,
+        model: str,
         budget_seconds: float = CONVERSATION_BUDGET_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._model = model
+        self._model = chat
+        self._default_model = model
+        """Deployment default; the model chosen in Home Assistant is read per request."""
         self._budget = budget_seconds
         self._clock = clock
 
     def reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
         local = ctx.now.astimezone(ctx.tz)
         conversation = self._model.open(
-            history, f"[{local.strftime('%A %d/%m/%Y %H:%M')} {ctx.tz}] {text}"
+            history,
+            f"[{local.strftime('%A %d/%m/%Y %H:%M')} {ctx.tz}] {text}",
+            selected_model(ctx.session, self._default_model),
         )
         operations: list[dict[str, Any]] = []
         deadline = self._clock() + self._budget
@@ -201,12 +206,17 @@ GEMINI_BLOCKED = frozenset(
 account of what was already done)."""
 
 
+@dataclass(slots=True)
+class GeminiConversation:
+    contents: list[Any]
+    model: str
+
+
 class GeminiChat:
-    def __init__(self, client: Any, model: str) -> None:
+    def __init__(self, client: Any) -> None:
         from google.genai import types
 
         self._client = client
-        self._model = model
         self._types = types
         # Built once, in catalogue order: every request starts with the same instructions and
         # tools, which Gemini's implicit context cache reuses (measured: most input tokens cached).
@@ -223,19 +233,19 @@ class GeminiChat:
             )
         ]
 
-    def open(self, history: list[dict[str, str]], text: str) -> list[Any]:
+    def open(self, history: list[dict[str, str]], text: str, model: str) -> GeminiConversation:
         types = self._types
-        conversation = [
+        contents = [
             types.Content(
                 role="model" if h["role"] == "assistant" else "user",
                 parts=[types.Part.from_text(text=h["content"])],
             )
             for h in history
         ]
-        conversation.append(types.Content(role="user", parts=[types.Part.from_text(text=text)]))
-        return conversation
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=text)]))
+        return GeminiConversation(contents, model)
 
-    def step(self, conversation: list[Any], seconds: float) -> ModelTurn:
+    def step(self, conversation: GeminiConversation, seconds: float) -> ModelTurn:
         from google.genai import errors
 
         types = self._types
@@ -248,7 +258,7 @@ class GeminiChat:
         started = time.monotonic()
         try:
             response = self._client.models.generate_content(
-                model=self._model, contents=conversation, config=config
+                model=conversation.model, contents=conversation.contents, config=config
             )
         except errors.ClientError as exc:
             if exc.code in (401, 403):
@@ -260,7 +270,7 @@ class GeminiChat:
             raise LLMUnavailableError(f"erreur LLM {exc.code}") from exc
         except (httpx.HTTPError, OSError) as exc:
             raise LLMUnavailableError("LLM injoignable") from exc
-        log_usage("conversation", self._model, response, started)
+        log_usage("conversation", conversation.model, response, started)
         feedback = getattr(response, "prompt_feedback", None)
         if feedback is not None and feedback.block_reason:
             return ModelTurn([], refused=True)
@@ -270,7 +280,7 @@ class GeminiChat:
         reason = str(getattr(candidate.finish_reason, "name", candidate.finish_reason or ""))
         if reason in GEMINI_BLOCKED:
             return ModelTurn([], refused=True)
-        conversation.append(candidate.content)  # unchanged: keeps thought signatures
+        conversation.contents.append(candidate.content)  # unchanged: keeps thought signatures
         parts = candidate.content.parts or []
         calls = [
             ToolCall(
@@ -285,10 +295,10 @@ class GeminiChat:
         return ModelTurn(calls, text, truncated=reason == "MAX_TOKENS")
 
     def add_results(
-        self, conversation: list[Any], results: list[tuple[ToolCall, dict[str, Any]]]
+        self, conversation: GeminiConversation, results: list[tuple[ToolCall, dict[str, Any]]]
     ) -> None:
         types = self._types
-        conversation.append(
+        conversation.contents.append(
             types.Content(
                 role="user",
                 parts=[
@@ -323,6 +333,6 @@ def inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
-def build_assistant(settings: LlmSettings) -> Assistant | None:
-    client = build_gemini_client(settings)
-    return None if client is None else ToolLoopAssistant(GeminiChat(client, settings.llm_model))
+def build_assistant(client: Any | None, default_model: str) -> Assistant | None:
+    """The conversation assistant over a Gemini client (None: no LLM configured)."""
+    return None if client is None else ToolLoopAssistant(GeminiChat(client), model=default_model)

@@ -17,7 +17,7 @@ from pydantic_settings import SettingsConfigDict
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from tempo.ai.llm import Interpreter, build_interpreter
+from tempo.ai.llm import GeminiInterpreter, Interpreter, build_interpreter, selected_model
 from tempo.config import LlmSettings
 from tempo.sync.training_mail import ImapSource, MailSource
 from tempo.transport.motis import MotisClient
@@ -170,6 +170,9 @@ def main() -> None:  # pragma: no cover - process loop, jobs are tested individu
             due_departure = now - last_departure >= timedelta(
                 minutes=settings.departure_interval_minutes
             )
+            if isinstance(interpreter, GeminiInterpreter):
+                with sessions() as session:  # model chosen in Home Assistant, no restart
+                    interpreter.model = selected_model(session, settings.llm_model)
             tick(
                 sessions,
                 http,

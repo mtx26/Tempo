@@ -71,7 +71,7 @@ class ScriptedModels:
 
 def assistant(models: ScriptedModels, **options: Any) -> ToolLoopAssistant:
     client = SimpleNamespace(models=models)
-    return ToolLoopAssistant(GeminiChat(client, "gemini-model-under-test"), **options)
+    return ToolLoopAssistant(GeminiChat(client), model="gemini-model-under-test", **options)
 
 
 def tool_results(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -325,3 +325,16 @@ def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
     assert "manque de temps" in reply.text and "create_task" in reply.text
     assert len(llm.requests) == 1
     assert llm.requests[0]["config"].http_options.timeout == 60_000
+
+
+def test_model_chosen_in_home_assistant_is_used_without_restart(session: Session) -> None:
+    from tempo.ai.llm import LLM_MODEL_SETTING
+    from tempo.db.store import set_setting
+
+    llm = ScriptedModels(response(say("Bonjour.")), response(say("Re.")))
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
+    agent = assistant(llm)
+    agent.reply(ctx, "salut", [])
+    set_setting(session, LLM_MODEL_SETTING, "gemini-other-model")
+    agent.reply(ctx, "salut", [])
+    assert [r["model"] for r in llm.requests] == ["gemini-model-under-test", "gemini-other-model"]
