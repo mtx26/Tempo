@@ -425,3 +425,25 @@ def test_training_preferences_free_day_morning_in_daylight() -> None:
     # Without the preferences the session stays near its preferred start (Friday evening).
     plain = run_planning(week(trainings=[session]), FakeRouting()).trainings[0]
     assert plain.start.date() == at(11, 0).date()
+
+
+def test_no_residence_training_during_a_stay_away_from_the_residences() -> None:
+    from tempo.transport.location import DeclaredStay
+
+    friend = Place("friend", "Chez une amie", Coordinates(50.50, 4.40))
+    stay = DeclaredStay(friend, at(12, 18), at(13, 12))  # Saturday evening -> Sunday noon
+    session = _residence_training(
+        earliest_start=at(12, 0), latest_end=at(13, 23, 59), preferred_start=at(13, 7)
+    )
+    outcome = run_planning(week(commitments=[], trainings=[session], stays=[stay]), FakeRouting())
+    assert outcome.violations == [] and not outcome.unplaced_trainings
+    placed = outcome.trainings[0]
+    assert not Interval(placed.start, placed.start + timedelta(minutes=60)).overlaps(
+        Interval(stay.start, stay.end)
+    )
+    # A stay at a residence (the home itself) does not take the user away from it.
+    at_home = DeclaredStay(HOME, at(12, 18), at(13, 12))
+    kept = run_planning(
+        week(commitments=[], trainings=[session], stays=[at_home]), FakeRouting()
+    ).trainings[0]
+    assert kept.start == at(13, 7)

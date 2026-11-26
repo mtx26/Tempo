@@ -164,14 +164,18 @@ def _place_exists(ctx: OpContext, place_id: str | None) -> None:
 
 @operation(
     "get_context",
-    "Current date/time and timezone, configured home place and phone tracker, planning "
-    "settings, planned locations. Call first when dates or places are involved.",
+    "Current date/time and timezone, residences (equal when they alternate; home_place_id is "
+    "only the fallback without an alternation), phone tracker, planning settings, planned "
+    "locations. Call first when dates or places are involved.",
     NoInput,
     mutates=False,
 )
 def get_context(ctx: OpContext, _: NoInput) -> dict[str, Any]:
     local = ctx.now.astimezone(ctx.tz)
+    alternation = get_setting(ctx.session, ALTERNATION_SETTING)
+    home = get_setting(ctx.session, "home_place_id")
     return {
+        "residences": alternation["residences"] if alternation else [home] if home else [],
         "now": local.isoformat(timespec="minutes"),
         "weekday": local.strftime("%A"),
         "timezone": str(ctx.tz),
@@ -696,7 +700,12 @@ class EventIn(Strict):
     all_day_last_day: date | None = Field(default=None, description="Multi-day all-day event")
     busy: bool = Field(default=True, description="All-day events: False = informative only")
     place_id: str | None = None
-    remote: bool = Field(default=False, description="No travel needed (online, at home)")
+    remote: bool | None = Field(
+        default=None,
+        description="True: Tempo plans no journey for it (online, at home, or the user does not "
+        "want one). Journeys are automatic only for classes: for an event with a place, ask the "
+        "user whether Tempo should plan the round trip, then set it",
+    )
     locked: bool = False
     priority: int = Field(default=2, ge=1, le=3)
     notes: str = Field(default="", max_length=5000)
@@ -752,6 +761,12 @@ def _event_times(ctx: OpContext, body: EventIn) -> tuple[datetime, datetime, int
 )
 def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
     _place_exists(ctx, body.place_id)
+    if body.remote is None and body.place_id and ctx.actor == "assistant":
+        raise OpError(
+            "trajet : demande à l'utilisateur si Tempo doit planifier l'aller et le retour pour "
+            "cet événement (remote)"
+        )
+    remote = bool(body.remote)
     if body.kind == "race" and (body.scheduling != "fixed" or body.all_day):
         raise OpError("une compétition est toujours fixe : demandez son heure de départ")
     begin, finish, duration = _event_times(ctx, body)
@@ -775,7 +790,7 @@ def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
         "notes": body.notes,
         "all_day": body.all_day,
         "busy": body.busy,
-        "remote": body.remote,
+        "remote": remote,
         "priority": body.priority,
     }
     if body.rrule:
@@ -816,7 +831,7 @@ def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
         place_id=body.place_id,
         all_day=body.all_day,
         busy=body.busy,
-        remote=body.remote,
+        remote=remote,
         priority=body.priority,
         locked=body.locked and scheduling == "fixed",
         source="assistant",

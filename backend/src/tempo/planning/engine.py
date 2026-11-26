@@ -494,10 +494,16 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     fixed_busy = [Interval(c.start, c.end) for c in fixed]
     conflicts = find_conflicts(fixed, data.locked_blocks, data.now)
     fixed_located = [LocatedEvent(c.start, c.end, c.place) for c in fixed if c.place is not None]
+    residences = {data.home.id} | (
+        set() if data.alternation is None else {p.id for p in data.alternation.residences}
+    )
+    elsewhere = [s for s in data.stays if s.place.id not in residences]
     # Journeys between fixed commitments first: flexible activities are placed around them.
     fixed_travel = _route_days(fixed_located, data, routing, [], [])
     # Sessions without a place happen at the residence: never during an outing (B08).
     away = _away_spans(fixed_located, fixed_travel, data.timezone)
+    # A declared stay away from the residences (e.g. a night at a friend's) is away too.
+    away += [(s.start, s.end) for s in elsewhere]
 
     # Flexible activities (trainings, personal outings, located task sessions)
     flexible: list[FlexibleActivity] = []

@@ -78,6 +78,7 @@ def _activity_arguments(values: dict[str, Any], tz: Any) -> dict[str, Any]:
         "notes": values["notes"],
         "duration_minutes": values["duration_minutes"],
         "place_id": values["place_id"],
+        "remote": False,  # deterministic path: cannot ask, journeys planned as before
     }
     if values["kind"] == "race":
         return {**common, "scheduling": "fixed", "start": local["earliest_start_at"]}
