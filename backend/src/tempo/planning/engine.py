@@ -248,6 +248,9 @@ class PlanningOutcome:
     """Activities placed outside the preferred activity hours (soft preference not met)."""
     conflicts: list[Conflict] = field(default_factory=list)
     """Overlaps between protected items (``find_conflicts``), reported in every outcome."""
+    questions: list[str] = field(default_factory=list)
+    """Blocking uncertainties to ask the user (e.g. where a class takes place): a valid plan
+    already published is kept until they are answered (``planning.service.replan``)."""
 
 
 def free_minutes(availability: list[Interval], busy: list[Interval], until: datetime) -> int:
@@ -452,11 +455,16 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     warnings: list[str] = []
 
     fixed = [c for c in data.commitments if utc(c.end) > now and utc(c.start) < horizon.end]
+    questions: list[str] = []
     for c in fixed:
         if c.place is None and c.location_text:
             issues.append(
                 f"unknown location '{c.location_text}' for '{c.title}': add a place alias "
                 "(time blocked, travel not planned)"
+            )
+            questions.append(
+                f"Où a lieu « {c.title} » (lieu indiqué : « {c.location_text} ») ? Donnez le "
+                "lieu ou son adresse pour que je planifie le trajet."
             )
     fixed_busy = [Interval(c.start, c.end) for c in fixed]
     conflicts = find_conflicts(fixed, data.locked_blocks, data.now)
@@ -469,6 +477,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     # Flexible activities (trainings, personal outings, located task sessions)
     flexible: list[FlexibleActivity] = []
     by_id = {t.activity_id: t for t in data.trainings}
+    places_ok = {t.activity_id: _at_base(t, away) for t in data.trainings}
     for request in data.trainings:
         if utc(request.latest_end) <= now:
             continue
@@ -494,7 +503,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 sequence_group=request.sequence_group,
                 sequence_index=request.sequence_index,
                 min_days_after_previous=request.min_days_after_previous,
-                allowed=_at_base(request, away),
+                allowed=places_ok[request.activity_id],
                 soft_target=None if request.strict else request.target,
             )
         )
@@ -511,7 +520,9 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
             f"flexible activities: no answer from the solver ({activity_plan.solver_status}): "
             "inconclusive, not a proof of impossibility; the previous plan is kept"
         )
-        return PlanningOutcome(OutcomeStatus.NO_SOLUTION, None, issues=issues, conflicts=conflicts)
+        return PlanningOutcome(
+            OutcomeStatus.NO_SOLUTION, None, issues=issues, conflicts=conflicts, questions=questions
+        )
     for missing in activity_plan.unplaced:
         request = by_id[missing]
         where = " à la résidence" if request.place is None else ""
@@ -565,6 +576,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         hard_deadline_misses=list(result.hard_deadline_misses),
         outside_hours=activity_plan.outside_hours,
         conflicts=conflicts,
+        questions=questions,
     )
     if result.status is PlanStatus.NO_SOLUTION:
         issues.append(
@@ -584,7 +596,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
             end=p.end,
             earliest_start=by_id[p.activity_id].earliest_start,
             latest_end=by_id[p.activity_id].latest_end,
-            allowed=by_id[p.activity_id].allowed,
+            allowed=places_ok[p.activity_id],  # the same rule, checked independently
             strict_target=by_id[p.activity_id].target if by_id[p.activity_id].strict else None,
             sequence_group=by_id[p.activity_id].sequence_group,
             sequence_index=by_id[p.activity_id].sequence_index,

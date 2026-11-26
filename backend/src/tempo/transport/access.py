@@ -33,6 +33,17 @@ class Access:
     point: Place
     """Where public transport is reached from ``place``."""
     duration: timedelta
+    start: datetime | None = None
+    end: datetime | None = None
+    """Temporary access (stated for a period): applies to journeys at ``[start, end)`` and
+    wins over the default access of the same place; both None = the persistent default."""
+
+    @property
+    def temporary(self) -> bool:
+        return self.start is not None
+
+    def applies(self, at: datetime) -> bool:
+        return self.start is None or (self.start <= at < (self.end or self.start))
 
 
 def _leg(origin: str, destination: str, start: datetime, end: datetime) -> Leg:
@@ -53,16 +64,18 @@ class AccessRouting:
         self._accesses = accesses
         self._max = max_journey
 
-    def _access_at(self, point: Coordinates) -> Access | None:
-        # min() keeps the first of equally near accesses: temporary ones are listed first.
-        nearest = min(
-            self._accesses,
-            key=lambda a: a.place.coordinates.distance_m(point),
+    def _access_at(self, point: Coordinates, at: datetime) -> Access | None:
+        """The access of the place at ``point`` in force at ``at``: a temporary one first."""
+        near = [
+            a
+            for a in self._accesses
+            if a.applies(at) and a.place.coordinates.distance_m(point) <= SNAP_RADIUS_M
+        ]
+        return min(
+            near,
+            key=lambda a: (not a.temporary, a.place.coordinates.distance_m(point)),
             default=None,
         )
-        if nearest is None or nearest.place.coordinates.distance_m(point) > SNAP_RADIUS_M:
-            return None
-        return nearest
 
     def plan(
         self,
@@ -72,7 +85,7 @@ class AccessRouting:
         *,
         arrive_by: bool,
     ) -> list[Journey]:
-        start, end = self._access_at(origin), self._access_at(destination)
+        start, end = self._access_at(origin, time), self._access_at(destination, time)
         if start is not None and end is not None and start.place == end.place:
             start = end = None  # a trip around one place never goes through its access point
         query_time = time

@@ -10,6 +10,7 @@ callers fall back to the deterministic parser: essential functions never depend 
 
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -154,6 +155,7 @@ class ToolLoopAssistant:
 
     def reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
         local = ctx.now.astimezone(ctx.tz)
+        ctx.user_said = " ".join([h["content"] for h in history if h["role"] == "user"] + [text])
         conversation = self._model.open(
             history,
             f"[{local.strftime('%A %d/%m/%Y %H:%M')} {ctx.tz}] {text}",
@@ -185,7 +187,7 @@ class ToolLoopAssistant:
                 raise LLMUnavailableError("demande refusée par le modèle")
             if not turn.calls:
                 answer = turn.text + (" (réponse interrompue)" if turn.truncated else "")
-                return AgentReply(answer.strip() or "C'est fait.", operations)
+                return AgentReply(_honest(answer.strip() or "C'est fait.", ctx), operations)
             results = []
             for call in turn.calls:
                 outcome = run_operation(ctx, call.name, call.arguments)
@@ -197,6 +199,20 @@ class ToolLoopAssistant:
         return AgentReply(
             _partial("Demande trop longue à traiter en une fois", operations), operations
         )
+
+
+CHANGE_CLAIM = re.compile(
+    r"\b(c'est noté|c'est enregistré|j'ai (bien )?(enregistré|noté|mis à jour|configuré|ajouté|"
+    r"planifié|modifié|supprimé|créé)|(est|sont) (bien )?(enregistrée?s?|modifiée?s?))",
+    re.IGNORECASE,
+)
+
+
+def _honest(answer: str, ctx: OpContext) -> str:
+    """Never let the model claim a change that did not happen (no successful change here)."""
+    if not ctx.changed and CHANGE_CLAIM.search(answer):
+        return answer + " (Attention : rien n'a été enregistré pour cette demande.)"
+    return answer
 
 
 def _partial(reason: str, operations: list[dict[str, Any]]) -> str:

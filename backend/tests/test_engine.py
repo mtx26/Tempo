@@ -371,3 +371,32 @@ def test_training_without_any_slot_at_the_residence_is_unplaced_not_forced() -> 
     assert outcome.unplaced_trainings == ["run"]
     assert outcome.status is OutcomeStatus.PARTIAL
     assert any("aucun créneau libre à la résidence" in i for i in outcome.issues)
+
+
+def test_residence_training_respects_flexible_outings_and_their_journeys() -> None:
+    club_session = TrainingRequest(
+        "club",
+        "Fractionné",
+        timedelta(minutes=60),
+        at(8, 0),
+        at(8, 23, 59),
+        place=CLUB,
+        preferred_start=at(8, 18),
+    )
+    home_run = _residence_training(preferred_start=at(8, 18))
+    outcome = run_planning(week(commitments=[], trainings=[club_session, home_run]), FakeRouting())
+    assert outcome.violations == [] and not outcome.unplaced_trainings
+    placed = {t.activity_id: t for t in outcome.trainings}
+    run = placed["run"]
+    run_span = Interval(run.start, run.start + timedelta(minutes=60))
+    assert not run_span.overlaps(placed["club"].reserved)  # club session + its journeys
+    for block in outcome.travel:
+        assert not run_span.overlaps(Interval(block.start, block.end))
+
+
+def test_unknown_class_location_is_a_question() -> None:
+    unknown = Commitment(
+        "c", "Analyse", at(8, 10), at(8, 12), CommitmentKind.CLASS, None, location_text="NiX.1"
+    )
+    outcome = run_planning(week(commitments=[unknown]), FakeRouting())
+    assert outcome.questions and "NiX.1" in outcome.questions[0]

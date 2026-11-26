@@ -136,6 +136,8 @@ def place_directory(session: Session) -> PlaceDirectory:
 
 
 ALTERNATION_SETTING = "residence_alternation"
+ACCESS_OVERRIDES_SETTING = "access_overrides"
+"""Temporary transport access points for a period (never the persistent default)."""
 MAX_JOURNEY_SETTING = "max_journey_minutes"
 
 
@@ -186,6 +188,18 @@ def access_routing(
     ``temporary`` accesses (stated for one journey only, never saved) take precedence."""
     directory = place_directory(session)
     accesses = list(temporary or [])
+    for item in get_setting(session, ACCESS_OVERRIDES_SETTING, []) or []:
+        place, point = directory.get(item["place_id"]), directory.get(item["access_place_id"])
+        if place is not None and point is not None:
+            accesses.append(
+                Access(
+                    place,
+                    point,
+                    timedelta(minutes=int(item["access_minutes"])),
+                    datetime.fromisoformat(item["start"]),
+                    datetime.fromisoformat(item["end"]),
+                )
+            )
     for row in session.scalars(select(PlaceRow).where(PlaceRow.access_place_id.is_not(None))):
         place, point = directory.get(row.id), directory.get(row.access_place_id or "")
         if place is not None and point is not None and row.access_minutes:

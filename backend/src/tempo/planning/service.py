@@ -543,6 +543,9 @@ def _publish_conflicts(session: Session, conflicts: list[Conflict], tz: ZoneInfo
             )
 
 
+UNKNOWN_LOCATION = "unknown location '"
+
+
 def _notify_issues(session: Session, issues: list[str], now: datetime, tz: ZoneInfo) -> None:
     """One notification per distinct issue; routing outages are grouped into one notice per
     day (an outage touches every journey of every re-plan: never a flood)."""
@@ -559,7 +562,8 @@ def _notify_issues(session: Session, issues: list[str], now: datetime, tz: ZoneI
             f"routing_outage:{day}",
         )
     for issue in issues:
-        if issue not in outage:
+        # An unknown location is asked as a question (``replan``): no second notice.
+        if issue not in outage and not issue.startswith(UNKNOWN_LOCATION):
             notify(
                 session, "plan_issue", "Tempo : point à vérifier", issue, f"issue:{digest(issue)}"
             )
@@ -733,6 +737,25 @@ def replan(
         "conflicts": [c.describe() for c in outcome.conflicts],
     }
     usable = outcome.status in (OutcomeStatus.COMPLETE, OutcomeStatus.PARTIAL)
+    previous = active_version(session)
+    keep_previous = usable and bool(outcome.questions) and previous is not None
+    for question in outcome.questions:  # blocking uncertainty: asked, never assumed
+        notify(
+            session,
+            "question",
+            "Tempo a besoin d'une précision",
+            question
+            + (
+                " En attendant, le planning actuel est conservé."
+                if keep_previous
+                else " En attendant, ce trajet n'est pas planifié."
+            ),
+            f"question:{digest(question)}",
+        )
+    if keep_previous:  # never replace a valid plan with an incomplete one
+        summary["kept_previous_plan"] = True
+        usable = False
+    summary["questions"] = outcome.questions
     version = ScheduleVersion(
         state="active" if usable else "rejected",
         solver_status=(result.solver_status if result else "")[:20],
@@ -771,7 +794,7 @@ def replan(
                 .where(ActivityRow.id == uuid.UUID(missing))
                 .values(planned_start_at=None)
             )
-    else:
+    elif not summary.get("kept_previous_plan"):
         reason_text = "; ".join(outcome.violations) or (
             "calcul inconclusif dans le temps imparti (ce n'est pas une impossibilité)"
         )

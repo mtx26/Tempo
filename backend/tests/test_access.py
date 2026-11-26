@@ -142,3 +142,14 @@ def test_exceptions_win_without_shifting_the_recurrence() -> None:
 def test_alternation_needs_residences() -> None:
     with pytest.raises(ValueError, match="residences"):
         Alternation((), date(2026, 11, 27), time(12, 0), 7, TZ)
+
+
+def test_temporary_access_applies_in_its_period_and_wins_over_the_default() -> None:
+    station = Place("station", "Gare", Coordinates(50.25, 4.27))
+    week = Access(HOUSE, station, timedelta(minutes=15), NINE, NINE + timedelta(days=7))
+    inner = Recorder()
+    adapter = AccessRouting(inner, [Access(HOUSE, STOP, timedelta(minutes=12)), week])
+    adapter.plan(HOUSE.coordinates, CAMPUS.coordinates, NINE + timedelta(days=1), arrive_by=False)
+    adapter.plan(HOUSE.coordinates, CAMPUS.coordinates, NINE + timedelta(days=8), arrive_by=False)
+    assert inner.calls[0]["origin"] == station.coordinates  # inside the period
+    assert inner.calls[1]["origin"] == STOP.coordinates  # after it: the default again

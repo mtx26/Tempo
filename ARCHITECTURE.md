@@ -230,7 +230,7 @@ Contrat (implémenté) :
 | Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_location`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
 | Événements | `create_event` (fixe/flexible, journée entière occupée/informative, plusieurs jours, RRULE, distanciel), `update_event` (portée occurrence / suivantes / série), `cancel_event`, `set_lock`, `report_activity`, `confirm_activity` |
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
-| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `clear_residence_alternation`, `get_residence_schedule`, `find_address` |
+| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `clear_residence_alternation`, `get_residence_schedule`, `find_address`, `set_temporary_access`, `clear_temporary_access` |
 | Rappels et validation | `create_reminder`, `cancel_reminder`, `decide_proposal`, `acknowledge_notification` |
 | Planning et transport | `plan_now` (local / global, simulation `dry_run`), `propose_alternatives`, `search_journey` |
 
@@ -497,16 +497,36 @@ Résidences multiples (générique, rien de personnel dans le code) :
   chez papa » ⇒ `set_residence_alternation`), la redéclarer est un changement définitif,
   `get_residence_schedule` la montre avec ses exceptions. Les **lieux prévus**
   (`set_planned_location`) sont des exceptions temporaires : ils priment sans décaler la
-  récurrence. Chaque déclaration replanifie (plan local, stabilité préservée).
+  récurrence ; une nouvelle exception (ou `clear_planned_location`) ne retire que la période
+  qu'elle recouvre, les parties non concernées des exceptions existantes sont conservées. Chaque déclaration replanifie (plan local, stabilité préservée).
 - **Point d'accès aux transports** par lieu, un seul par défaut et persistant
   (`access_place_id` + `access_minutes`, les deux ou aucun, contrainte en base ; durée donnée
   par l'utilisateur, jamais devinée). Un point d'accès différent pour **un seul** trajet se
   donne en conversation (`search_journey` : `access_place_id`, `access_minutes`,
-  `access_side`) et n'est jamais enregistré. Un seul
+  `access_side`) et n'est jamais enregistré ; pour une **période** (« cette semaine on me
+  dépose à la gare »), `set_temporary_access` / `clear_temporary_access` (réglage JSON
+  `access_overrides`, pas de table) s'appliquent aussi aux trajets planifiés et aux départs de
+  cette période, prioritaires sur l'accès par défaut qui reste inchangé. Un seul
   adaptateur de routage (`transport/access.py`, `db.store.access_routing`) interroge MOTIS
   depuis/vers le point d'accès et ajoute une étape `ACCESS` de durée fixe ; il sert à la
   planification, aux trajets du jour, au contrôle de départ (GPS à moins de 300 m du lieu
   compris) et aux recherches en conversation.
+- **Entraînements à la résidence** : les plages « à la résidence » (hors sorties vers les
+  engagements fixes, retours compris) servent au placement ET au validateur indépendant, qui
+  contrôle aussi tout le reste du plan (engagements, trajets de toutes les activités, autres
+  activités) ; un lieu d'entraînement explicitement demandé reste permis.
+- **Questions bloquantes** : un engagement au lieu inconnu (texte iCal sans alias) est une
+  question (« Où a lieu… ? ») notifiée dans Home Assistant ; tant qu'elle n'a pas de réponse,
+  un plan valide déjà publié est conservé (le nouveau, incomplet, est enregistré « rejeté »
+  avec `kept_previous_plan`) ; sans plan antérieur, le plan partiel est publié et le trajet
+  concerné n'est pas planifié.
+- **Valeurs dites par l'utilisateur** (garde-fou indépendant du modèle) : en conversation,
+  une durée d'accès ou une heure de changement d'alternance n'est acceptée que si
+  l'utilisateur l'a réellement dite (chiffres ou formes courantes : « dix minutes », « un quart
+  d'heure », « 18h », « midi ») ; sinon l'opération est refusée (« demande-la »). Une réponse
+  du modèle annonçant une modification alors qu'aucune n'a réussi est complétée par
+  « rien n'a été enregistré ». Vérifié avec le vrai Gemini : sans ces garde-fous, le modèle
+  léger inventait 18:00 et 15 min et affirmait un enregistrement inexistant.
 - **Itinéraires irréalistes** rejetés : durée porte-à-porte maximale `max_journey_minutes`
   (180 par défaut, réglable en conversation), transmise à MOTIS (`maxTravelTime`) et
   revérifiée accès compris. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,
