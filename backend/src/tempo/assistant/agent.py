@@ -10,7 +10,6 @@ callers fall back to the deterministic parser: essential functions never depend 
 
 import json
 import logging
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -37,16 +36,19 @@ par les outils fournis, qui appliquent les règles métier.
 
 Règles :
 - Réponds en français, brièvement, comme à l'oral. Pas de Markdown complexe.
-- N'invente jamais un horaire, une durée, un lieu, des coordonnées, un trajet, une \
-disponibilité, une préférence, une contrainte ou un résultat. Si une information indispensable \
-manque, est ambiguë ou contredit une information déjà confirmée, pose UNE question naturelle et \
-ne modifie rien tant qu'elle bloque (le planning valide actuel reste en place) ; si tu as assez \
-d'informations, agis sans question inutile.
-- Réutilise ce qui est déjà confirmé (list_places, get_rules, get_residence_schedule, \
-get_context) au lieu de le redemander. Distingue consigne ponctuelle (lieu prévu, point \
-d'accès pour un seul trajet via search_journey) et réglage permanent (alternance des \
-résidences, point d'accès par défaut d'un lieu, préférences) ; si la portée n'est pas claire, \
-demande-la.
+- Clarification, avant toute modification : chaque valeur que tu passes vient de \
+l'utilisateur (message actuel ou conversation), d'un résultat d'outil, ou est omise pour \
+garder la valeur par défaut documentée du champ. N'invente jamais un horaire, une durée, un \
+lieu, des coordonnées, un trajet, une disponibilité, une préférence, une contrainte ou un \
+résultat. Si une valeur nécessaire manque, ou si la demande admet plusieurs lectures qui \
+changent ce qui serait modifié (ponctuel ou permanent, période, lieu, élément visé), \
+n'appelle AUCUN outil de modification, même réversible : pose UNE question courte. À sa \
+réponse, combine-la avec la demande en attente et exécute. Ne demande pas ce qui est déjà \
+dit ou confirmé (list_places, get_rules, get_residence_schedule, get_context) ni ce qui ne \
+change pas le résultat. Un refus d'outil n'est jamais contourné par un autre appel.
+- Distingue consigne ponctuelle (lieu prévu, point d'accès pour une période ou un seul \
+trajet) et réglage permanent (alternance des résidences, point d'accès par défaut d'un lieu, \
+préférences).
 - Une adresse dite par l'utilisateur : find_address, relis les correspondances, puis \
 upsert_place seulement avec celle qu'il confirme.
 - Appelle get_context pour la date et l'heure. Interprète les dates relatives dans le fuseau \
@@ -155,7 +157,6 @@ class ToolLoopAssistant:
 
     def reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
         local = ctx.now.astimezone(ctx.tz)
-        ctx.user_said = " ".join([h["content"] for h in history if h["role"] == "user"] + [text])
         conversation = self._model.open(
             history,
             f"[{local.strftime('%A %d/%m/%Y %H:%M')} {ctx.tz}] {text}",
@@ -187,7 +188,7 @@ class ToolLoopAssistant:
                 raise LLMUnavailableError("demande refusée par le modèle")
             if not turn.calls:
                 answer = turn.text + (" (réponse interrompue)" if turn.truncated else "")
-                return AgentReply(_honest(answer.strip() or "C'est fait.", ctx), operations)
+                return AgentReply(answer.strip() or "C'est fait.", operations)
             results = []
             for call in turn.calls:
                 outcome = run_operation(ctx, call.name, call.arguments)
@@ -199,20 +200,6 @@ class ToolLoopAssistant:
         return AgentReply(
             _partial("Demande trop longue à traiter en une fois", operations), operations
         )
-
-
-CHANGE_CLAIM = re.compile(
-    r"\b(c'est noté|c'est enregistré|j'ai (bien )?(enregistré|noté|mis à jour|configuré|ajouté|"
-    r"planifié|modifié|supprimé|créé)|(est|sont) (bien )?(enregistrée?s?|modifiée?s?))",
-    re.IGNORECASE,
-)
-
-
-def _honest(answer: str, ctx: OpContext) -> str:
-    """Never let the model claim a change that did not happen (no successful change here)."""
-    if not ctx.changed and CHANGE_CLAIM.search(answer):
-        return answer + " (Attention : rien n'a été enregistré pour cette demande.)"
-    return answer
 
 
 def _partial(reason: str, operations: list[dict[str, Any]]) -> str:
@@ -280,6 +267,8 @@ class GeminiChat:
             system_instruction=SYSTEM,
             tools=self._tools,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            # Enough reasoning to notice a missing or ambiguous value before acting.
+            thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MEDIUM),
             http_options=types.HttpOptions(timeout=int(seconds * 1000)),
         )
         started = time.monotonic()

@@ -42,7 +42,7 @@ def test_access_point_needs_a_known_place_and_a_stated_duration(session: Session
     assert not missing["ok"] and "inconnu" in missing["error"]
     place(session, "stop_b", 50.32, 4.18)
     no_duration = place(session, "house_b", 50.30, 4.20, access_place_id="stop_b")
-    assert not no_duration["ok"] and "jamais devinée" in no_duration["error"]
+    assert not no_duration["ok"] and "durée d'accès inconnue" in no_duration["error"]
     itself = place(session, "house_b", 50.30, 4.20, access_place_id="house_b", access_minutes=5)
     assert not itself["ok"]
     ok = place(session, "house_b", 50.30, 4.20, access_place_id="stop_b", access_minutes=12)
@@ -299,33 +299,3 @@ def test_blocking_question_keeps_the_valid_plan(session: Session) -> None:
     assert questions and "NiInconnu.42" in questions[0].message
     kinds = {n.kind for n in session.scalars(select(NotificationRow))}
     assert "plan_rejected" not in kinds
-
-
-def test_values_that_must_come_from_the_user_are_checked_in_conversation(
-    session: Session,
-) -> None:
-    seed(session)
-    place(session, "stop_a", 50.66, 4.60)
-
-    def said(text: str) -> OpContext:
-        ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
-        ctx.user_said = text
-        return ctx
-
-    access = {
-        "place_id": "home",
-        "name": "Kot",
-        "latitude": 50.668,
-        "longitude": 4.612,
-        "access_place_id": "stop_a",
-        "access_minutes": 15,
-    }
-    invented = run_operation(said("on me dépose à l'arrêt"), "upsert_place", access)
-    assert not invented["ok"] and "jamais devinée" in invented["error"]
-    assert run_operation(said("en un quart d'heure"), "upsert_place", access)["ok"]
-    alternation = {"residences": ["home"], "from_date": "2026-12-04", "switch_at": "18:00"}
-    guessed = run_operation(said("chaque vendredi soir"), "set_residence_alternation", alternation)
-    assert not guessed["ok"] and "valeur par défaut" in guessed["error"]
-    assert run_operation(said("vendredi à 18h"), "set_residence_alternation", alternation)["ok"]
-    default = {**alternation, "switch_at": "12:00"}
-    assert run_operation(said("chaque vendredi soir"), "set_residence_alternation", default)["ok"]

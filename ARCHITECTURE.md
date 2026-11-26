@@ -520,13 +520,18 @@ Résidences multiples (générique, rien de personnel dans le code) :
   un plan valide déjà publié est conservé (le nouveau, incomplet, est enregistré « rejeté »
   avec `kept_previous_plan`) ; sans plan antérieur, le plan partiel est publié et le trajet
   concerné n'est pas planifié.
-- **Valeurs dites par l'utilisateur** (garde-fou indépendant du modèle) : en conversation,
-  une durée d'accès ou une heure de changement d'alternance n'est acceptée que si
-  l'utilisateur l'a réellement dite (chiffres ou formes courantes : « dix minutes », « un quart
-  d'heure », « 18h », « midi ») ; sinon l'opération est refusée (« demande-la »). Une réponse
-  du modèle annonçant une modification alors qu'aucune n'a réussi est complétée par
-  « rien n'a été enregistré ». Vérifié avec le vrai Gemini : sans ces garde-fous, le modèle
-  léger inventait 18:00 et 15 min et affirmait un enregistrement inexistant.
+- **Clarification** (dans la conversation, sans couche supplémentaire) : une seule règle de
+  la consigne système de l'agent : chaque valeur passée à une modification vient de
+  l'utilisateur, d'un résultat d'outil, ou est omise pour garder le défaut documenté du champ ;
+  si une valeur manque ou si plusieurs lectures changent ce qui serait modifié (ponctuel ou
+  permanent, période, lieu, élément), aucune modification, même réversible : une question, puis
+  exécution avec la réponse combinée à la demande en attente. Les champs obligatoires des
+  opérations (ex. durée d'accès) restent refusés s'ils manquent. Gemini est appelé avec un
+  raisonnement « medium » : vérifié avec le vrai Gemini (`gemini-3.5-flash-lite` et
+  `gemini-3.5-flash`), il ne pose plus 18:00 pour « vendredi soir » et demande « Je vais chez
+  papa » (loger ou trajet ? dès maintenant ?) au lieu de créer une exception. Limite connue :
+  le modèle léger interprète parfois une réponse groupée (« juste ce week-end ») pour deux
+  questions à la fois.
 - **Itinéraires irréalistes** rejetés : durée porte-à-porte maximale `max_journey_minutes`
   (180 par défaut, réglable en conversation), transmise à MOTIS (`maxTravelTime`) et
   revérifiée accès compris. Toutes les activités situées (cours, rendez-vous, entraînements, compétitions,

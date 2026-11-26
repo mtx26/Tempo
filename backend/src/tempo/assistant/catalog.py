@@ -10,7 +10,6 @@ Times: an input datetime without offset is local time in the configured timezone
 (Europe/Brussels). Results always carry ISO 8601 with offset.
 """
 
-import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -74,7 +73,6 @@ from tempo.planning.proposals import decide, proposal_out
 from tempo.planning.service import PlanningNotConfiguredError, lock_block, release_block, replan
 from tempo.planning.views import schedule_items, summary
 from tempo.scheduler.model import Preferences
-from tempo.text import plain
 from tempo.transport.access import Access
 from tempo.transport.itinerary import Objective, TripQuery, find_trips
 from tempo.transport.location import (
@@ -99,61 +97,10 @@ class OpContext:
     routing: RoutingProvider | None = None
     changed: list[str] = field(default_factory=list)
     """Mutating operations run in this context (for the re-plan request and the audit)."""
-    user_said: str | None = None
-    """What the user said in this conversation (current request and recent turns). Values
-    that must come from the user (durations, times) are checked against it; None outside a
-    conversation (direct API calls), where nothing is checked."""
 
 
 class OpError(Exception):
     """Safe, user-facing error of an operation (validation or business rule)."""
-
-
-SPOKEN_MINUTES = {
-    "cinq minutes": 5,
-    "dix minutes": 10,
-    "quart d'heure": 15,
-    "quinze minutes": 15,
-    "vingt minutes": 20,
-    "vingt-cinq minutes": 25,
-    "demi-heure": 30,
-    "trente minutes": 30,
-    "trois quarts d'heure": 45,
-    "une heure": 60,
-}
-
-
-def _require_stated_minutes(ctx: "OpContext", minutes: int, what: str) -> None:
-    """A duration that must come from the user is accepted only if the user said it."""
-    if ctx.user_said is None:
-        return
-    said = plain(ctx.user_said)
-    if re.search(rf"(?<![\d]){minutes}(?![\d])", said) or any(
-        value == minutes and plain(words) in said for words, value in SPOKEN_MINUTES.items()
-    ):
-        return
-    raise OpError(
-        f"{what} : {minutes} min n'a pas été dit par l'utilisateur ; demande-lui la durée "
-        "(jamais devinée)"
-    )
-
-
-def _require_stated_time(ctx: "OpContext", hhmm: str, what: str) -> None:
-    """A clock time that must come from the user is accepted only if the user said it."""
-    if ctx.user_said is None:
-        return
-    hour, minute = (int(x) for x in hhmm.split(":"))
-    said = plain(ctx.user_said)
-    forms = [rf"(?<!\d){hour}\s*h\s*{minute:02d}", rf"(?<!\d){hour:02d}:{minute:02d}"]
-    if minute == 0:
-        forms.append(rf"(?<!\d){hour}\s*h(?!\s*\d)")
-    if (hour, minute) == (12, 0):
-        forms.append(r"\bmidi\b")
-    if not any(re.search(form, said) for form in forms):
-        raise OpError(
-            f"{what} : {hhmm} n'a pas été dit par l'utilisateur ; garde la valeur par défaut "
-            "ou demande l'heure (jamais devinée)"
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1396,12 +1343,10 @@ def upsert_place(ctx: OpContext, body: PlaceIn) -> dict[str, Any]:
                 "durée d'accès inconnue : demandez combien de minutes il faut pour rejoindre "
                 "le point d'accès (jamais devinée)"
             )
-        _require_stated_minutes(ctx, body.access_minutes, "durée d'accès")
         row.access_place_id, row.access_minutes = body.access_place_id, body.access_minutes
     elif body.access_minutes is not None:
         if row.access_place_id is None:
             raise OpError("durée d'accès donnée sans point d'accès")
-        _require_stated_minutes(ctx, body.access_minutes, "durée d'accès")
         row.access_minutes = body.access_minutes
     ctx.session.add(row)
     ctx.session.flush()
@@ -1867,7 +1812,6 @@ def set_temporary_access(ctx: OpContext, body: TemporaryAccessIn) -> dict[str, A
     _place_exists(ctx, body.access_place_id)
     if body.place_id == body.access_place_id:
         raise OpError("le point d'accès doit être un autre lieu")
-    _require_stated_minutes(ctx, body.access_minutes, "durée d'accès temporaire")
     start, end = _local(body.start, ctx.tz), _local(body.end, ctx.tz)
     if end <= start or end - start > timedelta(days=60):
         raise OpError("période invalide (au plus 60 jours)")
@@ -1920,7 +1864,8 @@ class ResidenceAlternationIn(Strict):
         default="12:00",
         pattern=r"^\d{2}:\d{2}$",
         description="Local time of every change: before it the previous residence (morning), "
-        "from it the next one (evening)",
+        "from it the next one (evening). Omit unless the user gave an explicit clock time "
+        "('Friday evening' = the default)",
     )
     period_days: int = Field(default=7, ge=1, le=28, description="7 = one week each")
 
@@ -1975,8 +1920,6 @@ def set_residence_alternation(ctx: OpContext, body: ResidenceAlternationIn) -> d
         time.fromisoformat(body.switch_at)
     except ValueError as exc:
         raise OpError(f"heure de changement invalide : {body.switch_at}") from exc
-    if body.switch_at != "12:00":  # 12:00 = default (morning: previous, evening: next)
-        _require_stated_time(ctx, body.switch_at, "heure de changement")
     set_setting(
         ctx.session,
         ALTERNATION_SETTING,
@@ -2425,7 +2368,6 @@ def _temporary_access(
         raise OpError(f"point d'accès inconnu : {body.access_place_id} (créez le lieu d'abord)")
     if body.access_minutes is None:
         raise OpError("durée pour rejoindre ce point d'accès inconnue : demandez-la")
-    _require_stated_minutes(ctx, body.access_minutes, "durée d'accès pour ce trajet")
     side = origin if body.access_side == "origin" else destination
     here = Place(f"journey_{body.access_side}", side.name, side.coordinates)
     return [Access(here, point, timedelta(minutes=body.access_minutes))]

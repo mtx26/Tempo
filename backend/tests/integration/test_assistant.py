@@ -338,13 +338,3 @@ def test_model_chosen_in_home_assistant_is_used_without_restart(session: Session
     set_setting(session, LLM_MODEL_SETTING, "gemini-other-model")
     agent.reply(ctx, "salut", [])
     assert [r["model"] for r in llm.requests] == ["gemini-model-under-test", "gemini-other-model"]
-
-
-def test_a_claimed_change_without_any_change_is_flagged(session: Session) -> None:
-    llm = ScriptedModels(response(say("C'est noté, j'ai enregistré 10 minutes.")))
-    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
-    reply = assistant(llm).reply(ctx, "10 minutes", [])
-    assert "rien n'a été enregistré" in reply.text
-    assert ctx.user_said == "10 minutes"
-    answer = ScriptedModels(response(say("Tu as deux tâches.")))
-    assert "rien n'a" not in assistant(answer).reply(ctx, "mes tâches ?", []).text
