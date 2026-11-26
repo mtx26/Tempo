@@ -20,7 +20,7 @@ import itertools
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from tempo.scheduler.model import PlannedBlock, PlanningProblem, PlanResult, PlanStatus
@@ -224,4 +224,82 @@ def validate_schedule(
                 trip.interval, Interval(other.start, other.end)
             ):
                 found.append(f"journey {trip.label} overlaps {other.title}")
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class Stop:
+    """Where the user must be: a located commitment or activity of the final plan."""
+
+    label: str
+    place: str
+    interval: Interval
+    tolerance: timedelta = timedelta(0)
+    """Classes only: how much a journey may overlap its start or end (never an exam)."""
+
+
+@dataclass(frozen=True, slots=True)
+class Leg:
+    """A journey of the final plan, with its places."""
+
+    label: str
+    origin: str
+    destination: str
+    interval: Interval
+    feasible: bool = True
+    """False: impossible or unknown (a reserved gap, reported elsewhere): it still moves the
+    user from origin to destination, but is not a journey to check."""
+
+
+def validate_journeys(legs: Sequence[Leg], stops: Sequence[Stop], timezone: ZoneInfo) -> list[str]:
+    """The journeys of the final plan are physically possible: no two at once, each leaves
+    from where the user is (previous stop or arrival) and leads to the next stop, and a
+    journey overlaps a class only within its attendance tolerance."""
+    found: list[str] = []
+    ordered = sorted((g for g in legs if g.feasible), key=lambda leg: utc(leg.interval.start))
+    for first, second in itertools.pairwise(ordered):
+        if utc(second.interval.start) < utc(first.interval.end):
+            found.append(f"journeys overlap: {first.label} / {second.label}")
+    for leg in ordered:
+        for stop in stops:
+            span, trip = stop.interval, leg.interval
+            if not _overlap(span, trip):
+                continue
+            late = utc(trip.end) - utc(span.start) if utc(trip.start) <= utc(span.start) else None
+            early = utc(span.end) - utc(trip.start) if utc(trip.end) >= utc(span.end) else None
+            within = (late is not None and late <= stop.tolerance) or (
+                early is not None and early <= stop.tolerance
+            )
+            if not within:
+                found.append(f"journey {leg.label} overlaps {stop.label}")
+    # Two commitments at once (different places) are a source conflict, reported for
+    # arbitration: where the user is then is unknown, never a journey error.
+    conflicted = {
+        id(a)
+        for a in stops
+        for b in stops
+        if a is not b and a.place != b.place and _overlap(a.interval, b.interval)
+    }
+    items: list[tuple[datetime, datetime, str, str | None, str, bool]] = [
+        (s.interval.start, s.interval.end, s.place, None, s.label, id(s) in conflicted)
+        for s in stops
+    ] + [(g.interval.start, g.interval.end, g.origin, g.destination, g.label, False) for g in legs]
+    items.sort(key=lambda item: (utc(item[0]), item[3] is None))
+    where: str | None = None
+    day = None
+    for start, _end, place, destination, label, conflict in items:
+        local_day = start.astimezone(timezone).date()
+        if local_day != day:  # a new day starts from its base (checked by the routing)
+            day, where = local_day, None
+        if destination is None:  # a stop
+            if conflict:
+                where = None
+                continue
+            if where is not None and where != place:
+                found.append(f"{label} at {place} but the user is at {where}")
+            where = place
+        else:  # a journey
+            if where is not None and where != place:
+                found.append(f"journey {label} leaves {place} but the user is at {where}")
+            where = destination
     return found

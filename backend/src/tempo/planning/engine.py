@@ -46,7 +46,16 @@ from tempo.scheduler.model import (
     TrainingPreferences,
 )
 from tempo.scheduler.solver import solve
-from tempo.scheduler.validate import Occupied, PlacedSession, Trip, validate_plan, validate_schedule
+from tempo.scheduler.validate import (
+    Leg,
+    Occupied,
+    PlacedSession,
+    Stop,
+    Trip,
+    validate_journeys,
+    validate_plan,
+    validate_schedule,
+)
 from tempo.timeutil import Interval, subtract, utc
 from tempo.transport.itinerary import CachedRouting, TripQuery, find_trips
 from tempo.transport.location import Alternation, DeclaredStay, LocatedEvent, base_at
@@ -359,9 +368,12 @@ class Outings:
 def _stay_between(
     stays: list[DeclaredStay], previous: LocatedEvent, following: LocatedEvent
 ) -> Place | None:
-    """An explicit planned location between two events: the user goes there in between."""
+    """An explicit intermediate presence: a planned location lying WITHIN the gap between two
+    events (« entre midi et 14 h je rentre ») sends the user there in between. A planned
+    location covering the events is only the base of the day (temporary base): it never
+    implies a return between activities."""
     for stay in stays:
-        if utc(stay.start) < utc(following.start) and utc(stay.end) > utc(previous.end):
+        if utc(stay.start) >= utc(previous.end) and utc(stay.end) <= utc(following.start):
             return stay.place
     return None
 
@@ -471,14 +483,16 @@ def route_outings(
             )
         )
     _base_changes(data, routing, spans, out)
+    _presence_questions(data, events, out)
     residences = {p.id for p in data.alternation.residences}
     out.away += [Interval(s.start, s.end) for s in data.stays if s.place.id not in residences]
     out.away += out.uncertain
     for day in data.alternation.unknown_days(data.now, data.horizon_end):
         start = datetime.combine(day, time(0), tzinfo=tz)
-        out.away.append(
-            Interval(start, datetime.combine(day + timedelta(days=1), time(0), tzinfo=tz))
-        )
+        end = datetime.combine(day + timedelta(days=1), time(0), tzinfo=tz)
+        if any(utc(s.start) <= utc(start) and utc(end) <= utc(s.end) for s in data.stays):
+            continue  # a planned location covers the whole day: its change time is irrelevant
+        out.away.append(Interval(start, end))
         question = (
             f"Le {day.strftime('%d/%m')} est un jour de changement de résidence sans cours : "
             "à quelle heure changez-vous de résidence ?"
@@ -487,6 +501,58 @@ def route_outings(
             out.questions.append(question)
             out.question_due[question] = start
     return out
+
+
+def _presence_questions(data: PlanningInput, events: list[LocatedEvent], out: Outings) -> None:
+    """Planned locations that may be an obligation rather than a base, and are not
+    compatible with the day: asked, never decided.
+
+    - A short planned location (within one day) overlapping a commitment elsewhere: is it
+      only where the user leaves from, or must they stay there? Meanwhile it is a base.
+    - An explicit presence between two activities that the journeys cannot honour."""
+    tz = data.timezone
+    for stay in data.stays:
+        local_start, local_end = stay.start.astimezone(tz), stay.end.astimezone(tz)
+        if local_start.date() != (local_end - timedelta(minutes=1)).date():
+            continue  # several days: the base of those days
+        clash = next(
+            (
+                e
+                for e in events
+                if e.place is not None
+                and e.place != stay.place
+                and Interval(e.start, e.end).overlaps(Interval(stay.start, stay.end))
+            ),
+            None,
+        )
+        unreachable = any(
+            b.status is TravelStatus.IMPOSSIBLE
+            and stay.place in (b.origin, b.destination)
+            and Interval(b.start, max(b.end, b.start + timedelta(minutes=1), key=utc)).overlaps(
+                Interval(stay.start - data.max_journey, stay.end + data.max_journey)
+            )
+            for b in out.travel
+        )
+        when = (
+            f"le {local_start.strftime('%d/%m')} de {local_start.strftime('%H:%M')} à "
+            f"{local_end.strftime('%H:%M')}"
+        )
+        if clash is not None:
+            question = (
+                f"Vous serez à {stay.place.name} {when}, pendant « {clash.title} » à "
+                f"{clash.place.name if clash.place else '?'} : est-ce seulement votre point de "
+                "départ, ou devez-vous rester à cet endroit ?"
+            )
+        elif unreachable:
+            question = (
+                f"Être à {stay.place.name} {when} n'est pas faisable avec les trajets entre vos "
+                "activités : voulez-vous rester sur place, ou changer cette période ?"
+            )
+        else:
+            continue
+        if question not in out.questions:
+            out.questions.append(question)
+            out.question_due[question] = stay.start
 
 
 def _base_changes(
@@ -1077,15 +1143,56 @@ def _validate(
     sport_days = [
         c.start for c in fixed if c.kind in (CommitmentKind.TRAINING, CommitmentKind.RACE)
     ]
-    return validate_plan(problem, result) + validate_schedule(
-        sessions,
-        occupied,
-        trips,
-        tz,
-        study=study,
-        away=away,
-        at_home=at_home,
-        sport_days=sport_days,
+    # The day as the user lives it: every located commitment (official times; a class lets a
+    # journey use its tolerance) and every placed located activity, and the real journeys.
+    stops = [
+        Stop(
+            c.title,
+            c.place.id,
+            Interval(c.start, c.end),
+            data.class_tolerance
+            if c.kind is CommitmentKind.CLASS and not c.exact_times
+            else timedelta(0),
+        )
+        for c in fixed
+        if c.place is not None
+    ] + [
+        Stop(by_id[p.activity_id].title, where.id, Interval(p.start, p.end))
+        for p in result.activities
+        if (
+            where := by_id[p.activity_id].place
+            or (
+                base_at(p.start, data.stays, data.alternation)
+                if by_id[p.activity_id].at_home
+                else None
+            )
+        )
+        is not None
+    ]
+    legs = [
+        Leg(
+            f"{b.origin.name} -> {b.destination.name}",
+            b.origin.id,
+            b.destination.id,
+            Interval(b.start, b.end),
+            b.status.feasible,
+        )
+        for b in final.travel
+        if utc(b.end) > utc(b.start)
+    ]
+    return (
+        validate_plan(problem, result)
+        + validate_schedule(
+            sessions,
+            occupied,
+            trips,
+            tz,
+            study=study,
+            away=away,
+            at_home=at_home,
+            sport_days=sport_days,
+        )
+        + validate_journeys(legs, stops, tz)
     )
 
 

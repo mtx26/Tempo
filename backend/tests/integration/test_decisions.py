@@ -2,6 +2,7 @@
 
 Each test names the decision it checks (ARCHITECTURE.md §2, §8, §9)."""
 
+import itertools
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -302,7 +303,8 @@ def test_exam_gets_the_full_margin_and_the_official_start_is_shown(session: Sess
     assert trips and datetime.fromisoformat(trips[0]["arrival"]) == at(10, 8, 50)
     classes = [t for t in version.summary["travel"] if t["event_title"] == "Analyse"]
     assert classes and datetime.fromisoformat(classes[0]["event_start"]).minute == 0
-    assert datetime.fromisoformat(classes[0]["end"]).minute == 10  # attended from 10:10
+    # Soft tolerance: journeys at any time, nothing to save, the official start is kept.
+    assert datetime.fromisoformat(classes[0]["end"]).minute == 0
 
 
 def test_unconfirmed_journeys_are_refreshed_automatically(session: Session) -> None:
@@ -411,7 +413,8 @@ def test_uncertain_exam_is_asked_and_planned_on_the_safe_side(session: Session) 
     version = replan(session, FakeRouting(), NOW, TZ, reason="t")
     assert not any("Test de chimie" in q for q in version.summary["questions"])
     trip = next(t for t in version.summary["travel"] if t["event_title"] == "Test de chimie")
-    assert datetime.fromisoformat(trip["end"]) == at(10, 9, 10)  # a class again: tolerance
+    # A class again: tolerance allowed, unused here (nothing to save), official arrival.
+    assert datetime.fromisoformat(trip["end"]) == at(10, 9)
     session.refresh(question)
     assert question.resolved_at is not None
 
@@ -484,3 +487,48 @@ def test_migrations_0008_0009_round_trip_keeps_user_data(database_url: str) -> N
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+def test_published_calendar_matches_the_validated_day(session: Session) -> None:
+    """4 December: one train there in the morning, classes, one train back; the calendar
+    (get_schedule / phone feed) shows exactly the validated journeys, never overlapping."""
+    from tempo.planning.views import schedule_items
+
+    seed(session)
+    created = run_operation(
+        ctx(session),
+        "upsert_place",
+        {
+            "place_id": "mons",
+            "name": "Mons",
+            "latitude": 50.45,
+            "longitude": 3.95,
+            "aliases": ["Mons B12"],
+        },
+    )
+    assert created["ok"], created
+    for uid, h in (("m1", 9), ("m2", 14)):
+        lecture(session, uid, at(10, h), at(10, h + 2), "Cours")
+        row = session.scalars(select(FixedEventRow).where(FixedEventRow.uid == uid)).one()
+        row.location = "Mons B12"
+    ok(
+        session,
+        "set_planned_location",
+        place_id="home",
+        start="2026-12-09T18:00",
+        end="2026-12-11T18:00",
+    )
+    version = replan(session, FakeRouting(), NOW, TZ, reason="t")
+    assert version.state == "active", version.summary["violations"]
+    day = [
+        (t["origin"], t["destination"])
+        for t in version.summary["travel"]
+        if t["start"].startswith("2026-12-10")
+    ]
+    assert day == [("home", "mons"), ("mons", "home")]
+    items = [i for i in schedule_items(session, at(10, 0), at(11, 0)) if i["type"] == "travel"]
+    assert [(i["origin"], i["destination"]) for i in items] == day
+    spans = sorted(
+        (datetime.fromisoformat(i["start"]), datetime.fromisoformat(i["end"])) for i in items
+    )
+    assert all(a[1] <= b[0] for a, b in itertools.pairwise(spans))

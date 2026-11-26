@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from tempo.const import BUFFER, MAX_JOURNEY, MAX_TRAVEL
+from tempo.const import BUFFER, MAX_JOURNEY, MAX_TRAVEL, TOLERANCE_PER_MINUTE
 from tempo.timeutil import utc
 from tempo.transport.itinerary import (
     Objective,
@@ -70,6 +70,8 @@ class TravelBlock:
     event_title: str = ""
     event_start: datetime | None = None
     """Official start of the commitment reached (outbound): what the user is shown."""
+    event_end: datetime | None = None
+    """Official end of the commitment left (way back): identity of the leg."""
 
 
 @dataclass(slots=True)
@@ -127,6 +129,16 @@ def _journey_warnings(plan: TravelPlan, journey: Journey, label: str) -> None:
             plan.warnings.append(message)
 
 
+def _minutes(later: datetime, earlier: datetime) -> float:
+    return (utc(later) - utc(earlier)).total_seconds() / 60
+
+
+def _bounds(event: LocatedEvent, tolerated: datetime, official: datetime | None) -> list[datetime]:
+    """Time bounds to try: the official one first, the tolerated one when it differs."""
+    first = official or tolerated
+    return [first] if utc(first) == utc(tolerated) else [first, tolerated]
+
+
 def _outbound(
     routing: RoutingProvider,
     plan: TravelPlan,
@@ -135,62 +147,114 @@ def _outbound(
     previous: LocatedEvent | None,
     rules: _Rules,
 ) -> None:
+    """Journey to ``target`` (from ``previous`` when given). The attendance tolerance of a
+    class is soft: journeys arriving before the official start (with the margin) and leaving
+    the previous class after its official end are tried first; one using tolerance minutes is
+    kept only when it saves more than those minutes cost (``TOLERANCE_PER_MINUTE`` each, on top
+    of the time spent travelling and waiting); never more than the configured tolerance."""
     destination = target.place
     assert destination is not None  # noqa: S101 - unknown places are never routed
-    not_before = None if previous is None else previous.end
-    deadline = target.start - rules.buffer
+    official_start = target.official_start or target.start
+    official_deadline = official_start - rules.buffer
     serves = tuple(r for r in ((previous.ref if previous else ""), target.ref) if r)
 
-    def block(start: datetime, status: TravelStatus, journey: Journey | None = None) -> None:
+    def block(
+        start: datetime,
+        end: datetime,
+        status: TravelStatus,
+        journey: Journey | None = None,
+        alternatives: tuple[Journey, ...] = (),
+    ) -> None:
         plan.blocks.append(
             TravelBlock(
                 start,
-                target.start,
+                end,
                 origin,
                 destination,
                 status,
                 journey,
-                () if found is None else tuple(found.alternatives),
+                alternatives,
                 serves=serves,
                 event_title=target.title,
-                event_start=target.official_start or target.start,
+                event_start=official_start,
             )
         )
 
-    found: TripResult | None = None
-    label = _label(origin, destination, deadline)
+    deadline = target.start - rules.buffer
+    not_before = None if previous is None else previous.end
+    label = _label(origin, destination, official_deadline)
     # Conservative start when nothing is known: never more than an acceptable journey.
     worst = deadline - rules.max_journey
     gap_start = worst if not_before is None else max(not_before, worst, key=utc)
     if not_before is not None and utc(not_before) >= utc(deadline):
         plan.issues.append(f"impossible connection {label}")
-        block(not_before, TravelStatus.IMPOSSIBLE)
+        block(not_before, target.start, TravelStatus.IMPOSSIBLE)
         return
+    leave_after = (
+        [None] if previous is None else _bounds(previous, previous.end, previous.official_end)
+    )
+    arrive_by = [b - rules.buffer for b in _bounds(target, target.start, target.official_start)]
+    candidates: list[tuple[float, Journey, TripResult]] = []
     try:
-        found = _trip(
-            routing,
-            origin,
-            destination,
-            depart_after=not_before,
-            arrive_before=deadline,
-            objective=Objective.LATEST_DEPARTURE,
-        )
+        for after in leave_after:
+            for before in arrive_by:
+                if after is not None and utc(after) >= utc(before):
+                    continue
+                found = _trip(
+                    routing,
+                    origin,
+                    destination,
+                    depart_after=after,
+                    arrive_before=before,
+                    objective=Objective.LATEST_DEPARTURE,
+                )
+                if found.best is None:
+                    continue
+                journey = found.best
+                late = max(0.0, _minutes(journey.arrival, official_deadline))
+                early = 0.0
+                if previous is not None:
+                    early = max(
+                        0.0, _minutes(previous.official_end or previous.end, journey.departure)
+                    )
+                cost = _minutes(official_deadline, journey.departure) + TOLERANCE_PER_MINUTE * (
+                    late + early
+                )
+                candidates.append((cost, journey, found))
     except RoutingUnavailableError as exc:
-        kept = rules.kept(origin, destination, target.start, True)
+        kept = rules.kept(origin, destination, official_start, True)
         if kept is not None and (not_before is None or utc(kept.departure) >= utc(not_before)):
             plan.issues.append(f"routing unavailable for {label}: previous kept ({exc})")
-            block(kept.departure, TravelStatus.STALE, kept)
+            block(
+                kept.departure,
+                _arrival_end(kept, official_start, rules.buffer),
+                TravelStatus.STALE,
+                kept,
+            )
         else:
             plan.issues.append(f"routing unavailable for {label}: {exc}")
-            block(gap_start, TravelStatus.UNKNOWN)
+            block(gap_start, target.start, TravelStatus.UNKNOWN)
         return
-    journey = found.best
-    if journey is None:
+    if not candidates:
         plan.issues.append(f"impossible connection {label}")
-        block(gap_start, TravelStatus.IMPOSSIBLE)
+        block(gap_start, target.start, TravelStatus.IMPOSSIBLE)
         return
-    block(journey.departure, TravelStatus.ROUTED, journey)
+    # Cheapest first; on a tie the official bounds (tried first) win.
+    _, journey, found = min(candidates, key=lambda c: c[0])
+    block(
+        journey.departure,
+        _arrival_end(journey, official_start, rules.buffer),
+        TravelStatus.ROUTED,
+        journey,
+        tuple(found.alternatives),
+    )
     _journey_warnings(plan, journey, label)
+
+
+def _arrival_end(journey: Journey, official_start: datetime, buffer: timedelta) -> datetime:
+    """End of an outbound block: the official start, or later when tolerance is used (the
+    user is there ``buffer`` after arriving)."""
+    return max(official_start, journey.arrival + buffer, key=utc)
 
 
 def _return_trip(
@@ -201,26 +265,39 @@ def _return_trip(
     return_by: datetime,
     rules: _Rules,
 ) -> None:
+    """Way back after ``last``: leaving after its official end is preferred; leaving earlier
+    within the tolerance costs ``TOLERANCE_PER_MINUTE`` per minute (see ``_outbound``)."""
     origin = last.place
     assert origin is not None  # noqa: S101 - unknown places are never routed
-    label = _label(origin, end_place, last.end)
+    official_end = last.official_end or last.end
+    label = _label(origin, end_place, official_end)
     serves = (last.ref,) if last.ref else ()
     status = TravelStatus.IMPOSSIBLE
     journey: Journey | None = None
     alternatives: tuple[Journey, ...] = ()
     if utc(return_by) > utc(last.end):
         try:
-            found = _trip(
-                routing,
-                origin,
-                end_place,
-                depart_after=last.end,
-                arrive_before=return_by,
-                objective=Objective.EARLIEST_ARRIVAL,
-            )
-            journey, alternatives = found.best, tuple(found.alternatives)
+            candidates: list[tuple[float, Journey, TripResult]] = []
+            for after in _bounds(last, last.end, last.official_end):
+                if utc(return_by) <= utc(after):
+                    continue
+                found = _trip(
+                    routing,
+                    origin,
+                    end_place,
+                    depart_after=after,
+                    arrive_before=return_by,
+                    objective=Objective.EARLIEST_ARRIVAL,
+                )
+                if found.best is not None:
+                    early = max(0.0, _minutes(official_end, found.best.departure))
+                    cost = _minutes(found.best.arrival, official_end) + TOLERANCE_PER_MINUTE * early
+                    candidates.append((cost, found.best, found))
+            if candidates:
+                _, journey, found = min(candidates, key=lambda c: c[0])
+                alternatives = tuple(found.alternatives)
         except RoutingUnavailableError as exc:
-            kept = rules.kept(origin, end_place, last.end, False)
+            kept = rules.kept(origin, end_place, official_end, False)
             if kept is not None and utc(kept.arrival) <= utc(return_by):
                 plan.issues.append(f"routing unavailable for return {label}: previous kept")
                 journey, status = kept, TravelStatus.STALE
@@ -231,7 +308,7 @@ def _return_trip(
         routed = TravelStatus.ROUTED if status is TravelStatus.IMPOSSIBLE else status
         plan.blocks.append(
             TravelBlock(
-                last.end,
+                min(official_end, journey.departure, key=utc),
                 journey.arrival,
                 origin,
                 end_place,
@@ -240,6 +317,7 @@ def _return_trip(
                 alternatives,
                 returning=True,
                 serves=serves,
+                event_end=official_end,
             )
         )
         if routed is TravelStatus.ROUTED:
@@ -252,7 +330,16 @@ def _return_trip(
     until = min(return_by, last.end + rules.max_journey, key=utc)
     if utc(until) > utc(last.end):
         plan.blocks.append(
-            TravelBlock(last.end, until, origin, end_place, status, returning=True, serves=serves)
+            TravelBlock(
+                last.end,
+                until,
+                origin,
+                end_place,
+                status,
+                returning=True,
+                serves=serves,
+                event_end=official_end,
+            )
         )
 
 

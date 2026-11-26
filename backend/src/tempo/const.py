@@ -21,7 +21,11 @@ HORIZON_DAYS = 14
 BUFFER_MINUTES = 10
 """Arrive this long before a commitment (setting ``buffer_minutes``); exams included."""
 CLASS_TOLERANCE_MINUTES = 10
-"""Regular classes only: arrive this late / leave this early (setting, never for an exam)."""
+"""Regular classes only: the most the user accepts to arrive late / leave early (setting,
+never for an exam); a soft allowance, see ``TOLERANCE_PER_MINUTE``."""
+TOLERANCE_PER_MINUTE = 6
+"""Cost of each tolerance minute used (late arrival or early departure at a class), in minutes
+of travel and waiting: 10 tolerance minutes are used only to save more than an hour."""
 DEPARTURE_REMINDER_MINUTES = (60, 15)
 """Departure reminders before the advised leave time (setting ``reminder_minutes``)."""
 MAX_JOURNEY_MINUTES = 180

@@ -503,7 +503,18 @@ partagé par l'étude, le sport, les trajets, les résidences et les séjours :
   engagement situé, trajets **directs** d'un engagement au suivant, retour à la base en fin de
   journée (la base pouvant changer dans la journée : « je pars de chez papa et je rentre chez
   maman après les cours »). Aucun retour automatique entre deux activités ; un retour
-  intermédiaire n'existe que si l'utilisateur le demande (lieu prévu sur ce créneau) ;
+  intermédiaire n'existe que si l'utilisateur le demande : un lieu prévu **compris dans
+  l'intervalle** entre deux activités (« entre midi et 14 h je rentre »). Un lieu prévu qui
+  couvre les activités (séjour de plusieurs jours, « je suis à Louvain-la-Neuve jusqu'à
+  vendredi ») est seulement la **base temporaire** : point de départ du premier trajet et
+  destination du dernier, jamais une raison de revenir entre deux cours (correction du 4/12 :
+  l'ancienne règle « tout lieu prévu chevauchant l'intervalle » coupait chaque intervalle et
+  produisait des allers-retours superflus et des trajets superposés). Un jour entièrement
+  couvert par un lieu prévu ne pose pas la question de l'heure de changement de résidence ;
+- base ou obligation : un lieu prévu court (dans une journée) qui chevauche un engagement
+  ailleurs, ou une présence demandée que les trajets ne peuvent pas honorer, ⇒ question
+  (« seulement votre point de départ, ou devez-vous rester à cet endroit ? ») ; en attendant,
+  il est traité comme base, jamais comme obligation décidée par Tempo ;
 - un entraînement sans lieu (« à la résidence ») n'a jamais lieu pendant un séjour hors des
   résidences ni pendant une période incertaine ; pendant une sortie, il reste possible mais
   fortement évité entre deux cours (préférence, C1) : s'il n'y a pas d'autre créneau, les
@@ -658,9 +669,17 @@ selon le contexte) :
 | Recherche en conversation | choisies par l'utilisateur (2 h autour d'une borne seule) | choisi par l'utilisateur |
 
 Tolérance de cours (`class_tolerance_minutes`, 10 min par défaut, au plus 30, réglée en
-conversation) : pour les **cours** seulement, l'utilisateur accepte d'arriver ce nombre de
-minutes après le début et de partir autant avant la fin ; le « début » et la « fin » du tableau
-ci-dessus sont alors décalés d'autant (jamais jusqu'à annuler le cours). Les **examens** et les
+conversation) : pour les **cours** seulement, l'utilisateur accepte au plus d'arriver ce nombre
+de minutes après le début et de partir autant avant la fin. C'est une **contrainte souple** :
+les trajets arrivant avant le début officiel (marge comprise) et partant après la fin
+officielle sont cherchés d'abord ; un trajet qui consomme de la tolérance (arrivée après
+« début − marge », départ avant la fin) n'est retenu que s'il économise davantage que sa
+pénalité, `TOLERANCE_PER_MINUTE` (6, `tempo/const.py`) minutes d'attente ou de trajet par
+minute consommée — 8 minutes de tolérance ne servent qu'à éviter près d'une heure d'attente ;
+sans meilleur itinéraire, la tolérance est utilisée, jamais au-delà du maximum. Le trajet
+publié se termine au début officiel, ou après lui seulement de ce qui est réellement consommé.
+Une présence partielle explicite (« j'arrive à 10 h ») remplace les heures et ne reçoit pas de
+tolérance en plus. Les **examens** et les
 autres engagements gardent leurs heures exactes et toute la marge d'arrivée. La tolérance ne
 change jamais l'heure affichée : les trajets publiés portent l'heure officielle de début
 (`event_start`), seule montrée avec l'heure de départ dans les notifications.
@@ -716,6 +735,12 @@ validateur indépendant (`scheduler/validate.py`) sur le plan final.
 - ordre de la semaine du coach ; récupération explicite (`rest_days` de la séance ou réglage
   `training_preferences.rest_days`, jamais déduite) ;
 - trajets faisables (MOTIS, ou itinéraire précédent conservé pendant une panne) ;
+- séquence physiquement possible (`validate_journeys`, sur le plan final) : jamais deux
+  trajets en même temps ; chaque trajet part de là où est l'utilisateur (activité ou arrivée
+  précédente du jour) et l'engagement suivant est à sa destination ; un trajet ne recouvre un
+  cours que dans la limite de sa tolérance (jamais un examen ni un autre engagement). Deux
+  engagements fixes simultanés à des endroits différents sont un conflit de sources (signalé
+  pour arbitrage), pas une erreur de trajet ;
 - longueur des séances (30 à 90 min), grille de 15 min.
 
 **Préférences souples** (coûts du solveur, jamais plus fortes que placer le travail) : heures
@@ -1006,7 +1031,7 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution complète (26/11/2026, version 0.8.1), sans aucun test ignoré : backend
+Dernière exécution complète (26/11/2026, version 0.8.2 : 573 tests, couverture 94 %), sans aucun test ignoré : backend
 PostgreSQL 16 réel, vrai client HA, MOTIS national (et les tests « MOTIS réel » sur ce graphe),
 GreenMail IMAP, passerelle Belgian Mobility réelle ; Ruff et mypy strict propres (chiffres
 dans la note de version). Pile Docker complète : `scripts/live_scenario.py` 15/15 ; vrai Home
@@ -1017,6 +1042,12 @@ la même réponse, puis est close après la réponse ; (2) « rendez-vous chez l
 prochain » ⇒ question (heure, durée) enregistrée ; dans une **nouvelle** conversation sans
 historique, « à 14 heures, une heure, pas de trajet » crée le rendez-vous le jeudi à 14:00 et
 la clarification est close. Intégration HA 0.7.0 inchangée, compatible (test de contrat).
+0.8.2 : tolérance de cours souple (pénalité par minute consommée), base temporaire sans
+retour entre deux cours (cas du 4/12 reproduit puis corrigé : un aller le matin, un retour le
+soir), question « base ou obligation », contrôle de la séquence des trajets par le validateur
+et cohérence calendrier publié / plan validé testée sur PostgreSQL ; scénario Docker et vrai
+Home Assistant relancés (15/15, 14/14). Le vrai Gemini n'a pas été relancé (aucun changement
+de la conversation).
 
 Bloquants nécessitant l'utilisateur : quota Vertex AI suffisant pour la conversation, installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de

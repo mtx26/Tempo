@@ -230,7 +230,131 @@ def test_exam_keeps_the_full_arrival_margin_classes_get_the_tolerance() -> None:
     to_class = next(b for b in outcome.travel if b.destination == CAMPUS and b.start.day == 9)
     assert to_exam.end == at(8, 9) and to_exam.journey is not None
     assert to_exam.journey.arrival == at(8, 8, 50)
-    assert to_class.end == at(9, 9, 10) and to_class.event_start == at(9, 9)
+    # Journeys at any time: the tolerance would save nothing, so it is not used.
+    assert to_class.end == at(9, 9) and to_class.event_start == at(9, 9)
+
+
+class Timetable:
+    """Trains leaving at fixed times only, 30 minutes door to door (any pair of places)."""
+
+    def __init__(self, departures: list[datetime]) -> None:
+        self.departures = departures
+
+    def plan(
+        self, origin: Coordinates, destination: Coordinates, time: datetime, *, arrive_by: bool
+    ) -> list[Journey]:
+        trips = []
+        for start in self.departures:
+            end = start + timedelta(minutes=30)
+            leg = Leg("RAIL", "a", "b", start, end, start, end, realtime=False)
+            trips.append(Journey((leg,), start, end, 0, "timetable"))
+        if arrive_by:
+            return sorted((j for j in trips if j.arrival <= time), key=lambda j: j.arrival)[::-1]
+        return [j for j in trips if j.departure >= time]
+
+
+def test_presence_obligation_in_conflict_is_asked() -> None:
+    """A short planned location overlapping a class elsewhere may be an obligation: asked;
+    meanwhile a base (the class keeps its journeys, no forced return)."""
+    stay = DeclaredStay(DAD, at(8, 9), at(8, 12))
+    outcome = run_planning(data(commitments=[lecture(8, 10, 12)], stays=[stay]), FakeRouting())
+    check(outcome)
+    assert any("Papa" in q and "rester" in q for q in outcome.questions)
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert trips(outcome, 8) == [("home", "dad"), ("dad", "campus"), ("campus", "home")]
+
+
+def test_class_tolerance_is_used_only_when_it_saves_real_time() -> None:
+    """Soft tolerance: 8 minutes late (and full margin lost) only to avoid a 2-hour wait;
+    a smaller saving keeps the official arrival; an exam never uses it."""
+    lesson = lecture(9, 10, 12)
+    sparse = Timetable([at(9, 7, 5), at(9, 9, 28), at(9, 12, 30)])
+    outcome = run_planning(
+        data(commitments=[lesson], class_tolerance=timedelta(minutes=10)), sparse
+    )
+    check(outcome)
+    there = next(b for b in outcome.travel if b.destination == CAMPUS)
+    assert there.journey is not None and there.journey.departure == at(9, 9, 28)
+    assert there.end == at(9, 10, 8) and there.event_start == at(9, 10)  # 8 minutes used
+    dense = Timetable([at(9, 8, 50), at(9, 9, 28), at(9, 12, 30)])
+    outcome = run_planning(data(commitments=[lesson], class_tolerance=timedelta(minutes=10)), dense)
+    there = next(b for b in outcome.travel if b.destination == CAMPUS)
+    assert there.journey is not None and there.journey.departure == at(9, 8, 50)
+    assert there.end == at(9, 10)  # saving 38 minutes is not worth 8 tolerance minutes
+    partial = replace(lesson, exact_times=True)  # « j'arrive à 10 h » : no extra tolerance
+    outcome = run_planning(
+        data(commitments=[partial], class_tolerance=timedelta(minutes=10)), sparse
+    )
+    check(outcome)
+    there = next(b for b in outcome.travel if b.destination == CAMPUS)
+    assert there.journey is not None and there.journey.departure == at(9, 7, 5)
+    exam = replace(lesson, kind=CommitmentKind.EXAM, title="Examen")
+    outcome = run_planning(data(commitments=[exam], class_tolerance=timedelta(minutes=10)), sparse)
+    there = next(b for b in outcome.travel if b.destination == CAMPUS)
+    assert there.journey is not None and there.journey.departure == at(9, 7, 5)
+
+
+def test_leaving_a_class_early_is_penalised_too() -> None:
+    """Way back: a train 5 minutes before the end is taken only to avoid a long wait."""
+    lesson = lecture(9, 10, 12)
+    trains = Timetable([at(9, 9), at(9, 11, 55), at(9, 14, 0)])
+    outcome = run_planning(
+        data(commitments=[lesson], class_tolerance=timedelta(minutes=10)), trains
+    )
+    check(outcome)
+    back = next(b for b in outcome.travel if b.returning)
+    assert back.journey is not None and back.journey.departure == at(9, 11, 55)
+    assert back.start == at(9, 11, 55)  # 5 minutes before the official end
+    trains = Timetable([at(9, 9), at(9, 11, 55), at(9, 12, 20)])
+    outcome = run_planning(
+        data(commitments=[lesson], class_tolerance=timedelta(minutes=10)), trains
+    )
+    back = next(b for b in outcome.travel if b.returning)
+    assert back.journey is not None and back.journey.departure == at(9, 12, 20)
+    assert back.start == at(9, 12)
+
+
+def test_temporary_base_never_implies_returns_between_classes() -> None:
+    """4 December: a planned location covering the day is the base, not a place to go back to
+    between classes: one train there, stay between classes, one train back."""
+    lln = Place("lln", "Louvain-la-Neuve", Coordinates(50.67, 4.61))
+    mons = Place("mons", "Mons", Coordinates(50.45, 3.95))
+    PLACES[lln.coordinates], PLACES[mons.coordinates] = "lln", "mons"
+    classes = [
+        Commitment(f"c{h}", "Cours", at(4, h), at(4, h + 2), CommitmentKind.CLASS, mons)
+        for h in (9, 14)
+    ]
+    stay = DeclaredStay(lln, at(3, 18), at(5, 18))
+    outcome = run_planning(
+        data(
+            now=at(3, 20),
+            horizon_end=at(4, 23, 59),
+            commitments=classes,
+            stays=[stay],
+            class_tolerance=timedelta(minutes=10),
+        ),
+        FakeRouting({frozenset({"lln", "mons"}): 70}),
+    )
+    check(outcome)
+    assert trips(outcome, 4) == [("lln", "mons"), ("mons", "lln")]
+    assert outcome.status is OutcomeStatus.COMPLETE and outcome.questions == []
+    # An explicit presence between the classes (planned location inside the gap) is a return.
+    lunch = DeclaredStay(lln, at(4, 11, 30), at(4, 12, 30))
+    outcome = run_planning(
+        data(
+            now=at(3, 20),
+            horizon_end=at(4, 23, 59),
+            commitments=classes,
+            stays=[stay, lunch],
+        ),
+        FakeRouting({frozenset({"lln", "mons"}): 30}),
+    )
+    assert trips(outcome, 4) == [
+        ("lln", "mons"),
+        ("mons", "lln"),
+        ("lln", "mons"),
+        ("mons", "lln"),
+    ]
 
 
 def test_unknown_location_blocks_only_around_it_and_asks() -> None:

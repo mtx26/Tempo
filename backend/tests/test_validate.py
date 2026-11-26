@@ -198,3 +198,59 @@ def test_many_blocks_of_one_subject_are_a_soft_preference() -> None:
     five = [block(at(h), at(h, 30)) for h in (8, 9, 10, 11, 13)]
     result = PlanResult(PlanStatus.PARTIAL, five)
     assert validate_plan(make_problem(), result) == []
+
+
+def test_physically_impossible_journey_sequences_are_rejected() -> None:
+    """The 4 December sequence: an extra return and a second outbound overlapping it."""
+    from datetime import timedelta
+
+    from tempo.scheduler.validate import Leg, Stop, validate_journeys
+
+    tol = timedelta(minutes=10)
+    stops = [
+        Stop("Cours 1", "mons", Interval(at(9), at(11)), tol),
+        Stop("Cours 2", "mons", Interval(at(14), at(16)), tol),
+    ]
+    good = [
+        Leg("LLN -> Mons", "lln", "mons", Interval(at(7, 40), at(9))),
+        Leg("Mons -> LLN", "mons", "lln", Interval(at(16), at(17, 10))),
+    ]
+    assert validate_journeys(good, stops, TZ) == []
+    bad = [
+        *good,
+        Leg("Mons -> LLN", "mons", "lln", Interval(at(11), at(12, 10))),
+        Leg("LLN -> Mons", "lln", "mons", Interval(at(12), at(14))),
+    ]
+    found = validate_journeys(bad, stops, TZ)
+    assert any("journeys overlap" in v for v in found)
+    wrong_origin = [
+        Leg("LLN -> Mons", "lln", "mons", Interval(at(7, 40), at(9))),
+        Leg("LLN -> Mons", "lln", "mons", Interval(at(12), at(14))),
+    ]
+    assert any(
+        "leaves lln but the user is at mons" in v
+        for v in validate_journeys(wrong_origin, stops, TZ)
+    )
+    tolerated = [Leg("LLN -> Mons", "lln", "mons", Interval(at(7, 50), at(9, 10)))]
+    assert validate_journeys(tolerated, stops, TZ) == []
+    too_late = [Leg("LLN -> Mons", "lln", "mons", Interval(at(8), at(9, 11)))]
+    assert any("overlaps Cours 1" in v for v in validate_journeys(too_late, stops, TZ))
+    exam = [Stop("Examen", "mons", Interval(at(9), at(11)))]  # no tolerance
+    assert any("overlaps Examen" in v for v in validate_journeys(tolerated, exam, TZ))
+
+
+def test_two_fixed_commitments_at_once_are_not_a_journey_error() -> None:
+    """A class and a race at the same time elsewhere: a source conflict (reported for
+    arbitration), never a reason to reject the whole plan."""
+    from tempo.scheduler.validate import Leg, Stop, validate_journeys
+
+    stops = [
+        Stop("10 km", "club", Interval(at(10), at(11))),
+        Stop("Analyse", "campus", Interval(at(10), at(12))),
+    ]
+    legs = [
+        Leg("Kot -> Club", "home", "club", Interval(at(9, 20), at(10))),
+        Leg("Club -> Campus", "club", "campus", Interval(at(11), at(11, 30)), feasible=False),
+        Leg("Campus -> Kot", "campus", "home", Interval(at(12), at(12, 30))),
+    ]
+    assert validate_journeys(legs, stops, TZ) == []

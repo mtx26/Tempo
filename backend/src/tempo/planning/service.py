@@ -216,7 +216,12 @@ def _previous_travel(summary: dict[str, Any]) -> Previous:
             "previous plan",
         )
         outbound = not trip.get("returning")
-        anchor = trip["end"] if outbound else trip["start"]
+        # The leg's identity: the official start reached, or the official end left.
+        anchor = (
+            (trip.get("event_start") or trip["end"])
+            if outbound
+            else (trip.get("event_end") or trip["start"])
+        )
         key = (
             trip["origin"],
             trip["destination"],
@@ -622,6 +627,7 @@ def _travel_json(outcome: PlanningOutcome) -> list[dict[str, Any]]:
                 "returning": block.returning,
                 "event_title": block.event_title,
                 "event_start": None if block.event_start is None else block.event_start.isoformat(),
+                "event_end": None if block.event_end is None else block.event_end.isoformat(),
                 "departure": None if journey is None else journey.departure.isoformat(),
                 "arrival": None if journey is None else journey.arrival.isoformat(),
                 "legs": []
