@@ -26,13 +26,20 @@ Status: ``complete`` only when all work, every activity and every journey is pla
 its time limit (inconclusive, the previous plan stays); ``invalid`` on violations.
 """
 
+import functools
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from tempo.scheduler.activities import FlexibleActivity, PlacedActivity, plan_activities
+from tempo.scheduler.activities import (
+    FlexibleActivity,
+    PlacedActivity,
+    TrainingPreferences,
+    plan_activities,
+)
 from tempo.scheduler.model import (
     PlannedBlock,
     PlanningProblem,
@@ -112,6 +119,8 @@ class TrainingRequest:
     target: datetime | None = None
     """Task target (end of the target day); strict when ``strict``."""
     strict: bool = False
+    training: bool = False
+    """A training session (the user's training preferences apply)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,8 +142,24 @@ class PlanningInput:
     buffer: timedelta = DEFAULT_BUFFER
     solver_seconds: float = 10.0
     activity_hours: tuple[time, time] = DEFAULT_ACTIVITY_HOURS
+    training_preferences: TrainingPreferences = field(default_factory=TrainingPreferences)
     expired_strict_tasks: dict[str, int] = field(default_factory=dict)
     """Task sessions whose strict deadline already passed with work left: task -> minutes."""
+
+
+def _daylight(place: Place) -> Callable[[date], tuple[datetime, datetime]]:
+    """Sunrise and sunset at ``place`` (astral; Belgium never has polar days)."""
+    from astral import Observer
+    from astral.sun import sun
+
+    observer = Observer(place.coordinates.lat, place.coordinates.lon)
+
+    @functools.cache
+    def at(day: date) -> tuple[datetime, datetime]:
+        times = sun(observer, date=day, tzinfo=UTC)
+        return times["sunrise"], times["sunset"]
+
+    return at
 
 
 class ConflictKind(StrEnum):
@@ -507,6 +532,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 min_days_after_previous=request.min_days_after_previous,
                 allowed=places_ok[request.activity_id],
                 soft_target=None if request.strict else request.target,
+                training=request.training,
             )
         )
     day_start, day_end = data.activity_hours
@@ -516,6 +542,11 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         tz,
         day_start=day_start,
         day_end=day_end,
+        training=data.training_preferences,
+        class_days=frozenset(
+            c.start.astimezone(tz).date() for c in fixed if c.kind is CommitmentKind.CLASS
+        ),
+        sun=_daylight(data.home),
     )
     if activity_plan.inconclusive:
         issues.append(

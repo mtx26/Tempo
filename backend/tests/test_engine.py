@@ -1,7 +1,7 @@
 """End-to-end planning pipeline on a realistic week (fake routing: 30 min between places)."""
 
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
@@ -401,3 +401,27 @@ def test_unknown_class_location_is_a_question() -> None:
     )
     outcome = run_planning(week(commitments=[unknown]), FakeRouting())
     assert outcome.questions and "NiX.1" in outcome.questions[0]
+
+
+def test_training_preferences_free_day_morning_in_daylight() -> None:
+    from tempo.scheduler.activities import TrainingPreferences
+
+    session = _residence_training(
+        earliest_start=at(11, 0),
+        latest_end=at(13, 23, 59),
+        preferred_start=at(11, 18),
+        training=True,
+    )
+    prefs = TrainingPreferences(free_days=True, mornings=True, daylight=True)
+    outcome = run_planning(
+        week(trainings=[session], training_preferences=prefs, activity_hours=(time(8), time(22))),
+        FakeRouting(),
+    )
+    assert outcome.violations == [] and not outcome.unplaced_trainings
+    placed = outcome.trainings[0]
+    assert placed.start.date() == at(13, 0).date()  # Sunday: no class (Fri 11: class)
+    assert placed.start >= at(13, 8, 40)  # after sunrise (about 08:39 in mid-December)
+    assert placed.start + timedelta(minutes=60) <= at(13, 12)  # finished by noon
+    # Without the preferences the session stays near its preferred start (Friday evening).
+    plain = run_planning(week(trainings=[session]), FakeRouting()).trainings[0]
+    assert plain.start.date() == at(11, 0).date()

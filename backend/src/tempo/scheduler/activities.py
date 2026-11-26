@@ -8,8 +8,9 @@ travel is counted. Races, fixed and locked activities are NOT placed here: the c
 them as ``busy``.
 
 Hard rules: window, category windows (explicit user rules), order and recovery of a coach week,
-no overlap. Soft preferences (``activity_hours``, the coach's suggested day, a soft target):
-penalised, never stronger than placing the session.
+no overlap. Soft preferences (``activity_hours``, the coach's suggested day, a soft target, the
+user's training preferences: daylight, days without classes, mornings): penalised, never
+stronger than placing the session.
 
 Objective: place every session (missing one costs far more than anything else), then respect
 the activity hours, then the soft target, then stay close to the previous placement
@@ -18,6 +19,7 @@ the activity hours, then the soft target, then stay close to the previous placem
 
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -35,6 +37,24 @@ LATE_PENALTY_PER_MINUTE = 20
 STABILITY_WEIGHT = 4
 DAY_PREFERENCE_PENALTY = 600
 """Per day away from the coach's suggested day (soft: about 10 h of start-time distance)."""
+DARK_PENALTY = OUTSIDE_HOURS_PENALTY
+"""A training before sunrise or after sunset (avoided, never forbidden)."""
+CLASS_DAY_PENALTY = 8_000
+"""A training on a day with classes: above moving it one day (stability, coach's day)."""
+AFTERNOON_PENALTY = 2_000
+"""A training not finished by noon: mornings first, then the afternoon."""
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingPreferences:
+    """The user's soft preferences for trainings (setting ``training_preferences``)."""
+
+    free_days: bool = False
+    """Prefer days without classes."""
+    mornings: bool = False
+    """Prefer the morning (after the start of the activity hours), then the afternoon."""
+    daylight: bool = False
+    """Avoid the dark (before sunrise, after sunset)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +79,8 @@ class FlexibleActivity:
     """Category windows (B07): when set, the session must lie inside one of them (hard)."""
     soft_target: datetime | None = None
     """Should end by then (soft target of a task session): lateness is penalised."""
+    training: bool = False
+    """A training session: the user's training preferences apply to it."""
 
     def __post_init__(self) -> None:
         if self.duration <= timedelta(0):
@@ -89,6 +111,28 @@ class ActivityPlan:
     inconclusive: bool = False
     """The solver found no answer in its time limit: nothing is concluded (not impossible)."""
     solver_status: str = ""
+
+
+def _training_cost(
+    prefs: TrainingPreferences,
+    start: datetime,
+    duration: timedelta,
+    tz: ZoneInfo,
+    class_days: frozenset[date],
+    sun: Callable[[date], tuple[datetime, datetime]] | None,
+) -> int:
+    """Soft cost of a training starting at ``start`` under the user's preferences."""
+    begins, ends = start.astimezone(tz), (start + duration).astimezone(tz)
+    cost = 0
+    if prefs.free_days and begins.date() in class_days:
+        cost += CLASS_DAY_PENALTY
+    if prefs.mornings and ends > datetime.combine(begins.date(), time(12, 0), tzinfo=tz):
+        cost += AFTERNOON_PENALTY
+    if prefs.daylight and sun is not None:
+        sunrise, sunset = sun(begins.date())
+        if utc(begins) < utc(sunrise) or utc(ends) > utc(sunset):
+            cost += DARK_PENALTY
+    return cost
 
 
 def _minutes(origin: datetime, value: datetime) -> float:
@@ -124,6 +168,9 @@ def plan_activities(
     *,
     day_start: time = time(6, 0),
     day_end: time = time(22, 0),
+    training: TrainingPreferences | None = None,
+    class_days: frozenset[date] = frozenset(),
+    sun: Callable[[date], tuple[datetime, datetime]] | None = None,
     time_limit_seconds: float = 5.0,
 ) -> ActivityPlan:
     if not activities:
@@ -237,6 +284,24 @@ def plan_activities(
                 gap = model.new_int_var(0, 10**4, f"daygap_{index}")
                 model.add_abs_equality(gap, day_var - wanted)
                 penalties.append(DAY_PREFERENCE_PENALTY * gap)
+        if item.training and training is not None:
+            table = [
+                _training_cost(
+                    training,
+                    origin + timedelta(minutes=GRID_MINUTES * value),
+                    item.duration,
+                    timezone,
+                    class_days,
+                    sun,
+                )
+                for value in range(first, last + 1)
+            ]
+            if max(table) > 0:
+                position = model.new_int_var(0, last - first, f"position_{index}")
+                model.add(position == slot - first)
+                cost = model.new_int_var(0, max(table), f"preference_{index}")
+                model.add_element(position, table, cost)
+                penalties.append(cost)
         for weight, anchor in ((STABILITY_WEIGHT, item.previous_start), (1, item.preferred_start)):
             if anchor is not None:
                 target = round(_minutes(origin, anchor))

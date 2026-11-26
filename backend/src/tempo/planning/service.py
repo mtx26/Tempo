@@ -59,6 +59,7 @@ from tempo.planning.engine import (
     TrainingRequest,
     run_planning,
 )
+from tempo.scheduler.activities import TrainingPreferences
 from tempo.scheduler.model import PlannedBlock, Preferences, StudyDemand
 from tempo.timeutil import Interval, end_of_day, utc
 from tempo.transport.places import PlaceDirectory
@@ -267,6 +268,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
                     task_id=None if task is None else str(task.id),
                     target=target,
                     strict=task is not None and task.target_kind is TargetKind.HARD,
+                    training=act.kind == "training",
                 )
             )
     expired: dict[str, int] = {}
@@ -369,6 +371,9 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         preferences=Preferences(**prefs),
         buffer=buffer,
         activity_hours=activity_hours(session),
+        training_preferences=TrainingPreferences(
+            **(get_setting(session, "training_preferences", {}) or {})
+        ),
         expired_strict_tasks=expired,
     )
     return LoadedInput(data, task_ids, spread)

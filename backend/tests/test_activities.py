@@ -151,3 +151,55 @@ def test_category_windows_without_room_leave_the_session_unplaced() -> None:
 def test_empty_category_windows_mean_never() -> None:
     plan = plan_activities([run(allowed=())], [], TZ)
     assert plan.unplaced == ["run"]
+
+
+def _sun(day: date) -> tuple[datetime, datetime]:
+    """Winter daylight for the tests: 08:30-16:45 local."""
+    return (
+        datetime.combine(day, datetime.min.time(), TZ).replace(hour=8, minute=30),
+        datetime.combine(day, datetime.min.time(), TZ).replace(hour=16, minute=45),
+    )
+
+
+def test_training_prefers_a_day_without_classes() -> None:
+    from tempo.scheduler.activities import TrainingPreferences
+
+    item = run(1, 2, preferred_start=at(1, 9), training=True)
+    prefs = TrainingPreferences(free_days=True)
+    placed = plan_activities(
+        [item], [], TZ, training=prefs, class_days=frozenset({date(2026, 12, 1)})
+    ).placed[0]
+    assert placed.start.day == 2
+    # Not a training (study, personal outing): unaffected.
+    other = run(1, 2, preferred_start=at(1, 9))
+    kept = plan_activities(
+        [other], [], TZ, training=prefs, class_days=frozenset({date(2026, 12, 1)})
+    ).placed[0]
+    assert kept.start == at(1, 9)
+
+
+def test_training_prefers_the_morning_then_the_afternoon() -> None:
+    from tempo.scheduler.activities import TrainingPreferences
+
+    item = run(2, 2, preferred_start=at(2, 15), training=True)
+    placed = plan_activities(
+        [item], [], TZ, training=TrainingPreferences(mornings=True), day_start=at(2, 8).time()
+    ).placed[0]
+    assert at(2, 8) <= placed.start and placed.end <= at(2, 12)
+    busy = [Interval(at(2, 6), at(2, 12, 30))]  # morning taken: the afternoon is used
+    later = plan_activities(
+        [item], busy, TZ, training=TrainingPreferences(mornings=True), day_start=at(2, 8).time()
+    ).placed[0]
+    assert later.start >= at(2, 12, 30)
+
+
+def test_training_avoids_the_dark_without_forbidding_it() -> None:
+    from tempo.scheduler.activities import TrainingPreferences
+
+    prefs = TrainingPreferences(daylight=True)
+    item = run(2, 2, preferred_start=at(2, 18), training=True)
+    placed = plan_activities([item], [], TZ, training=prefs, sun=_sun).placed[0]
+    assert at(2, 8, 30) <= placed.start and placed.end <= at(2, 16, 45)
+    busy = [Interval(at(2, 0), at(2, 17))]  # only the evening is free: still placed
+    dark = plan_activities([item], busy, TZ, training=prefs, sun=_sun)
+    assert dark.placed and dark.placed[0].start >= at(2, 17)

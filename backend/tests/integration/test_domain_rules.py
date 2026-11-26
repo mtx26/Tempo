@@ -282,3 +282,27 @@ def test_coach_mail_day_is_a_suggestion_within_its_week(session: Session) -> Non
     assert row.preferred_day == wednesday
     assert row.earliest_start_at == datetime(2026, 12, 7, tzinfo=TZ)  # Monday of that week
     assert row.latest_end_at == datetime(2026, 12, 14, tzinfo=TZ)
+
+
+def test_training_preferences_are_set_in_conversation_and_used(session: Session) -> None:
+    seed(session)
+    ok(session, "update_settings", training_preferences={"daylight": True})
+    ok(session, "update_settings", training_preferences={"mornings": True})  # merged
+    assert get_setting(session, "training_preferences") == {"daylight": True, "mornings": True}
+    created = ok(
+        session,
+        "create_event",
+        title="Footing",
+        kind="training",
+        scheduling="flexible",
+        duration_minutes=60,
+        window_start="2026-12-10T06:00",
+        window_end="2026-12-10T23:00",
+        remote=True,
+    )["activity"]
+    replan(session, FakeRouting(), NOW, TZ, reason="t")
+    row = session.get(ActivityRow, uuid.UUID(created["id"]))
+    assert row is not None and row.planned_start_at is not None
+    start = row.planned_start_at.astimezone(TZ)
+    assert (start.hour, start.minute) >= (8, 30)  # after sunrise (about 08:35)
+    assert start + timedelta(minutes=60) <= start.replace(hour=12, minute=0)  # by noon

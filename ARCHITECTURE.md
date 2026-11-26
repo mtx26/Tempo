@@ -520,6 +520,13 @@ Résidences multiples (générique, rien de personnel dans le code) :
   un plan valide déjà publié est conservé (le nouveau, incomplet, est enregistré « rejeté »
   avec `kept_previous_plan`) ; sans plan antérieur, le plan partiel est publié et le trajet
   concerné n'est pas planifié.
+- **Préférences d'entraînement** (réglage `training_preferences`, en conversation via
+  `update_settings`, désactivées par défaut) : jours sans cours, matin (après le début des
+  heures d'activité) puis après-midi, éviter le noir (lever et coucher du soleil au domicile,
+  bibliothèque `astral`). Coûts souples par créneau dans le solveur OR-Tools existant
+  (entraînements seulement) : le noir pèse comme une séance hors des heures d'activité, un
+  jour de cours plus qu'un décalage d'un jour, l'après-midi moins ; placer la séance reste
+  toujours prioritaire.
 - **Heures transmises au modèle** : les horodatages des résultats d'outils sont convertis
   dans le fuseau configuré avant d'être donnés à Gemini (constaté en production : le modèle
   lisait des heures UTC comme locales, cours de l'après-midi et bus annoncés une heure trop

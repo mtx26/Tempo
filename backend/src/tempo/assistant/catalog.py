@@ -490,6 +490,7 @@ def get_rules(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
         "activity_hours": get_setting(ctx.session, "activity_hours")
         or {"start": "06:00", "end": "22:00"},
+        "training_preferences": get_setting(ctx.session, "training_preferences", {}) or {},
         "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
     }
 
@@ -1489,6 +1490,15 @@ class ActivityHoursIn(Strict):
     end: str = Field(pattern=r"^\d{2}:\d{2}$")
 
 
+class TrainingPreferencesIn(Strict):
+    free_days: bool | None = Field(default=None, description="Prefer days without classes")
+    mornings: bool | None = Field(
+        default=None,
+        description="Prefer the morning (after the activity hours start), then the afternoon",
+    )
+    daylight: bool | None = Field(default=None, description="Avoid the dark (soft)")
+
+
 class SettingsChangeIn(Strict):
     home_place_id: str | None = None
     tracker_entity_id: str | None = Field(
@@ -1516,13 +1526,18 @@ class SettingsChangeIn(Strict):
         default=None,
         description="Preferred hours of flexible activities (soft; default 06:00-22:00)",
     )
+    training_preferences: TrainingPreferencesIn | None = Field(
+        default=None,
+        description="Soft preferences of training sessions only; omitted keys are unchanged",
+    )
 
 
 @operation(
     "update_settings",
     "Permanent preferences: home place, phone tracker, planning horizon, safety margin before "
     "appointments, departure reminders (minutes before leaving, several allowed), study "
-    "preferences (90-minute blocks...), preferred hours of flexible activities.",
+    "preferences (90-minute blocks...), preferred hours of flexible activities, "
+    "training preferences (days without classes, mornings, avoid the dark).",
     SettingsChangeIn,
     mutates=True,
     replan=True,
@@ -1541,6 +1556,9 @@ def update_settings(ctx: OpContext, body: SettingsChangeIn) -> dict[str, Any]:
             raise OpError(f"heures d'activité invalides : {exc}") from exc
         if closes <= opens:
             raise OpError("heures d'activité : la fin doit suivre le début")
+    if "training_preferences" in values:
+        current = get_setting(ctx.session, "training_preferences", {}) or {}
+        values["training_preferences"] = {**current, **values["training_preferences"]}
     if "study_preferences" in values:
         current = get_setting(ctx.session, "study_preferences", {}) or {}
         values["study_preferences"] = {**current, **values["study_preferences"]}
