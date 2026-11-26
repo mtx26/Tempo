@@ -180,6 +180,7 @@ def get_context(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "tracker_entity_id": get_setting(ctx.session, "tracker_entity_id"),
         "horizon_days": get_setting(ctx.session, "horizon_days", 14),
         "buffer_minutes": get_setting(ctx.session, "buffer_minutes", 10),
+        "class_tolerance_minutes": get_setting(ctx.session, "class_tolerance_minutes", 0),
         "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
         "planned_locations": get_setting(ctx.session, "stays", []) or [],
@@ -1524,6 +1525,13 @@ class SettingsChangeIn(Strict):
         "as unrealistic (default 180)",
     )
     buffer_minutes: int | None = Field(default=None, ge=0, le=120)
+    class_tolerance_minutes: int | None = Field(
+        default=None,
+        ge=0,
+        le=30,
+        description="Classes only: the user accepts arriving this many minutes after the start "
+        "and leaving this many minutes before the end (default 0)",
+    )
     departure_reminder_minutes: list[Annotated[int, Field(ge=0, le=240)]] | None = Field(
         default=None, max_length=5, description="Minutes before the advised leave time"
     )
@@ -1546,7 +1554,8 @@ class SettingsChangeIn(Strict):
 @operation(
     "update_settings",
     "Permanent preferences: phone tracker, planning horizon, safety margin before "
-    "appointments, departure reminders (minutes before leaving, several allowed), study "
+    "appointments, tolerance to arrive late / leave early at classes, departure reminders "
+    "(minutes before leaving, several allowed), study "
     "preferences (90-minute blocks...), preferred hours of flexible activities, "
     "training preferences (days without classes, mornings, avoid the dark).",
     SettingsChangeIn,

@@ -325,3 +325,14 @@ def test_the_assistant_asks_before_routing_a_personal_event(session: Session) ->
     asked = run_operation(assistant, "create_event", event)
     assert not asked["ok"] and "aller et le retour" in asked["error"]
     assert run_operation(assistant, "create_event", {**event, "remote": True})["ok"]
+
+
+def test_class_tolerance_is_a_setting_used_by_the_planning(session: Session) -> None:
+    from tempo.planning.service import build_input
+
+    seed(session)
+    assert ok(session, "get_context")["class_tolerance_minutes"] == 0
+    ok(session, "update_settings", class_tolerance_minutes=5)
+    assert ok(session, "get_context")["class_tolerance_minutes"] == 5
+    assert build_input(session, NOW, TZ).data.class_tolerance == timedelta(minutes=5)
+    assert "class_tolerance_minutes" in err(session, "update_settings", class_tolerance_minutes=45)

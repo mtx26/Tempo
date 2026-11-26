@@ -170,6 +170,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
     horizon_days = int(get_setting(session, "horizon_days", DEFAULT_HORIZON_DAYS))
     horizon_end = end_of_day((now + timedelta(days=horizon_days)).astimezone(tz).date(), tz)
     buffer = timedelta(minutes=int(get_setting(session, "buffer_minutes", 10)))
+    tolerance = timedelta(minutes=int(get_setting(session, "class_tolerance_minutes", 0)))
 
     commitments: list[Commitment] = []
     events = session.scalars(
@@ -372,6 +373,7 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
         alternation=alternation,
         preferences=Preferences(**prefs),
         buffer=buffer,
+        class_tolerance=tolerance,
         activity_hours=activity_hours(session),
         training_preferences=TrainingPreferences(
             **(get_setting(session, "training_preferences", {}) or {})

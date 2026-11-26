@@ -140,6 +140,8 @@ class PlanningInput:
     """Recurring residence schedule; ``stays`` are exceptions to it."""
     preferences: Preferences = field(default_factory=Preferences)
     buffer: timedelta = DEFAULT_BUFFER
+    class_tolerance: timedelta = timedelta(0)
+    """The user may arrive this late at a class and leave it this early (journeys only)."""
     solver_seconds: float = 10.0
     activity_hours: tuple[time, time] = DEFAULT_ACTIVITY_HOURS
     training_preferences: TrainingPreferences = field(default_factory=TrainingPreferences)
@@ -372,6 +374,16 @@ def _at_base(
     return tuple(part for window in windows for part in subtract(window, away))
 
 
+def _presence(commitment: Commitment, tolerance: timedelta) -> LocatedEvent:
+    """Where and when the user must be: a class allows arriving ``tolerance`` late and leaving
+    ``tolerance`` early (never down to nothing); other commitments are exact."""
+    assert commitment.place is not None  # noqa: S101 - callers keep located commitments only
+    start, end = commitment.start, commitment.end
+    if commitment.kind is CommitmentKind.CLASS and end - start > 2 * tolerance:
+        start, end = start + tolerance, end - tolerance
+    return LocatedEvent(start, end, commitment.place)
+
+
 def _worth_going_back(
     previous: LocatedEvent,
     following: LocatedEvent,
@@ -493,7 +505,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
             )
     fixed_busy = [Interval(c.start, c.end) for c in fixed]
     conflicts = find_conflicts(fixed, data.locked_blocks, data.now)
-    fixed_located = [LocatedEvent(c.start, c.end, c.place) for c in fixed if c.place is not None]
+    fixed_located = [_presence(c, data.class_tolerance) for c in fixed if c.place is not None]
     residences = {data.home.id} | (
         set() if data.alternation is None else {p.id for p in data.alternation.residences}
     )

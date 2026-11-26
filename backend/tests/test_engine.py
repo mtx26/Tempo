@@ -447,3 +447,17 @@ def test_no_residence_training_during_a_stay_away_from_the_residences() -> None:
         week(commitments=[], trainings=[session], stays=[at_home]), FakeRouting()
     ).trainings[0]
     assert kept.start == at(13, 7)
+
+
+def test_class_tolerance_lets_journeys_overlap_the_class_edges() -> None:
+    """With a tolerance, the user may arrive a few minutes after a class starts and leave a
+    few minutes before it ends; other commitments (the race) keep their exact times."""
+    outcome = run_planning(
+        week(buffer=timedelta(0), class_tolerance=timedelta(minutes=5)), FakeRouting()
+    )
+    to_campus = [b for b in outcome.travel if b.destination == CAMPUS and b.journey]
+    back = [b for b in outcome.travel if b.origin == CAMPUS and b.journey]
+    assert to_campus and all(b.journey.arrival.minute == 5 for b in to_campus)  # type: ignore[union-attr]
+    assert back and all(b.journey.departure.minute == 55 for b in back)  # type: ignore[union-attr]
+    to_race = [b for b in outcome.travel if b.destination == CLUB and b.end == at(12, 10)]
+    assert to_race and to_race[0].journey.arrival == at(12, 10)  # type: ignore[union-attr]

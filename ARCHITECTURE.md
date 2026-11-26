@@ -629,6 +629,12 @@ selon le contexte) :
 | Contrôle de départ | départ maintenant, arrivée avant le début − marge ; sinon au plus tôt | départ au plus tard, puis arrivée au plus tôt |
 | Recherche en conversation | choisies par l'utilisateur (2 h autour d'une borne seule) | choisi par l'utilisateur |
 
+Tolérance de cours (`class_tolerance_minutes`, 0 par défaut, au plus 30, réglée en
+conversation) : pour les **cours** seulement, l'utilisateur accepte d'arriver ce nombre de
+minutes après le début et de partir autant avant la fin ; le « début » et la « fin » du tableau
+ci-dessus sont alors décalés d'autant (jamais jusqu'à annuler le cours). Les autres engagements
+gardent leurs heures exactes.
+
 Départage : perturbations sévères datées, puis correspondances. Toutes les alternatives
 acceptables explorées sont conservées sur chaque trajet du planning publié. Aucun trajet ⇒
 `impossible` ; panne ⇒ `unknown` ; le créneau reste bloqué et le problème est signalé. Aucune
