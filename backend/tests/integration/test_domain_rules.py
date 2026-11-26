@@ -306,7 +306,8 @@ def test_training_preferences_are_set_in_conversation_and_used(session: Session)
     assert row is not None and row.planned_start_at is not None
     start = row.planned_start_at.astimezone(TZ)
     assert (start.hour, start.minute) >= (8, 30)  # after sunrise (about 08:35)
-    assert start + timedelta(minutes=60) <= start.replace(hour=12, minute=0)  # by noon
+    # Morning = the middle of the session before noon (C11).
+    assert start + timedelta(minutes=30) < start.replace(hour=12, minute=0)
 
 
 def test_the_assistant_asks_before_routing_a_personal_event(session: Session) -> None:
