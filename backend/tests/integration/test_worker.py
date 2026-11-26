@@ -186,8 +186,16 @@ def test_replan_scheduling(sessions: sessionmaker[Session]) -> None:
         assert len(list(s.scalars(select(ScheduleVersion)))) == 3
 
 
+def exact_class_times(sessions: sessionmaker[Session]) -> None:
+    """No class tolerance: these checks are about the margin before the exact start."""
+    with sessions() as s:
+        set_setting(s, "class_tolerance_minutes", 0)
+        s.commit()
+
+
 def test_departure_check_from_fresh_phone_position(sessions: sessionmaker[Session]) -> None:
     configure(sessions)
+    exact_class_times(sessions)
     ics_sync(sessions, FEED, NOW, TZ)
     replan_job(sessions, FakeRouting(), NOW, TZ)
     now = datetime(2026, 12, 7, 9, 21, tzinfo=TZ)  # outbound planned 09:20 -> 09:50
@@ -227,6 +235,7 @@ def test_departure_reminder_follows_the_plan_without_gps(
     sessions: sessionmaker[Session],
 ) -> None:
     configure(sessions)
+    exact_class_times(sessions)
     ics_sync(sessions, FEED, NOW, TZ)
     replan_job(sessions, FakeRouting(), NOW, TZ)
     now = datetime(2026, 12, 7, 9, 0, tzinfo=TZ)  # planned departure 09:20, no phone position

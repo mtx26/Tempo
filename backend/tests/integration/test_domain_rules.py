@@ -331,7 +331,7 @@ def test_class_tolerance_is_a_setting_used_by_the_planning(session: Session) -> 
     from tempo.planning.service import build_input
 
     seed(session)
-    assert ok(session, "get_context")["class_tolerance_minutes"] == 0
+    assert ok(session, "get_context")["class_tolerance_minutes"] == 10
     ok(session, "update_settings", class_tolerance_minutes=5)
     assert ok(session, "get_context")["class_tolerance_minutes"] == 5
     assert build_input(session, NOW, TZ).data.class_tolerance == timedelta(minutes=5)

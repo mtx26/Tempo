@@ -72,7 +72,7 @@ def to_ical(items: list[dict[str, Any]], now: datetime, tz: ZoneInfo) -> bytes:
         event = Event()
         event.add("uid", f"{item['id']}@tempo")
         event.add("dtstamp", stamp)
-        event.add("summary", item["title"])
+        event.add("summary", _title(item))
         start, end = datetime.fromisoformat(item["start"]), datetime.fromisoformat(item["end"])
         if item.get("all_day"):
             first: date = start.date()
@@ -97,12 +97,27 @@ def to_ical(items: list[dict[str, Any]], now: datetime, tz: ZoneInfo) -> bytes:
 def _description(item: dict[str, Any], tz: ZoneInfo) -> str:
     if item["type"] == "travel":
         if item.get("status") == "impossible":
-            return "Aucun trajet possible à temps : à vérifier."
+            return "Aucun trajet possible à temps."
         if item.get("status") != "routed":
-            return "Trajet non calculé (lieu ou routage indisponible)."
+            return "Trajet non calculé."
         return "\n".join(_leg_line(leg, tz) for leg in item.get("legs") or [])
     notes: str = item.get("notes") or ""
     return notes
+
+
+NOT_RIDDEN = frozenset({"WALK", "ACCESS"})
+
+
+def _title(item: dict[str, Any]) -> str:
+    """A routed journey is titled by the lines to take only (e.g. ``E110 → 18``)."""
+    if item["type"] != "travel" or item.get("status") != "routed":
+        return str(item["title"])
+    lines = [
+        str(leg.get("line") or leg["mode"])
+        for leg in item.get("legs") or []
+        if leg["mode"] not in NOT_RIDDEN
+    ]
+    return " → ".join(lines) if lines else "À pied"
 
 
 def _leg_line(leg: dict[str, Any], tz: ZoneInfo) -> str:
@@ -110,11 +125,10 @@ def _leg_line(leg: dict[str, Any], tz: ZoneInfo) -> str:
     start, end = datetime.fromisoformat(leg["start"]), datetime.fromisoformat(leg["end"])
     minutes = round((end - start).total_seconds() / 60)
     if leg["mode"] == "WALK":
-        return f"À pied jusqu'à {leg['to']} ({minutes} min)"
+        return f"À pied {minutes} min"
     if leg["mode"] == "ACCESS":
-        return f"Dépôt jusqu'à {leg['to']} ({minutes} min)"
-    line = " ".join(x for x in (leg.get("agency"), leg.get("line") or leg["mode"]) if x)
+        return f"Dépôt {minutes} min"
     return (
-        f"{line} : {leg['from']} {start.astimezone(tz):%H:%M} → "
-        f"{leg['to']} {end.astimezone(tz):%H:%M}"
+        f"{leg.get('line') or leg['mode']} {start.astimezone(tz):%H:%M} {leg['from']} → "
+        f"{end.astimezone(tz):%H:%M} {leg['to']}"
     )
