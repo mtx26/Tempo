@@ -2321,6 +2321,7 @@ def pending_question(session: Session) -> dict[str, Any] | None:
     first = rows[0]
     return {
         "id": str(first.id),
+        "conversation": first.dedupe_key.startswith("ask:"),
         "question": first.message,
         "needed_by": _iso(first.due_at),
         "others": len(rows) - 1,

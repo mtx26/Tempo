@@ -27,6 +27,7 @@ from tempo.db.models import (
     ActivityRow,
     Base,
     ConversationTurnRow,
+    FixedEventRow,
     NotificationRow,
     StudyTaskRow,
 )
@@ -409,3 +410,40 @@ def test_history_is_shared_by_every_assist_conversation(
             )
     second = llm.requests[1]["contents"]
     assert second[0].parts[0].text == "rapport 3 h"  # the earlier conversation is in context
+
+
+def test_conversation_clarification_persists_until_answered(session: Session) -> None:
+    """A clarification asked in one conversation survives (other conversation, restart):
+    given with the next message, closed once answered; one question per answer."""
+    from datetime import timedelta
+
+    from tempo.db.store import open_questions
+    from tempo.planning.service import replan
+    from tests.integration.test_decisions import lecture
+
+    seed(session)
+    lecture(session, "tp", NOW + timedelta(days=1), NOW + timedelta(days=1, hours=2), "TP")
+    tp_row = session.scalars(select(FixedEventRow).where(FixedEventRow.uid == "tp")).one()
+    tp_row.location = "Salle Z.99"  # unknown place: a real question of the planner
+    replan(session, FakeRouting(), NOW, TZ, reason="t")
+    (tp_question,) = open_questions(session)
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
+    asking = assistant(ScriptedModels(response(say("Noté. Plusieurs séances ?"))))
+    first = asking.reply(ctx, "ajoute mon rapport, 3 h", [])
+    assert first.text == "Noté. Plusieurs séances ?"  # no second question appended
+    (mine, _planner) = open_questions(session)
+    assert mine.dedupe_key.startswith("ask:") and "ajoute mon rapport" in mine.message
+    assert mine.acknowledged_at is not None  # already read in the conversation: no HA notice
+    later = ScriptedModels(
+        response(
+            tool_use(
+                "create_task",
+                {"title": "Rapport", "estimated_minutes": 180, "splittable": True},
+            )
+        ),
+        response(say("C'est noté.")),
+    )
+    reply = assistant(later).reply(ctx, "oui, en plusieurs fois", [])  # new conversation
+    assert "Plusieurs séances ?" in later.requests[0]["contents"][-1].parts[0].text
+    assert reply.text == f"C'est noté.\n{tp_question.message}"  # the next question follows
+    assert [q.id for q in open_questions(session)] == [tp_question.id]

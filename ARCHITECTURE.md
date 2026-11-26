@@ -860,19 +860,32 @@ stateDiagram-v2
 - Accord et refus se font en conversation (`decide_proposal` sur une proposition identifiée,
   uniquement sur réponse explicite).
 - **Un seul suivi des points ouverts** : questions, problèmes et pannes passent par
-  `db.store.notify` (dédupliqués par clé). Une question du planificateur ou des sources (lieu
-  inconnu, jour de changement sans cours, examen incertain) est une notification `question`
-  persistante avec son échéance (`due_at`) et sa résolution (`resolved_at`, distincte de
-  l'affichage : Home Assistant acquitte à la remise sans répondre) ; elle est close quand le
-  dernier plan ne la soulève plus (réponse appliquée) et rouverte si elle revient. À chaque
-  message, la question ouverte la plus urgente (échéance la plus proche, puis la plus ancienne)
-  est donnée à Gemini pour qu'il applique une réponse, et **Tempo l'ajoute lui-même à la fin de
-  la réponse** (déterministe) : une seule à la fois, la suivante dès que la précédente est
-  résolue, y compris dans la même réponse. Home Assistant ne laisse pas un agent Assist parler
-  le premier : la première interaction possible est le premier message de toute conversation
-  (« bonjour » suffit), et la notification reste affichée dans Home Assistant. Les questions
-  de clarification de la conversation elle-même restent dans l'historique, commun à toutes les
-  conversations Assist (un seul utilisateur, 24 h, en base : redémarrages compris).
+  `db.store.notify` (dédupliqués par clé). **Une seule file de questions** : notifications
+  `question` persistantes (redémarrages compris) avec leur échéance (`due_at`) et leur
+  résolution (`resolved_at`, distincte de l'affichage : Home Assistant acquitte à la remise
+  sans répondre).
+  - Questions du planificateur et des sources (lieu iCal inconnu, jour de changement sans
+    cours, examen incertain : une seule question par série, texte stable) : affichées une fois
+    dans Home Assistant (notification persistante), closes quand le dernier plan ne les soulève
+    plus, rouvertes si elles reviennent (sans nouvelle notification).
+  - Clarifications de la conversation : quand Gemini termine un tour **sans rien modifier** par
+    une question, Tempo l'enregistre (`ask:`, échéance « maintenant », avec la demande en
+    attente ; déjà lue, donc pas renotifiée) ; elle est donnée à Gemini avec le message suivant,
+    quelle que soit la conversation, puis close (reposée et réenregistrée si la réponse manque).
+  - À chaque message, la question ouverte la plus urgente (clarification en cours, puis
+    échéance la plus proche, puis la plus ancienne) est donnée à Gemini pour rattacher la
+    réponse et réutiliser ce qui est confirmé (alias, réponse d'examen par série, heure de
+    changement par date : jamais redemandés). Une réponse porte **au plus une question** :
+    si Gemini n'en pose pas, Tempo ajoute lui-même la plus urgente. Un changement du planning
+    sans recalcul dans le tour est recalculé à la fin du tour : la question résolue se ferme et
+    la suivante est posée dans la même réponse.
+  - Ouverture d'Assist : vérifié dans Home Assistant 2026.11.2, l'interface n'envoie à l'agent
+    que `conversation/prepare` (préchargement, aucune réponse affichable) : un agent ne peut
+    pas parler le premier. La première interaction possible est le premier message de toute
+    conversation (« bonjour » suffit) ; la question reste aussi en notification. Seuls les
+    satellites vocaux déclarant `START_CONVERSATION` acceptent
+    `assist_satellite.start_conversation` / `ask_question` (non utilisé : aucun satellite).
+  - Une information manquante ne bloque que l'élément et la période concernés (§8).
 
 ## 10. Worker, rappels et notifications
 
@@ -968,7 +981,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 
 | Besoin | État | Preuve / écart |
 |---|---|---|
-| B01 Conversation | Partiel | Agent Gemini à outils testé avec un client simulé (`tests/integration/test_assistant.py`) et **avec le vrai Gemini** le 26/11/2026 (base jetable, données fictives) : questions quand la date est ambiguë (« vendredi prochain », « jeudi qui vient »), question sur le fractionnement d'une tâche de 3 h, indisponibilité générale créée pour « pas disponible samedi », activité déplacée à l'heure demandée sans verrou, « cette semaine le soir » enregistré comme préférence temporaire, aucune tâche inventée ; quota Vertex AI atteint une fois (429, annoncé « quota LLM atteint »). Sans Gemini, la conversation annonce la panne et ne modifie rien (test, et vrai Home Assistant). Questions persistantes ajoutées par Tempo à la fin de chaque réponse, une à la fois par urgence, et historique commun à toutes les conversations : testés avec un client simulé (`test_assistant.py`) ; avec le vrai Gemini, voir §12. Contrat HA ↔ backend vérifié avec le vrai client HA. |
+| B01 Conversation | Partiel | Agent Gemini à outils testé avec un client simulé (`tests/integration/test_assistant.py`) et **avec le vrai Gemini** le 26/11/2026 (base jetable, données fictives) : questions quand la date est ambiguë (« vendredi prochain », « jeudi qui vient »), question sur le fractionnement d'une tâche de 3 h, indisponibilité générale créée pour « pas disponible samedi », activité déplacée à l'heure demandée sans verrou, « cette semaine le soir » enregistré comme préférence temporaire, aucune tâche inventée ; quota Vertex AI atteint une fois (429, annoncé « quota LLM atteint »). Sans Gemini, la conversation annonce la panne et ne modifie rien (test, et vrai Home Assistant). Questions persistantes (planificateur, sources et clarifications de la conversation), une par réponse par urgence, reprises dans toute conversation : testées avec un client simulé (`test_assistant.py`) et avec le vrai Gemini (§12). Contrat HA ↔ backend vérifié avec le vrai client HA. |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente ; fractionnement demandé au-delà de 90 min, indépendant du lieu ; tâche située fractionnable en plusieurs séances avec trajets ; tâche terminée : toutes les séances restantes annulées, verrouillées comprises, jamais signalées manquées (`test_decisions.py`, `test_domain_rules.py`). |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, repères, invalides) notifiés. **Flux réel de l'université validé localement** le 25/11/2026 (secret `tempo_ics_url`) : téléchargement sécurisé, 36 cours importés dans une base jetable, seconde synchronisation sans changement ; ses congés codés en durée nulle ont révélé un défaut corrigé (`test_ics.py`). Pas encore en service continu (worker non déployé). |
@@ -993,19 +1006,17 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution complète (26/11/2026, version 0.8.0), sans aucun test ignoré : backend
-**565 tests réussis** sur PostgreSQL 16 réel avec le vrai client HA, le **MOTIS national**
-(7 tests, et les 9 tests « MOTIS réel » sur ce même graphe), GreenMail IMAP et la passerelle
-Belgian Mobility réelle ; couverture 93,5 % ; Ruff et mypy strict propres. Pile Docker complète
-(PostgreSQL, migrations jusqu'à 0009, API, worker, relais temps réel, MOTIS national) :
-`scripts/live_scenario.py` **15/15**. **Vrai Home Assistant 2026.11.2** jetable relié à la
-pile (`scripts/ha_e2e.py`) : **14/14** (flux de configuration, entités, agent Assist, GPS,
-liste de tâches, panne Gemini annoncée sans modification). **Vrai Gemini** (base jetable,
-données fictives) : au premier message (« Bonjour ! »), la question la plus urgente (lieu d'un
-cours) est posée ; la réponse est appliquée (alias), le plan recalculé, la question suivante
-(examen incertain) suit dans la même réponse ; la réponse « cours normal » est appliquée
-(`set_exam`) et les deux questions sont closes en base. Intégration HA 0.7.0 inchangée
-(68 tests), compatible avec le backend 0.8.0 (test de contrat).
+Dernière exécution complète (26/11/2026, version 0.8.1), sans aucun test ignoré : backend
+PostgreSQL 16 réel, vrai client HA, MOTIS national (et les tests « MOTIS réel » sur ce graphe),
+GreenMail IMAP, passerelle Belgian Mobility réelle ; Ruff et mypy strict propres (chiffres
+dans la note de version). Pile Docker complète : `scripts/live_scenario.py` 15/15 ; vrai Home
+Assistant 2026.11.2 jetable (`scripts/ha_e2e.py`) 14/14. **Vrai Gemini** (base jetable, données
+fictives) : (1) au premier message, la question la plus urgente (lieu d'un cours) est posée ;
+la réponse est appliquée, le plan recalculé, la question suivante (examen incertain) suit dans
+la même réponse, puis est close après la réponse ; (2) « rendez-vous chez le dentiste jeudi
+prochain » ⇒ question (heure, durée) enregistrée ; dans une **nouvelle** conversation sans
+historique, « à 14 heures, une heure, pas de trajet » crée le rendez-vous le jeudi à 14:00 et
+la clarification est close. Intégration HA 0.7.0 inchangée, compatible (test de contrat).
 
 Bloquants nécessitant l'utilisateur : quota Vertex AI suffisant pour la conversation, installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de

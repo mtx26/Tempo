@@ -395,16 +395,19 @@ def test_uncertain_exam_is_asked_and_planned_on_the_safe_side(session: Session) 
     """An ambiguous title keeps the full margin and asks; the answer applies to the series."""
     seed(session)
     lecture(session, "quiz", at(10, 9), at(10, 11), "Test de chimie")
+    lecture(session, "quiz-2", at(11, 9), at(11, 11), "Test de chimie")  # same title again
     version = replan(session, FakeRouting(), NOW, TZ, reason="t")
-    assert any("Test de chimie" in q for q in version.summary["questions"])
+    assert [q for q in version.summary["questions"] if "Test de chimie" in q] != []
+    assert len([q for q in version.summary["questions"] if "Test de chimie" in q]) == 1
     trip = next(t for t in version.summary["travel"] if t["event_title"] == "Test de chimie")
     assert datetime.fromisoformat(trip["arrival"]) == at(10, 8, 50)  # no tolerance meanwhile
     question = next(
         n for n in session.scalars(select(NotificationRow)) if "Test de chimie" in n.message
     )
     assert question.due_at == at(10, 9)
-    event = session.scalars(select(FixedEventRow).where(FixedEventRow.uid == "quiz")).one()
-    ok(session, "set_exam", event_id=f"event:{event.id}", exam=False)
+    for uid in ("quiz", "quiz-2"):
+        event = session.scalars(select(FixedEventRow).where(FixedEventRow.uid == uid)).one()
+        ok(session, "set_exam", event_id=f"event:{event.id}", exam=False)
     version = replan(session, FakeRouting(), NOW, TZ, reason="t")
     assert not any("Test de chimie" in q for q in version.summary["questions"])
     trip = next(t for t in version.summary["travel"] if t["event_title"] == "Test de chimie")

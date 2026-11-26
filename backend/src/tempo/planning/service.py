@@ -286,13 +286,13 @@ def build_input(
     questions: dict[str, datetime] = {}
     for ref, title, start, end, location in attended_classes(session, now, horizon_end):
         exam = answers.get(uids.get(ref, ""), exam_status(title))
-        if exam is None:  # uncertain: asked; meanwhile the full arrival margin (safe side)
-            local = start.astimezone(tz)
+        if exam is None:  # uncertain: asked once per series (the answer covers all of it);
+            # meanwhile the full arrival margin (safe side). Stable text: never re-notified.
             question = (
-                f"« {title} » du {local.strftime('%d/%m')} à {local.strftime('%H:%M')} : est-ce "
-                "un examen ? En attendant, je garde toute la marge d'arrivée."
+                f"« {title} » est-il un examen ? (réponse valable pour toutes ses séances ; en "
+                "attendant, je garde toute la marge d'arrivée)"
             )
-            questions[question] = start
+            questions[question] = min(questions.get(question, start), start, key=utc)
         commitments.append(
             Commitment(
                 ref,

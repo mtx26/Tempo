@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -111,6 +111,33 @@ def notify(
         )
     else:
         session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
+
+
+def ask_again(session: Session, question: str, request: str, now: datetime) -> None:
+    """A clarification asked in the conversation, kept open until the user answers (any
+    conversation, after a restart): the live exchange comes first (due now). Already read in
+    the conversation: never re-notified in Home Assistant."""
+    key = f"ask:{digest(question)}"
+    notify(
+        session,
+        "question",
+        "Tempo attend votre réponse",
+        f"{question} (votre demande : « {request[:300]} »)",
+        key,
+        due_at=now,
+    )
+    session.execute(
+        update(NotificationRow)
+        .where(NotificationRow.dedupe_key == key)
+        .values(acknowledged_at=now, resolved_at=None)
+    )
+
+
+def resolve_question(session: Session, question_id: str, now: datetime) -> None:
+    row = session.get(NotificationRow, uuid.UUID(question_id))
+    if row is not None and row.resolved_at is None:
+        row.resolved_at = now
+        row.acknowledged_at = row.acknowledged_at or now
 
 
 def open_questions(session: Session) -> list[NotificationRow]:
