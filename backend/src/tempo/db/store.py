@@ -137,6 +137,9 @@ def place_directory(session: Session) -> PlaceDirectory:
 
 ALTERNATION_SETTING = "residence_alternation"
 ACCESS_OVERRIDES_SETTING = "access_overrides"
+CLASS_ATTENDANCE_SETTING = "class_attendance"
+"""Per class occurrence (``event:<id>``): ``{"absent": true}`` or the stated
+``arrive_at`` / ``leave_at`` (ISO); absent key = the whole class is attended."""
 """Temporary transport access points for a period (never the persistent default)."""
 MAX_JOURNEY_SETTING = "max_journey_minutes"
 

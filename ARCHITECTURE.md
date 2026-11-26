@@ -635,6 +635,12 @@ minutes après le début et de partir autant avant la fin ; le « début » et l
 ci-dessus sont alors décalés d'autant (jamais jusqu'à annuler le cours). Les autres engagements
 gardent leurs heures exactes.
 
+Présence à une séance de cours (`set_class_attendance`, réglage `class_attendance` par
+occurrence `event:<id>`) : « absent » (pas de trajet, le créneau est libre), « partiel » (heures
+d'arrivée et/ou de départ dites par l'utilisateur, dans le cours, sans tolérance en plus ; ex.
+partir à 16h pour un train) ou « complet » (retour à la normale). Le cours iCal lui-même n'est
+jamais modifié ; `get_schedule` montre la présence déclarée sur la séance.
+
 Départage : perturbations sévères datées, puis correspondances. Toutes les alternatives
 acceptables explorées sont conservées sur chaque trajet du planning publié. Aucun trajet ⇒
 `impossible` ; panne ⇒ `unknown` ; le créneau reste bloqué et le problème est signalé. Aucune

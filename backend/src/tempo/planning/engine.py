@@ -94,6 +94,8 @@ class Commitment:
     """A LOCKED flexible activity: it may move again, but only after the user's approval."""
     underway: bool = False
     """Already started: never moved, never the subject of a conflict proposal."""
+    exact_times: bool = False
+    """Times stated by the user for this occurrence (partial attendance): no tolerance."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,7 +381,11 @@ def _presence(commitment: Commitment, tolerance: timedelta) -> LocatedEvent:
     ``tolerance`` early (never down to nothing); other commitments are exact."""
     assert commitment.place is not None  # noqa: S101 - callers keep located commitments only
     start, end = commitment.start, commitment.end
-    if commitment.kind is CommitmentKind.CLASS and end - start > 2 * tolerance:
+    if (
+        commitment.kind is CommitmentKind.CLASS
+        and not commitment.exact_times
+        and end - start > 2 * tolerance
+    ):
         start, end = start + tolerance, end - tolerance
     return LocatedEvent(start, end, commitment.place)
 

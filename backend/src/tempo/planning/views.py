@@ -16,7 +16,7 @@ from tempo.db.models import (
     StudyBlockRow,
     StudyTaskRow,
 )
-from tempo.db.store import active_version, get_setting, place_directory
+from tempo.db.store import CLASS_ATTENDANCE_SETTING, active_version, get_setting, place_directory
 from tempo.domain.models import EventStatus
 from tempo.domain.ops import remaining_minutes
 from tempo.timeutil import utc
@@ -26,6 +26,7 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
     """Every planned item overlapping ``[start, end)``, sorted by start."""
     items: list[dict[str, Any]] = []
     directory = place_directory(session)
+    attendance = get_setting(session, CLASS_ATTENDANCE_SETTING, {}) or {}
     for event in session.scalars(
         select(FixedEventRow).where(
             FixedEventRow.deleted_at.is_(None),
@@ -45,6 +46,11 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                 "location": event.location,
                 "place_id": None if place is None else place.id,
                 "fixed": True,
+                **(
+                    {"attendance": attendance[f"event:{event.id}"]}
+                    if f"event:{event.id}" in attendance
+                    else {}
+                ),
             }
         )
     subjects = {t.id: t.subject for t in session.scalars(select(StudyTaskRow))}

@@ -336,3 +336,48 @@ def test_class_tolerance_is_a_setting_used_by_the_planning(session: Session) -> 
     assert ok(session, "get_context")["class_tolerance_minutes"] == 5
     assert build_input(session, NOW, TZ).data.class_tolerance == timedelta(minutes=5)
     assert "class_tolerance_minutes" in err(session, "update_settings", class_tolerance_minutes=45)
+
+
+def test_class_attendance_absent_or_partial(session: Session) -> None:
+    """One class occurrence: skipped (no journey, time free) or attended partly (journeys from
+    the stated times, without the general tolerance); 'full' restores it."""
+    from tempo.db.models import FixedEventRow
+    from tempo.planning.service import build_input
+
+    seed(session)
+    session.flush()
+    classes = {e.uid: f"event:{e.id}" for e in session.scalars(select(FixedEventRow))}
+
+    def commitments() -> dict[str, tuple[datetime, datetime]]:
+        data = build_input(session, NOW, TZ).data
+        return {c.ref: (c.start, c.end) for c in data.commitments if c.ref.startswith("event:")}
+
+    ok(session, "set_class_attendance", event_id=classes["class-7"], attendance="absent")
+    ok(
+        session,
+        "set_class_attendance",
+        event_id=classes["class-8"],
+        attendance="partial",
+        leave_at="2026-12-08T11:00",
+    )
+    found = commitments()
+    assert classes["class-7"] not in found
+    assert found[classes["class-8"]] == (
+        datetime(2026, 12, 8, 10, tzinfo=TZ),
+        datetime(2026, 12, 8, 11, tzinfo=TZ),
+    )
+    assert "dans le cours" in err(
+        session,
+        "set_class_attendance",
+        event_id=classes["class-9"],
+        attendance="partial",
+        leave_at="2026-12-09T13:00",
+    )
+    assert "arrive_at ou leave_at" in err(
+        session, "set_class_attendance", event_id=classes["class-9"], attendance="partial"
+    )
+    schedule = ok(session, "get_schedule", start="2026-12-07T00:00", end="2026-12-09T00:00")
+    marks = {i["id"]: i.get("attendance") for i in schedule["items"] if i["type"] == "class"}
+    assert marks[classes["class-7"]] == {"absent": True}
+    ok(session, "set_class_attendance", event_id=classes["class-7"], attendance="full")
+    assert classes["class-7"] in commitments()

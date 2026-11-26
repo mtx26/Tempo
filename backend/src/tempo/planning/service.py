@@ -33,6 +33,7 @@ from tempo.db.models import (
     StudyTaskRow,
 )
 from tempo.db.store import (
+    CLASS_ATTENDANCE_SETTING,
     access_routing,
     active_version,
     audit,
@@ -181,16 +182,23 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
             FixedEventRow.start_at < horizon_end,
         )
     )
+    attendance = get_setting(session, CLASS_ATTENDANCE_SETTING, {}) or {}
     for event in events:
+        ref = f"event:{event.id}"
+        stated = attendance.get(ref, {})
+        if stated.get("absent"):
+            continue  # the user skips this occurrence: no journey, the time is free
+        arrive, leave = stated.get("arrive_at"), stated.get("leave_at")
         commitments.append(
             Commitment(
-                f"event:{event.id}",
+                ref,
                 event.summary,
-                event.start_at,
-                event.end_at,
+                datetime.fromisoformat(arrive) if arrive else event.start_at,
+                datetime.fromisoformat(leave) if leave else event.end_at,
                 CommitmentKind.CLASS,
                 directory.resolve(event.location),
                 event.location,
+                exact_times=bool(stated),
             )
         )
 

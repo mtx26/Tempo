@@ -45,6 +45,7 @@ from tempo.db.models import (
 from tempo.db.store import (
     ACCESS_OVERRIDES_SETTING,
     ALTERNATION_SETTING,
+    CLASS_ATTENDANCE_SETTING,
     access_routing,
     active_version,
     audit,
@@ -1749,6 +1750,62 @@ def delete_availability_exception(ctx: OpContext, body: IdIn) -> dict[str, Any]:
         raise OpError("exception introuvable")
     ctx.session.delete(row)
     return {"deleted": body.id}
+
+
+class ClassAttendanceIn(Strict):
+    event_id: str = Field(description="event:<id> of the class occurrence (get_schedule)")
+    attendance: Literal["full", "partial", "absent"]
+    arrive_at: datetime | None = Field(
+        default=None, description="partial: when the user arrives (local time; omit = start)"
+    )
+    leave_at: datetime | None = Field(
+        default=None, description="partial: when the user leaves (local time; omit = end)"
+    )
+
+
+@operation(
+    "set_class_attendance",
+    "One university class occurrence: 'absent' (the user does not go: no journey, time "
+    "free), 'partial' (arrives later and/or leaves earlier at the stated times, e.g. to catch "
+    "a train) or 'full' (back to normal). The class itself is never changed.",
+    ClassAttendanceIn,
+    mutates=True,
+    replan=True,
+)
+def set_class_attendance(ctx: OpContext, body: ClassAttendanceIn) -> dict[str, Any]:
+    event = ctx.session.get(FixedEventRow, _uuid(body.event_id, "event"))
+    if event is None or event.deleted_at is not None:
+        raise OpError("cours introuvable")
+    ref = f"event:{event.id}"
+    stated: dict[str, Any] = {}
+    if body.attendance == "absent":
+        stated = {"absent": True}
+    elif body.attendance == "partial":
+        if body.arrive_at is None and body.leave_at is None:
+            raise OpError("présence partielle : donne arrive_at ou leave_at")
+        arrive = event.start_at if body.arrive_at is None else _local(body.arrive_at, ctx.tz)
+        leave = event.end_at if body.leave_at is None else _local(body.leave_at, ctx.tz)
+        if not event.start_at <= arrive < leave <= event.end_at:
+            raise OpError(
+                "présence partielle : les heures doivent être dans le cours, arrivée avant départ"
+            )
+        stated = {"arrive_at": arrive.isoformat(), "leave_at": leave.isoformat()}
+    current = get_setting(ctx.session, CLASS_ATTENDANCE_SETTING, {}) or {}
+    kept = {
+        k: v
+        for k, v in current.items()
+        if k != ref
+        and (row := ctx.session.get(FixedEventRow, _uuid(k, "event"))) is not None
+        and row.end_at > ctx.now
+    }
+    if stated:
+        kept[ref] = stated
+    set_setting(ctx.session, CLASS_ATTENDANCE_SETTING, kept)
+    return {
+        "class": event.summary,
+        "start": event.start_at.isoformat(),
+        "attendance": stated or "full",
+    }
 
 
 class LocationIntentIn(Strict):
