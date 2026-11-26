@@ -485,6 +485,8 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         before, after = _activity_travel(
             request, base_at(anchor, data.stays, data.home, data.alternation), routing, issues
         )
+        if before:  # the real journey arrives ``buffer`` early: reserve that margin too
+            before += data.buffer
         earliest = max(request.earliest_start, data.now, key=utc) + before
         if utc(earliest) >= utc(request.latest_end):
             earliest = max(request.earliest_start, data.now, key=utc)

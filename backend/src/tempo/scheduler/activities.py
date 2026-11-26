@@ -128,7 +128,11 @@ def plan_activities(
 ) -> ActivityPlan:
     if not activities:
         return ActivityPlan(solver_status="EMPTY")
-    origin = min(utc(a.earliest_start) for a in activities) - timedelta(days=1)
+    # Whole-hour origin: grid slots fall on :00/:15/:30/:45 whatever the travel margins
+    # (an origin at :40 made 18:00 unreachable for a session preferred at 18:00).
+    origin = (min(utc(a.earliest_start) for a in activities) - timedelta(days=1)).replace(
+        minute=0, second=0, microsecond=0
+    )
     horizon_end = max(utc(a.latest_end) for a in activities) + timedelta(days=1)
     model = cp_model.CpModel()
     intervals: list[cp_model.IntervalVar] = []

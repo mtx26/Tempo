@@ -88,7 +88,8 @@ def test_realistic_week_is_complete_and_consistent() -> None:
     assert outcome.result is not None
     training = outcome.trainings[0]
     assert training.start == at(8, 18)
-    assert training.reserved == Interval(at(8, 17, 30), at(8, 19, 30))
+    # 30 min trip arriving 10 min early (buffer) + 60 min session + 30 min back.
+    assert training.reserved == Interval(at(8, 17, 20), at(8, 19, 30))
     travel = [Interval(b.start, b.end) for b in outcome.travel if b.end > b.start]
     assert all(b.status is TravelStatus.ROUTED for b in outcome.travel)
     # Every class day has an outbound trip arriving 10 min early, and a return.
