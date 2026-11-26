@@ -1,8 +1,9 @@
 """Read-only iCalendar feed of the published plan, for a phone calendar subscription.
 
-``GET /calendar/<token>.ics`` lists what Home Assistant's calendar shows (``schedule_items``):
-classes, study blocks, activities, trainings, races and journeys, from 14 days ago to 60 days
-ahead. Nothing can be changed through it (the conversation stays the only business interface).
+``GET /calendar/<token>.ics`` lists what Home Assistant's calendar shows (``schedule_items``)
+except classes (the phone already subscribes to the university calendar): study blocks,
+activities, trainings, races and journeys, from 14 days ago to 60 days ahead. Nothing can be
+changed through it (the conversation stays the only business interface).
 Calendar apps cannot send an Authorization header, so the URL carries a dedicated secret
 (``calendar_token``), compared in constant time; a wrong token gets 404 (the feed's existence
 is not revealed) and counts as a failed attempt for the shared limiter.
@@ -43,7 +44,11 @@ def calendar_router(token: bytes, limiter: FailureLimiter) -> APIRouter:
         limiter.success(client)
         clock: Callable[[], datetime] = request.app.state.clock
         now = clock()
-        items = schedule_items(session, now - PAST, now + FUTURE)
+        items = [
+            item
+            for item in schedule_items(session, now - PAST, now + FUTURE)
+            if item["type"] != "class"  # already on the phone through the university calendar
+        ]
         return Response(
             content=to_ical(items, now),
             media_type="text/calendar; charset=utf-8",

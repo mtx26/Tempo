@@ -62,6 +62,8 @@ def test_feed_lists_the_published_plan(sessions: sessionmaker[Session], database
         assert end > start
         assert NOW - timedelta(days=15) < end and start < NOW + timedelta(days=61)
     assert str(calendar["X-WR-CALNAME"]) == "Tempo"
+    # Classes are left out: the phone already subscribes to the university calendar.
+    assert "CATEGORIES:class" not in response.text
     assert API_TOKEN not in response.text and FEED_TOKEN not in response.text
 
 
@@ -82,3 +84,14 @@ def test_wrong_or_missing_token_reveals_nothing(
 def test_calendar_token_must_differ_from_the_api_token() -> None:
     with pytest.raises(ValueError, match="calendar_token"):
         Settings(api_token=SecretStr(API_TOKEN), calendar_token=SecretStr(API_TOKEN))
+
+
+def test_home_assistant_gets_the_feed_path_with_its_service_token(database_url: str) -> None:
+    auth = {"Authorization": f"Bearer {API_TOKEN}"}
+    with client(database_url, calendar_token=FEED_TOKEN) as api:
+        assert api.get("/v1/status").status_code == 401
+        assert api.get("/v1/status", headers=auth).json()["calendar_path"] == (
+            f"/calendar/{FEED_TOKEN}.ics"
+        )
+    with client(database_url) as api:
+        assert api.get("/v1/status", headers=auth).json()["calendar_path"] is None

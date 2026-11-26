@@ -83,8 +83,14 @@ def create_app(settings: Settings) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/v1/status", dependencies=[Depends(require_token)])
-    def service_status() -> dict[str, str]:
-        return {"version": __version__, "timezone": settings.timezone}
+    def service_status() -> dict[str, str | None]:
+        feed = settings.calendar_token
+        return {
+            "version": __version__,
+            "timezone": settings.timezone,
+            # Shown in Home Assistant's options so the phone subscription URL can be copied.
+            "calendar_path": None if feed is None else f"/calendar/{feed.get_secret_value()}.ics",
+        }
 
     app.include_router(location_router, dependencies=[Depends(require_token)])
     app.include_router(assistant_router, dependencies=[Depends(require_token)])
