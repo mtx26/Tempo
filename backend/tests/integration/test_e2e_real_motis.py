@@ -57,7 +57,11 @@ def test_week_planned_with_real_public_transport(session: Session) -> None:
     )
     session.flush()
     session.add(PlaceAliasRow(alias="ulb - auditoire janson", place_id="ulb"))
-    set_setting(session, "home_place_id", "home")
+    set_setting(
+        session,
+        "residence_alternation",
+        {"residences": ["home"], "first_day": "2026-01-02", "switch_at": "12:00", "period_days": 7},
+    )
     set_setting(session, "horizon_days", 2)
     for weekday in range(7):
         session.add(

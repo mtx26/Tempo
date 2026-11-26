@@ -73,8 +73,8 @@ def configure(api: TestClient) -> None:
         {"weekday": d, "start": "08:00", "end": "20:00", "place_id": "home"} for d in range(7)
     ]
     done(api, "set_weekly_availability", windows=windows)
+    done(api, "set_residence_alternation", residences=["home"], from_date="2026-01-02")
     patch = {
-        "home_place_id": "home",
         "horizon_days": 6,
         "tracker_entity_id": "device_tracker.phone",
     }
@@ -154,12 +154,11 @@ def test_configuration_round_trip_and_validation(api: TestClient) -> None:
     assert places[0]["aliases"] == ["auditoire a.1"]
     assert len(done(api, "get_rules")["weekly_windows"]) == 7
     settings = done(api, "get_context")
-    assert settings["home_place_id"] == "home" and settings["horizon_days"] == 6
+    assert settings["residences"] == ["home"] and settings["horizon_days"] == 6
     bad = {"name": "x", "latitude": 1, "longitude": 1, "aliases": ["Auditoire A.1"]}
     assert "déjà utilisé" in op(api, "upsert_place", place_id="other", **bad).json()["detail"]
     assert op(api, "upsert_place", place_id="Bad-Id", **bad).status_code == 422
-    assert "domicile" in op(api, "delete_place", place_id="home").json()["detail"]
-    assert op(api, "update_settings", home_place_id="nowhere").status_code == 422
+    assert "résidence" in op(api, "delete_place", place_id="home").json()["detail"]
     prefs = {"preferred_block_minutes": 7}
     assert op(api, "update_settings", study_preferences=prefs).status_code == 422
     window = [{"weekday": 0, "start": "08:00", "end": "07:00", "place_id": "home"}]

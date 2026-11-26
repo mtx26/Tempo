@@ -997,7 +997,7 @@ def test_assistant_reads_where_the_user_is_or_will_be(session: Session) -> None:
     stay = ok(session, "get_location", at="2026-12-13T15:00")
     assert (stay["source"], stay["place_id"]) == ("planned_location", "club")
     now = ok(session, "get_location")
-    assert now["source"] in ("gps", "schedule", "home") and "gps" in now
+    assert now["source"] in ("gps", "schedule", "residence_alternation") and "gps" in now
 
 
 def test_unreachable_point_is_explained_not_reported_as_a_busy_range(session: Session) -> None:

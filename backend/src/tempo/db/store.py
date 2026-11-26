@@ -170,12 +170,9 @@ def residence_alternation(
 
 
 def residence_base(session: Session, directory: PlaceDirectory | None = None) -> Place | None:
-    """Fallback base: the configured home place, else the first residence of the alternation."""
+    """Fallback base: the first residence of the alternation (one residence is an alternation
+    of one place); None when no residence is configured."""
     directory = directory or place_directory(session)
-    home_id = get_setting(session, "home_place_id")
-    home = directory.get(home_id) if home_id else None
-    if home is not None:
-        return home
     raw = get_setting(session, ALTERNATION_SETTING) or {}
     first = (raw.get("residences") or [None])[0]
     return directory.get(first) if first else None

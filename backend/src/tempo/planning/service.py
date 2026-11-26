@@ -164,7 +164,9 @@ def build_input(session: Session, now: datetime, tz: ZoneInfo) -> LoadedInput:
     directory = place_directory(session)
     home = residence_base(session, directory)
     if home is None:
-        raise PlanningNotConfiguredError("no home place configured (setting home_place_id)")
+        raise PlanningNotConfiguredError(
+            "no residence configured (say where you live: set_residence_alternation)"
+        )
     horizon_days = int(get_setting(session, "horizon_days", DEFAULT_HORIZON_DAYS))
     horizon_end = end_of_day((now + timedelta(days=horizon_days)).astimezone(tz).date(), tz)
     buffer = timedelta(minutes=int(get_setting(session, "buffer_minutes", 10)))

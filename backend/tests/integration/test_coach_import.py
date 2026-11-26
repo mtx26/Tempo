@@ -117,7 +117,16 @@ def test_confirm_api_and_planning_respects_order_and_recovery(
             s.add(
                 AvailabilityRow(weekday=weekday, start_minute=480, end_minute=1200, place_id="home")
             )
-        set_setting(s, "home_place_id", "home")
+        set_setting(
+            s,
+            "residence_alternation",
+            {
+                "residences": ["home"],
+                "first_day": "2026-01-02",
+                "switch_at": "12:00",
+                "period_days": 7,
+            },
+        )
         set_setting(s, "horizon_days", 10)
         s.commit()
     with TestClient(create_app(Settings(api_token=TOKEN, database_url=database_url))) as api:

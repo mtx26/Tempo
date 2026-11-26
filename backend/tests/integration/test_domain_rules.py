@@ -85,7 +85,7 @@ def test_place_in_use_is_never_deleted_silently(session: Session) -> None:
     )
     message = err(session, "delete_place", place_id="club")
     assert "Labo" in message
-    assert "domicile" in err(session, "delete_place", place_id="home")
+    assert "résidence" in err(session, "delete_place", place_id="home")
     place(session, "libre", "Libre", aliases=["x"])
     ok(session, "delete_place", place_id="libre")
 

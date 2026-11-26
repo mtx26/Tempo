@@ -83,7 +83,16 @@ def configure(sessions: sessionmaker[Session]) -> None:
         )
         s.flush()
         s.add(PlaceAliasRow(alias="auditoire a.1", place_id="campus"))
-        set_setting(s, "home_place_id", "home")
+        set_setting(
+            s,
+            "residence_alternation",
+            {
+                "residences": ["home"],
+                "first_day": "2026-01-02",
+                "switch_at": "12:00",
+                "period_days": 7,
+            },
+        )
         set_setting(s, "horizon_days", 4)
         set_setting(s, "tracker_entity_id", "device_tracker.phone")
         s.commit()

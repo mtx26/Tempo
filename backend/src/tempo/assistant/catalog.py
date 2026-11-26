@@ -164,22 +164,19 @@ def _place_exists(ctx: OpContext, place_id: str | None) -> None:
 
 @operation(
     "get_context",
-    "Current date/time and timezone, residences (equal when they alternate; home_place_id is "
-    "only the fallback without an alternation), phone tracker, planning settings, planned "
-    "locations. Call first when dates or places are involved.",
+    "Current date/time and timezone, residences (equal, in rotation order), phone tracker, "
+    "planning settings, planned locations. Call first when dates or places are involved.",
     NoInput,
     mutates=False,
 )
 def get_context(ctx: OpContext, _: NoInput) -> dict[str, Any]:
     local = ctx.now.astimezone(ctx.tz)
     alternation = get_setting(ctx.session, ALTERNATION_SETTING)
-    home = get_setting(ctx.session, "home_place_id")
     return {
-        "residences": alternation["residences"] if alternation else [home] if home else [],
+        "residences": alternation["residences"] if alternation else [],
         "now": local.isoformat(timespec="minutes"),
         "weekday": local.strftime("%A"),
         "timezone": str(ctx.tz),
-        "home_place_id": get_setting(ctx.session, "home_place_id"),
         "tracker_entity_id": get_setting(ctx.session, "tracker_entity_id"),
         "horizon_days": get_setting(ctx.session, "horizon_days", 14),
         "buffer_minutes": get_setting(ctx.session, "buffer_minutes", 10),
@@ -1451,8 +1448,8 @@ def delete_place(ctx: OpContext, body: PlaceIdIn) -> dict[str, Any]:
 def place_uses(session: Session, place_id: str, now: datetime, tz: ZoneInfo) -> list[str]:
     """What still refers to a place (deleting it would silently change or drop these)."""
     uses: list[str] = []
-    if get_setting(session, "home_place_id") == place_id:
-        uses.append("domicile configuré")
+    if place_id in (get_setting(session, ALTERNATION_SETTING) or {}).get("residences", []):
+        uses.append("résidence de l'alternance")
     uses += [
         f"point d'accès de {row.name}"
         for row in session.scalars(select(PlaceRow).where(PlaceRow.access_place_id == place_id))
@@ -1515,7 +1512,6 @@ class TrainingPreferencesIn(Strict):
 
 
 class SettingsChangeIn(Strict):
-    home_place_id: str | None = None
     tracker_entity_id: str | None = Field(
         default=None, pattern=r"^device_tracker\.[a-z0-9_]{1,200}$"
     )
@@ -1549,7 +1545,7 @@ class SettingsChangeIn(Strict):
 
 @operation(
     "update_settings",
-    "Permanent preferences: home place, phone tracker, planning horizon, safety margin before "
+    "Permanent preferences: phone tracker, planning horizon, safety margin before "
     "appointments, departure reminders (minutes before leaving, several allowed), study "
     "preferences (90-minute blocks...), preferred hours of flexible activities, "
     "training preferences (days without classes, mornings, avoid the dark).",
@@ -1561,8 +1557,6 @@ def update_settings(ctx: OpContext, body: SettingsChangeIn) -> dict[str, Any]:
     values = body.model_dump(exclude_none=True)
     if "departure_reminder_minutes" in values:
         values["reminder_minutes"] = values.pop("departure_reminder_minutes")
-    if "home_place_id" in values:
-        _place_exists(ctx, values["home_place_id"])
     if "activity_hours" in values:
         hours = values["activity_hours"]
         try:

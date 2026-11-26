@@ -369,7 +369,7 @@ Règles du modèle :
   fin locale du jour d'échéance : une échéance stricte n'est jamais repoussée (reliquat et
   échéance manquée signalés), une cible souple laisse de la place après elle (retard pénalisé
   et signalé) ; la fenêtre est recalculée avant chaque replanification.
-- Rien n'est supprimé en silence : un lieu encore utilisé (domicile, activités, tâches,
+- Rien n'est supprimé en silence : un lieu encore utilisé (résidence de l'alternance, activités, tâches,
   disponibilités, lieux prévus) ne peut pas être supprimé ; ses alias sont conservés quand une
   mise à jour ne les mentionne pas ; verrouiller ou déverrouiller une séance la garde en place.
 - Séries : RRULE (python-dateutil) développée en heure locale du fuseau de la série (sûr au
@@ -481,13 +481,13 @@ flowchart TD
 Résolution centralisée (`transport/location.py`) : position réelle seulement si fraîche et
 précise (`assess_position`, utilisée aussi par `get_position`) ; chaque sortie part de la base
 en vigueur à son début et revient à celle en vigueur à sa fin (`base_at` : lieu prévu couvrant
-l'instant, sinon résidence de l'alternance, sinon domicile), la base pouvant donc changer dans la journée (« je pars de chez
+l'instant, sinon résidence de l'alternance), la base pouvant donc changer dans la journée (« je pars de chez
 papa et je rentre chez maman après les cours ») ; deux lieux prévus qui se chevauchent ⇒
 origine inconnue signalée, jamais devinée ; entre deux engagements, l'origine est
 le lieu de l'engagement précédent : le trajet est direct, sauf si le retour à la base laisse
 au moins 1 h sur place une fois les deux trajets réels comptés. `get_location` donne à
 l'assistant où l'utilisateur est ou sera à un instant (GPS réel maintenant, sinon trajet ou
-activité située prévus, sinon lieu prévu, sinon résidence de l'alternance, sinon domicile),
+activité située prévus, sinon lieu prévu, sinon résidence de l'alternance),
 avec la source utilisée.
 
 Résidences multiples (générique, rien de personnel dans le code) :
@@ -520,9 +520,16 @@ Résidences multiples (générique, rien de personnel dans le code) :
   un plan valide déjà publié est conservé (le nouveau, incomplet, est enregistré « rejeté »
   avec `kept_previous_plan`) ; sans plan antérieur, le plan partiel est publié et le trajet
   concerné n'est pas planifié.
+- **Résidences** : uniquement l'alternance (`set_residence_alternation` ; une seule résidence
+  = alternance d'un lieu), toutes à égalité ; plus de réglage `home_place_id` ni d'option HA
+  « zone domicile ». Sans résidence, la planification demande où l'utilisateur habite.
+- **Trajets** : automatiques pour les cours ; pour un autre événement avec un lieu,
+  l'assistant demande s'il faut planifier l'aller et le retour (`create_event.remote`) ; le
+  mode sans IA, qui ne peut pas demander, les planifie. Un séjour déclaré hors des résidences
+  (nuit chez un ami) est une absence : aucun entraînement « à la résidence » pendant celui-ci.
 - **Préférences d'entraînement** (réglage `training_preferences`, en conversation via
   `update_settings`, désactivées par défaut) : jours sans cours, matin (après le début des
-  heures d'activité) puis après-midi, éviter le noir (lever et coucher du soleil au domicile,
+  heures d'activité) puis après-midi, éviter le noir (lever et coucher du soleil à la première résidence,
   bibliothèque `astral`). Coûts souples par créneau dans le solveur OR-Tools existant
   (entraînements seulement) : le noir pèse comme une séance hors des heures d'activité, un
   jour de cours plus qu'un décalage d'un jour, l'après-midi moins ; placer la séance reste

@@ -114,11 +114,13 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             )
             rules = await op("get_rules", {})
             assert len(rules["result"]["weekly_windows"]) == 7
-            await op("update_settings", {"home_place_id": "home"})
+            await op(
+                "set_residence_alternation", {"residences": ["home"], "from_date": "2026-01-02"}
+            )
             # technical setting pushed by the options flow
             await client.update_settings({"tracker_entity_id": "device_tracker.phone"})
             settings = await client.context()
-            assert settings["home_place_id"] == "home"
+            assert settings["residences"] == ["home"]
             assert settings["tracker_entity_id"] == "device_tracker.phone"
             soon = (datetime.now(UTC) + timedelta(days=3)).date().isoformat()
             task = (

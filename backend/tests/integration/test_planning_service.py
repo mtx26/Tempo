@@ -42,7 +42,11 @@ def seed(session: Session) -> StudyTaskRow:
     )
     session.flush()
     session.add(PlaceAliasRow(alias="auditoire a.1", place_id="campus"))
-    set_setting(session, "home_place_id", "home")
+    set_setting(
+        session,
+        "residence_alternation",
+        {"residences": ["home"], "first_day": "2026-01-02", "switch_at": "12:00", "period_days": 7},
+    )
     set_setting(session, "horizon_days", 6)
     for weekday in range(7):
         session.add(

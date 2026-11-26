@@ -151,8 +151,8 @@ Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou de
 | `tempo_bmc_partner_key` (secret, **obligatoire**) | relais / mise à jour des données | Clé Belgian Mobility Standard (data.belgianmobility.io), envoyée uniquement à `api-management-opendata-production.azure-api.net` dans l'en-tête `bmc-partner-key` : horaires statiques et temps réel SNCB, TEC et De Lijn (trajets chaque minute, alertes toutes les 5 min, 43 % du quota de 12 000/jour). Sans clé, le relais refuse de démarrer et la mise à jour s'arrête avec un message explicite ; une clé refusée (401/403) est signalée comme telle. État et pause éventuelle après un 429 : `GET /health` du relais (`paused_until`, `requests_last_24h`, `last_error`). |
 
 Côté Home Assistant (intégration) : URL interne du backend, jeton, `device_tracker` du
-téléphone, service `notify` facultatif, puis option *Utiliser la zone domicile comme domicile
-Tempo*. Le reste (lieux, disponibilités, préférences, rappels) se dit à l'assistant ; les
+téléphone, service `notify` facultatif, modèle d'IA, adresse publique de l'agenda. Le reste
+(lieux, résidences, disponibilités, préférences, rappels) se dit à l'assistant ; les
 coordonnées d'un lieu sont fournies par l'utilisateur, jamais devinées.
 
 ## Déploiement Swarm (Portainer)
