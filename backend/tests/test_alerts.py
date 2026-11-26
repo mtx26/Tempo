@@ -69,9 +69,9 @@ HOME = Place("home", "Kot", Coordinates(50.668, 4.612))
 CAMPUS = Place("campus", "Campus", Coordinates(50.85, 4.35))
 DAY = datetime(2026, 12, 1, tzinfo=UTC)
 TODAY = ((DAY, DAY + timedelta(days=1)),)
-NO_SERVICE = ServiceAlert("Ligne interrompue", effect="NO_SERVICE", impact_periods=TODAY)
-UNTIMED = ServiceAlert("Walcourt - Couvin : Aucun train", effect="NO_SERVICE")
-INFO = ServiceAlert("Travaux le week-end", effect="OTHER_EFFECT")
+NO_SERVICE = ServiceAlert("Ligne E69 interrompue", effect="NO_SERVICE", impact_periods=TODAY)
+UNTIMED = ServiceAlert("E69 : aucun bus", effect="NO_SERVICE")
+INFO = ServiceAlert("E69 : travaux le week-end", effect="OTHER_EFFECT")
 
 
 def journey(
@@ -135,7 +135,8 @@ def test_alerts_break_ties_but_never_exclude_a_journey() -> None:
     assert only_disrupted.blocks[0].journey is disrupted
     assert not only_disrupted.issues
     assert only_disrupted.warnings == [
-        "perturbation NO_SERVICE : Ligne interrompue (Kot -> Campus (2026-12-01T08:50:00+00:00))",
+        "perturbation NO_SERVICE : Ligne E69 interrompue "
+        "(Kot -> Campus (2026-12-01T08:50:00+00:00))",
     ]
 
 
@@ -179,20 +180,23 @@ def test_return_trip_warnings() -> None:
     assert plan.warnings and plan.warnings[0].startswith("perturbation NO_SERVICE")
 
 
-def test_untimed_severe_notices_are_summarised_once_per_plan() -> None:
-    """Real SNCB notices have no period and are attached by MOTIS to every SNCB leg."""
-    there = journey(8, 0, alerts=(UNTIMED, UNTIMED, INFO))
+def test_untimed_or_unrelated_notices_are_never_reported() -> None:
+    """Real SNCB notices have no period and are attached by MOTIS to every SNCB leg; dated
+    network notices about other lines are attached too: neither concerns the journey."""
+    elsewhere = ServiceAlert(
+        "Walcourt - Couvin : aucun train", effect="NO_SERVICE", impact_periods=TODAY
+    )
+    there = journey(8, 0, alerts=(UNTIMED, UNTIMED, INFO, elsewhere))
     back = journey(11, 5, alerts=(UNTIMED,))
     plan = plan_day_travel([lecture()], Fixed([there, back]), start_place=HOME, end_place=HOME)
-    assert plan.warnings == [
-        "avis d'exploitant sans période d'impact (BUS) : non vérifiés pour les trajets prévus",
-    ]
+    assert plan.warnings == []
+    assert elsewhere not in there.disruptions
 
 
 def test_distinct_alerts_with_the_same_header_are_kept() -> None:
-    timed = ServiceAlert("Travaux", effect="DETOUR", impact_periods=TODAY)
-    untimed = ServiceAlert("Travaux", effect="DETOUR")
-    other_text = ServiceAlert("Travaux", description="autre ligne", effect="DETOUR")
+    timed = ServiceAlert("Travaux E69", effect="DETOUR", impact_periods=TODAY)
+    untimed = ServiceAlert("Travaux E69", effect="DETOUR")
+    other_text = ServiceAlert("Travaux E69", description="autre texte", effect="DETOUR")
     j = journey(8, 0, alerts=(timed, untimed, other_text, timed))
     assert len(j.disruptions) == 3
     assert j.severe_disruptions == 1

@@ -17,3 +17,9 @@ def alembic_config(database_url: str) -> Config:
 
 def upgrade_to_head(database_url: str) -> None:
     command.upgrade(alembic_config(database_url), "head")
+
+
+def downgrade_to(database_url: str, revision: str) -> None:
+    """Roll the schema back to ``revision`` (data kept where the older schema can hold it:
+    see each migration's ``downgrade``)."""
+    command.downgrade(alembic_config(database_url), revision)

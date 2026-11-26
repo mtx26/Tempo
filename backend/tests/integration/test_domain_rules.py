@@ -288,8 +288,11 @@ def test_coach_mail_day_is_a_suggestion_within_its_week(session: Session) -> Non
 def test_training_preferences_are_set_in_conversation_and_used(session: Session) -> None:
     seed(session)
     ok(session, "update_settings", training_preferences={"daylight": True})
-    ok(session, "update_settings", training_preferences={"mornings": True})  # merged
-    assert get_setting(session, "training_preferences") == {"daylight": True, "mornings": True}
+    ok(session, "update_settings", training_preferences={"time_of_day": "morning"})  # merged
+    assert get_setting(session, "training_preferences") == {
+        "daylight": True,
+        "time_of_day": "morning",
+    }
     created = ok(
         session,
         "create_event",

@@ -137,6 +137,10 @@ def main() -> None:
             headers=auth,
             json={"tracker_entity_id": "device_tracker.phone"},
         ).json()
+        check("settings step follows", done.get("step_id") == "settings", str(done)[:200])
+        done = http.post(  # technical settings left at their defaults
+            f"{HA}/api/config/config_entries/flow/{flow['flow_id']}", headers=auth, json={}
+        ).json()
         check("config entry created", done.get("type") == "create_entry", str(done)[:200])
         settings = op(http, "get_context")
         check(

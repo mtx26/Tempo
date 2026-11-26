@@ -84,7 +84,7 @@ def data(**overrides: Any) -> PlanningInput:
         "availability": [Interval(at(d, 8), at(d, 20)) for d in range(7, 11)],
         "demands": [],
         "training_preferences": TrainingPreferences(
-            free_days=False, mornings=False, daylight=False
+            free_days=False, time_of_day=None, daylight=False
         ),
         "class_tolerance": timedelta(0),
         "solver_seconds": 5.0,
@@ -147,8 +147,8 @@ def test_study_between_classes_happens_where_the_user_is() -> None:
     assert sum(int(b.duration.total_seconds() // 60) for b in outcome.result.blocks) == 180
 
 
-def test_training_at_the_residence_never_between_classes() -> None:
-    """C1: no training at home between two classes, even with time to go back."""
+def test_training_at_the_residence_avoids_the_time_between_classes() -> None:
+    """C1: avoided between two classes when another slot exists."""
     request = ActivityRequest(
         "t", "Renforcement", timedelta(minutes=60), at(8, 6), at(8, 22), training=True
     )
@@ -159,6 +159,27 @@ def test_training_at_the_residence_never_between_classes() -> None:
     check(outcome)
     (placed,) = outcome.activities
     assert utc(placed.start) >= utc(at(8, 18, 30)) or utc(placed.end) <= utc(at(8, 7, 20))
+
+
+def test_training_between_classes_is_allowed_when_nothing_else_fits() -> None:
+    """C1 is a preference: the only slot is between the classes; the journeys home and back
+    are planned for it (an explicit reason to go home), never an impossible plan."""
+    request = ActivityRequest(
+        "t", "Renforcement", timedelta(minutes=60), at(8, 11), at(8, 15), training=True
+    )
+    outcome = run_planning(
+        data(commitments=[lecture(8, 8, 10), lecture(8, 16, 18)], activities=[request]),
+        FakeRouting(),
+    )
+    check(outcome)
+    (placed,) = outcome.activities
+    assert at(8, 11) <= placed.start and placed.end <= at(8, 15)
+    assert trips(outcome, 8) == [
+        ("home", "campus"),
+        ("campus", "home"),
+        ("home", "campus"),
+        ("campus", "home"),
+    ]
 
 
 def test_stay_elsewhere_excludes_residence_trainings_not_study() -> None:
@@ -179,6 +200,22 @@ def test_stay_elsewhere_excludes_residence_trainings_not_study() -> None:
     check(outcome)
     assert outcome.unplaced_activities == ["t"]
     assert outcome.result is not None and len(outcome.result.blocks) == 1
+
+
+def test_temporary_stay_has_its_journeys_there_and_back() -> None:
+    """Going to a planned location and coming back are mandatory journeys too."""
+    stay = DeclaredStay(FRIEND, at(8, 10), at(9, 18))
+    outcome = run_planning(data(stays=[stay]), FakeRouting())
+    check(outcome)
+    assert [(b.origin.id, b.destination.id) for b in outcome.travel] == [
+        ("home", "friend"),
+        ("friend", "home"),
+    ]
+    there, back = outcome.travel
+    assert there.end == at(8, 10) and back.start == at(9, 18)
+    stated = replace(ALTERNATION, switches={date(2026, 12, 11): at(11, 17)})
+    moving = run_planning(data(alternation=stated, horizon_end=at(11, 23, 59)), FakeRouting())
+    assert [(b.origin.id, b.destination.id) for b in moving.travel] == [("home", "dad")]
 
 
 def test_exam_keeps_the_full_arrival_margin_classes_get_the_tolerance() -> None:

@@ -77,6 +77,26 @@ EXAM_WORDS = frozenset(
     {"examen", "examens", "exam", "exams", "partiel", "partiels", "interrogation", "interro"}
 )
 """Words of an iCal title that make it an examination (no attendance tolerance)."""
+EXAM_DOUBT_WORDS = frozenset(
+    {
+        "test",
+        "tests",
+        "evaluation",
+        "evaluations",
+        "controle",
+        "epreuve",
+        "epreuves",
+        "qcm",
+        "oral",
+        "orals",
+        "defense",
+        "quiz",
+        "certificatif",
+    }
+)
+"""Words that may mean an examination: the user is asked; meanwhile the full margin is kept."""
+EXAM_SETTING = "exam_answers"
+"""The user's answers per iCal series (UID): examination or not."""
 POSTPONE_STEPS_DAYS = (2, 7, 14, 28)
 """Postponements simulated by ``propose_alternatives`` (smallest that resolves)."""
 MAX_ALTERNATIVE_TASKS = 3
@@ -103,9 +123,13 @@ DARK_COST = 30_000
 BETWEEN_CLASSES_COST = 10_000
 """Training between two classes of the same day."""
 CLASS_DAY_COST = 8_000
-EVENING_COST = 3_000
-AFTERNOON_COST = 1_000
-"""Trainings: days without classes first, then mornings, then afternoons, evenings last."""
+TIME_OF_DAY_STEP_COST = 1_000
+TIME_OF_DAY_FAR_COST = 3_000
+"""Trainings, preferred time of day (morning by default; afternoon or evening when asked):
+the next period costs the step, the opposite one the far cost (morning: afternoon, then
+evening last)."""
+TIMES_OF_DAY = ("morning", "afternoon", "evening")
+"""Periods by the middle of the session: before 12:00, before 18:00, from 18:00."""
 COACH_DAY_COST = 500
 """Per day away from the coach's suggested day."""
 PREFERRED_START_COST = 15_000
@@ -172,7 +196,8 @@ IDEMPOTENCY_RETENTION = timedelta(days=2)
 # --- assistant and API --------------------------------------------------------------------------
 
 HISTORY_TURNS = 12
-HISTORY_WINDOW = timedelta(hours=6)
+HISTORY_WINDOW = timedelta(hours=24)
+"""Recent turns of EVERY Assist conversation (one user): clarifications survive."""
 MAX_AGENT_STEPS = 16
 CONVERSATION_BUDGET_SECONDS = 60.0
 """No new model call after this; Home Assistant waits longer (one re-plan + the answer)."""

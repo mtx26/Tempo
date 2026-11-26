@@ -28,13 +28,11 @@ from datetime import UTC, date, datetime, time, timedelta
 from ortools.sat.python import cp_model
 
 from tempo.const import (
-    AFTERNOON_COST,
     BETWEEN_CLASSES_COST,
     CLASS_DAY_COST,
     COACH_DAY_COST,
     DARK_COST,
     DISTRIBUTION_PER_MINUTE,
-    EVENING_COST,
     GRID_MINUTES,
     MAX_BLOCKS_PER_TASK_DAY,
     MISSING_BREAK_COST,
@@ -46,6 +44,9 @@ from tempo.const import (
     SAME_SUBJECT_COST,
     SHORT_BLOCK_COST,
     STABILITY_COST,
+    TIME_OF_DAY_FAR_COST,
+    TIME_OF_DAY_STEP_COST,
+    TIMES_OF_DAY,
     UNPLANNED_PER_MINUTE,
 )
 from tempo.domain.models import TargetKind
@@ -395,12 +396,11 @@ class _Builder:
                 utc(c.start) >= utc(ends) for c in classes
             ):
                 cost += BETWEEN_CLASSES_COST
-            if prefs.mornings:
-                middle = begins + (ends - begins) / 2
-                if middle.time() >= time(18):
-                    cost += EVENING_COST
-                elif middle.time() >= time(12):
-                    cost += AFTERNOON_COST
+            if prefs.time_of_day in TIMES_OF_DAY:
+                middle = (begins + (ends - begins) / 2).time()
+                period = 0 if middle < time(12) else 1 if middle < time(18) else 2
+                steps = abs(period - TIMES_OF_DAY.index(prefs.time_of_day))
+                cost += (0, TIME_OF_DAY_STEP_COST, TIME_OF_DAY_FAR_COST)[steps]
             if prefs.daylight and item.outdoor and p.sun is not None:
                 sunrise, sunset = p.sun(day)
                 if utc(begins) < utc(sunrise) or utc(ends) > utc(sunset):

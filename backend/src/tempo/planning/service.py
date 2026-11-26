@@ -24,12 +24,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import ColumnElement, or_, select, text, update
 from sqlalchemy.orm import Session
 
-from tempo.const import CLASS_ATTENDANCE_SETTING, DECLINED_SETTING
+from tempo.const import CLASS_ATTENDANCE_SETTING, DECLINED_SETTING, EXAM_SETTING
 from tempo.db.models import (
     ActivityRow,
     AvailabilityExceptionRow,
     AvailabilityRow,
     CategoryWindowRow,
+    FixedEventRow,
     NotificationRow,
     ProposalRow,
     ScheduleVersion,
@@ -51,7 +52,7 @@ from tempo.db.store import (
     set_setting,
     temporary_preferences,
 )
-from tempo.domain.models import TargetKind, is_exam
+from tempo.domain.models import TargetKind, exam_status
 from tempo.domain.ops import needs_session, refresh_task_sessions, remaining_minutes
 from tempo.planning.engine import (
     ActivityRequest,
@@ -168,16 +169,20 @@ class LoadedInput:
     spread: dict[str, int] = field(default_factory=dict)
     """Tasks whose deadline is beyond the horizon -> minutes planned in this horizon."""
     warnings: list[str] = field(default_factory=list)
+    questions: dict[str, datetime] = field(default_factory=dict)
+    """Questions about the sources (e.g. is this an exam?), with when the answer is needed."""
 
 
-def _capacity(rules: Rules, busy: list[Interval], until: datetime) -> int:
+def _capacity(rules: Rules, busy: list[Interval], start: datetime, until: datetime) -> int:
+    """Free study minutes in ``[start, until)`` (study windows minus known busy time)."""
     total = 0
     for window in rules.study:
-        if utc(window.start) >= utc(until):
+        low, high = max(window.start, start, key=utc), min(window.end, until, key=utc)
+        if utc(low) >= utc(high):
             continue
-        clipped = Interval(window.start, min(window.end, until, key=utc))
         total += sum(
-            int((utc(p.end) - utc(p.start)).total_seconds() // 60) for p in subtract(clipped, busy)
+            int((utc(p.end) - utc(p.start)).total_seconds() // 60)
+            for p in subtract(Interval(low, high), busy)
         )
     return total
 
@@ -269,14 +274,32 @@ def build_input(
             held_minutes[task] = held_minutes.get(task, 0) + int(p.details.get("minutes", 0))
 
     commitments: list[Commitment] = []
+    answers = get_setting(session, EXAM_SETTING, {}) or {}
+    uids = {
+        f"event:{row.id}": row.uid
+        for row in session.scalars(
+            select(FixedEventRow).where(
+                FixedEventRow.end_at > now, FixedEventRow.start_at < horizon_end
+            )
+        )
+    }
+    questions: dict[str, datetime] = {}
     for ref, title, start, end, location in attended_classes(session, now, horizon_end):
+        exam = answers.get(uids.get(ref, ""), exam_status(title))
+        if exam is None:  # uncertain: asked; meanwhile the full arrival margin (safe side)
+            local = start.astimezone(tz)
+            question = (
+                f"« {title} » du {local.strftime('%d/%m')} à {local.strftime('%H:%M')} : est-ce "
+                "un examen ? En attendant, je garde toute la marge d'arrivée."
+            )
+            questions[question] = start
         commitments.append(
             Commitment(
                 ref,
                 title,
                 start,
                 end,
-                CommitmentKind.EXAM if is_exam(title) else CommitmentKind.CLASS,
+                CommitmentKind.CLASS if exam is False else CommitmentKind.EXAM,
                 directory.resolve(location),
                 location,
                 exact_times=ref in attendance,
@@ -393,39 +416,66 @@ def build_input(
         ):
             expired[str(task.id)] = expired.get(str(task.id), 0) + act.duration_minutes
 
-    # Study demands: full remaining work within the horizon; a deadline beyond it plans the
-    # share proportional to the study capacity of the horizon (regular distribution).
+    # Study demands: full remaining work within the horizon. A deadline beyond it plans its
+    # share now: proportional to the study capacity of the horizon, and at least what the
+    # known capacity after the horizon cannot absorb, deadlines taken in order (earliest
+    # deadline first, with the classes and fixed events known until then).
     task_ids: dict[str, uuid.UUID] = {}
     demands: list[StudyDemand] = []
     spread: dict[str, int] = {}
     warnings: list[str] = []
     last_day = (horizon_end - timedelta(minutes=1)).astimezone(tz).date()
-    class_busy = [Interval(c.start, c.end) for c in commitments]
-    for task in session.scalars(select(StudyTaskRow).where(StudyTaskRow.archived.is_(False))):
-        remaining = remaining_minutes(task)
-        if not remaining or needs_session(task):
-            continue
+    open_tasks = [
+        t
+        for t in session.scalars(select(StudyTaskRow).where(StudyTaskRow.archived.is_(False)))
+        if remaining_minutes(t) and not needs_session(t)
+    ]
+    far = sorted(
+        (t for t in open_tasks if t.target_date is not None and t.target_date > last_day),
+        key=lambda t: t.target_date or date.max,
+    )
+    if far:
+        last = end_of_day(max(t.target_date or last_day for t in far), tz)
+        far_rules = load_rules(session, now, last, tz)
+        known = [Interval(c[2], c[3]) for c in attended_classes(session, now, last)] + [
+            Interval(a.earliest_start_at, a.latest_end_at)
+            for a in session.scalars(
+                select(ActivityRow).where(
+                    ActivityRow.status == "active",
+                    ActivityRow.scheduling == "fixed",
+                    ActivityRow.latest_end_at > now,
+                    ActivityRow.earliest_start_at < last,
+                )
+            )
+        ]
+        within = _capacity(far_rules, known, now, horizon_end)
+        needed, planned_now = 0, 0
+        for task in far:
+            remaining = max(0, (remaining_minutes(task) or 0) - held_minutes.get(str(task.id), 0))
+            deadline = end_of_day(task.target_date or last_day, tz)
+            total = _capacity(far_rules, known, now, deadline)
+            needed += remaining
+            if needed > total:
+                warnings.append(
+                    f"« {task.subject} » : avec les échéances plus proches, {needed} min à "
+                    f"faire pour {total} min d'étude disponibles d'ici le "
+                    f"{(task.target_date or last_day).isoformat()} : la répartition régulière "
+                    "ne suffit plus, à revoir avec l'utilisateur"
+                )
+            proportional = remaining if total <= 0 else remaining * within / total
+            unabsorbed = needed - _capacity(far_rules, known, horizon_end, deadline) - planned_now
+            share = math.ceil(max(proportional, unabsorbed, 15) / 15) * 15
+            spread[str(task.id)] = min(remaining, share)
+            planned_now += spread[str(task.id)]
+    for task in open_tasks:
+        remaining = max(0, (remaining_minutes(task) or 0) - held_minutes.get(str(task.id), 0))
         task_ids[str(task.id)] = task.id
-        remaining = max(0, remaining - held_minutes.get(str(task.id), 0))
         target: datetime | None = None
         minutes = remaining
-        if task.target_date is not None:
+        if str(task.id) in spread:
+            target, minutes = horizon_end, spread[str(task.id)]
+        elif task.target_date is not None:
             target = end_of_day(task.target_date, tz)
-            if task.target_date > last_day:
-                far_rules = load_rules(session, now, target, tz)
-                total = _capacity(far_rules, class_busy, target)
-                within = _capacity(far_rules, class_busy, horizon_end)
-                if total < remaining:
-                    warnings.append(
-                        f"« {task.subject} » : {remaining} min restantes pour "
-                        f"{total} min d'étude disponibles avant l'échéance du "
-                        f"{task.target_date.isoformat()} : la répartition régulière ne suffit "
-                        "plus, à revoir avec l'utilisateur"
-                    )
-                share = remaining if total <= 0 else math.ceil(remaining * within / total / 15) * 15
-                minutes = min(remaining, max(share, 15))
-                target = horizon_end
-                spread[str(task.id)] = minutes
         not_before = tomorrow if f"task:{task.id}" in declined else None
         demands.append(
             StudyDemand(
@@ -531,7 +581,7 @@ def build_input(
         previous_travel=_previous_travel(active.summary) if active is not None else None,
         expired_strict_tasks=expired,
     )
-    return LoadedInput(data, task_ids, spread, warnings)
+    return LoadedInput(data, task_ids, spread, warnings, questions)
 
 
 def _training(raw: dict[str, Any]) -> TrainingPreferences:
@@ -729,8 +779,9 @@ def _publish_issues(
             session,
             "question",
             "Tempo a besoin d'une précision",
-            question + " En attendant, seuls les éléments et périodes concernés attendent.",
+            question,
             key,
+            due_at=outcome.question_due.get(question),
         )
     outage = [i for i in outcome.issues if "routing unavailable" in i]
     if outage:
@@ -752,14 +803,18 @@ def _publish_issues(
         key = f"issue:{digest(issue)}"
         raised.add(key)
         notify(session, "plan_issue", "Tempo : point à vérifier", issue, key)
+    # Points the latest plan no longer raises are resolved (questions asked in the
+    # conversation, keyed "ask:", are resolved by the conversation itself).
     for row in session.scalars(
         select(NotificationRow).where(
-            NotificationRow.acknowledged_at.is_(None),
+            NotificationRow.resolved_at.is_(None),
             NotificationRow.kind.in_(("question", "plan_issue", "routing_outage")),
+            ~NotificationRow.dedupe_key.startswith("ask:"),
         )
     ):
         if row.dedupe_key not in raised:
-            row.acknowledged_at = now  # resolved: no longer raised by the current plan
+            row.resolved_at = now
+            row.acknowledged_at = row.acknowledged_at or now
 
 
 def mark_missed_blocks(session: Session, now: datetime) -> int:
@@ -877,6 +932,14 @@ def replan(
     before_blocks = _block_keys(session, active_version(session))
     before_activities = {t.activity_id: t.previous_start for t in loaded.data.activities}
     outcome = run_planning(loaded.data, routing)
+    for question, due in loaded.questions.items():
+        outcome.questions.append(question)
+        outcome.question_due[question] = due
+    if loaded.questions and outcome.status in (
+        OutcomeStatus.COMPLETE,
+        OutcomeStatus.PENDING_APPROVAL,
+    ):
+        outcome.status = OutcomeStatus.PARTIAL  # an open question is never a complete plan
     result = outcome.result
     spread = loaded.spread
     # A share planned for a far deadline is not a missed deadline: reported as a warning.

@@ -320,7 +320,9 @@ def test_lock_and_unlock_activity(session: Session) -> None:
 def test_task_without_duration_then_estimated_then_partial_progress(session: Session) -> None:
     """B03: kept unplanned without duration; planned once estimated; partial progress."""
     seed(session)
-    task = ok(session, "create_task", title="Lettre de motivation", kind="personal")["task"]
+    task = ok(
+        session, "create_task", title="Lettre de motivation", kind="personal", splittable=False
+    )["task"]
     assert task["plannable"] is False
     version = replan(session, FakeRouting(), NOW, TZ, reason="t")
     assert task["id"] not in {

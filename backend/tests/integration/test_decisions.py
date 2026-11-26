@@ -288,7 +288,7 @@ def test_residence_changes_after_the_last_class_and_asks_without_class(session: 
     open_questions = [
         n
         for n in session.scalars(select(NotificationRow).where(NotificationRow.kind == "question"))
-        if n.acknowledged_at is None and "18/12" in n.message
+        if n.resolved_at is None and "18/12" in n.message
     ]
     assert open_questions == []  # resolved automatically once answered
 
@@ -341,12 +341,12 @@ def test_located_splittable_task_gets_several_sessions(session: Session) -> None
     assert version.summary["status"] == "complete", version.summary["issues"]
     for row in sessions:
         assert row.planned_start_at is not None
-    assert (
-        "fractionnable"
-        in run_operation(
-            ctx(session), "create_task", {"title": "Rapport", "estimated_minutes": 180}
-        )["error"]
-    )
+    # Splitting is always a decision (nature, intent), never a duration threshold.
+    for minutes in (45, 180):
+        refused = run_operation(
+            ctx(session), "create_task", {"title": "Rapport", "estimated_minutes": minutes}
+        )
+        assert "splittable" in refused["error"]
 
 
 def test_migration_drops_arbitrary_switch_time_and_removed_preferences(database_url: str) -> None:
@@ -384,6 +384,98 @@ def test_migration_drops_arbitrary_switch_time_and_removed_preferences(database_
             )
         assert rows["residence_alternation"]["switch_at"] is None
         assert rows["study_preferences"] == {"preferred_block_minutes": 60}
+        engine.dispose()
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def test_uncertain_exam_is_asked_and_planned_on_the_safe_side(session: Session) -> None:
+    """An ambiguous title keeps the full margin and asks; the answer applies to the series."""
+    seed(session)
+    lecture(session, "quiz", at(10, 9), at(10, 11), "Test de chimie")
+    version = replan(session, FakeRouting(), NOW, TZ, reason="t")
+    assert any("Test de chimie" in q for q in version.summary["questions"])
+    trip = next(t for t in version.summary["travel"] if t["event_title"] == "Test de chimie")
+    assert datetime.fromisoformat(trip["arrival"]) == at(10, 8, 50)  # no tolerance meanwhile
+    question = next(
+        n for n in session.scalars(select(NotificationRow)) if "Test de chimie" in n.message
+    )
+    assert question.due_at == at(10, 9)
+    event = session.scalars(select(FixedEventRow).where(FixedEventRow.uid == "quiz")).one()
+    ok(session, "set_exam", event_id=f"event:{event.id}", exam=False)
+    version = replan(session, FakeRouting(), NOW, TZ, reason="t")
+    assert not any("Test de chimie" in q for q in version.summary["questions"])
+    trip = next(t for t in version.summary["travel"] if t["event_title"] == "Test de chimie")
+    assert datetime.fromisoformat(trip["end"]) == at(10, 9, 10)  # a class again: tolerance
+    session.refresh(question)
+    assert question.resolved_at is not None
+
+
+def test_known_busy_weeks_beyond_the_horizon_are_anticipated(session: Session) -> None:
+    """C13/C26: a full timetable after the horizon makes Tempo plan more now, and say so."""
+    seed(session)  # horizon 6 days from 2026-12-07; study windows 08:00-20:00 every day
+    target = date(2026, 12, 27)
+    ok(
+        session,
+        "create_task",
+        title="Mémoire",
+        estimated_minutes=1800,
+        splittable=True,
+        target_date=target.isoformat(),
+    )
+    calm = replan(session, FakeRouting(), NOW, TZ, reason="t").summary["spread"]
+    for day in range(14, 28):
+        lecture(session, f"busy-{day}", at(day, 8), at(day, 20), "Stage")
+    busy = replan(session, FakeRouting(), NOW, TZ, reason="t")
+    (share_calm,) = calm.values()
+    (share_busy,) = busy.summary["spread"].values()
+    # Nothing can be done in the busy weeks: what does not fit there is planned now.
+    assert share_busy > share_calm
+    assert any("Mémoire" in w for w in busy.summary["warnings"]) or share_busy == 1800
+
+
+def test_migrations_0008_0009_round_trip_keeps_user_data(database_url: str) -> None:
+    from alembic import command
+
+    from tempo.db.migrations import alembic_config, upgrade_to_head
+
+    name = f"{make_url(database_url).database}_rt"
+    admin = create_engine(database_url, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{name}"'))
+    url = make_url(database_url).set(database=name).render_as_string(hide_password=False)
+    try:
+        upgrade_to_head(url)
+        engine = create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO place (id, name, latitude, longitude) "
+                    "VALUES ('home', 'Kot', 50, 4);"
+                    "INSERT INTO availability_window (id, weekday, start_minute, end_minute) "
+                    "VALUES (gen_random_uuid(), 0, 480, 1200);"
+                    "INSERT INTO app_setting (key, value) VALUES "
+                    '(\'residence_alternation\', \'{"value": {"residences": ["home"], '
+                    '"first_day": "2026-11-27", "switch_at": null, "period_days": 7}}\'),'
+                    '(\'training_preferences\', \'{"value": {"time_of_day": "evening"}}\')'
+                )
+            )
+        command.downgrade(alembic_config(url), "0007")
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT place_id FROM availability_window")).scalar() == "home"
+            rows: dict[str, Any] = dict(
+                conn.execute(text("SELECT key, value->'value' FROM app_setting")).all()
+            )
+        assert rows["residence_alternation"]["switch_at"] == "12:00"
+        assert rows["training_preferences"] == {"mornings": False}
+        upgrade_to_head(url)
+        with engine.connect() as conn:
+            prefs = conn.execute(
+                text("SELECT value->'value' FROM app_setting WHERE key = 'training_preferences'")
+            ).scalar()
+        assert prefs == {"time_of_day": "none"}
         engine.dispose()
     finally:
         with admin.connect() as conn:

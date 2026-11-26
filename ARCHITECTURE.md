@@ -95,8 +95,9 @@ M -- T
 - Les trajets nécessaires sont obligatoires et directs entre deux activités ; un retour à une
   résidence entre deux activités n'existe que sur demande explicite.
 - **Clarification** : une information manquante, ambiguë ou contradictoire fait l'objet d'une
-  question dans Home Assistant ; seuls l'élément et la période concernés attendent, le reste
-  est planifié. Rien n'est supposé.
+  question ; seuls l'élément et la période concernés attendent, le reste est planifié. Rien
+  n'est supposé. Les questions sont persistantes (redémarrages, autres conversations), posées
+  une à la fois par ordre d'urgence, et la suivante est posée dès qu'une réponse est traitée.
 - **Accord** : les éléments déjà prévus aujourd'hui ne bougent qu'avec l'accord de
   l'utilisateur (sauf demande explicite de réorganiser la journée), de même qu'une activité dont
   l'itinéraire réel ne permet plus le créneau prévu, et toute activité ou séance verrouillée.
@@ -215,7 +216,8 @@ Contrat (implémenté) :
 - `POST /v1/operations/{name}` accepte un en-tête `Idempotency-Key` (réponse rejouée à
   l'identique pendant 2 jours, puis purgée par le worker ; deux requêtes simultanées avec la
   même clé sont sérialisées). Le journal de travail est idempotent par clé.
-- Contexte LLM : prompt système stable, 12 derniers tours de la conversation (6 h), date et
+- Contexte LLM : prompt système stable, 12 derniers tours de toutes les conversations Assist
+  (24 h ; un seul utilisateur), la question ouverte la plus urgente, date et
   fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
   shell, Docker ou secret.
 - Sans Gemini (non configuré, panne, blocage) : `/v1/conversation` répond que la demande n'a
@@ -232,7 +234,7 @@ Contrat (implémenté) :
 | Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_location`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
 | Événements | `create_event` (fixe/flexible, journée entière occupée/informative, plusieurs jours, RRULE, distanciel), `update_event` (portée occurrence / suivantes / série), `cancel_event`, `set_lock`, `report_activity`, `confirm_activity` |
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
-| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `set_residence_switch`, `clear_residence_alternation`, `get_residence_schedule`, `find_address`, `set_temporary_access`, `clear_temporary_access` |
+| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `set_residence_switch`, `clear_residence_alternation`, `get_residence_schedule`, `find_address`, `set_temporary_access`, `clear_temporary_access`, `set_exam` |
 | Rappels et validation | `create_reminder`, `cancel_reminder`, `decide_proposal`, `acknowledge_notification` |
 | Planning et transport | `plan_now` (local / global, simulation `dry_run`), `propose_alternatives`, `search_journey` |
 
@@ -349,7 +351,7 @@ classDiagram
  Reminder ..> Activity
 ```
 
-Correspondance avec PostgreSQL (`db/models.py`, migrations Alembic `0001`–`0008`) :
+Correspondance avec PostgreSQL (`db/models.py`, migrations Alembic `0001`–`0009`) :
 `activity` (catégories `personal`, `training`, `race`, `task` ; `scheduling` fixe/flexible ;
 une compétition est toujours fixe par contrainte de base), `study_task` (tâches d'étude et
 personnelles), `work_log`, `recurrence_series`, `recurrence_exception`, `study_block`,
@@ -454,8 +456,12 @@ flowchart TD
   approbation.
 - **Études** : volume par tâche, échéance souple par défaut ; une échéance au-delà de
   l'horizon ne planifie que sa part proportionnelle à la capacité d'étude ; journal de travail
-  idempotent, corrections négatives. Examens reconnus au titre iCal (« examen », « partiel »,
-  « interrogation »… : `const.EXAM_WORDS`) : pas de tolérance de présence.
+  idempotent, corrections négatives. **Examens** reconnus au titre iCal (« examen »,
+  « partiel », « interrogation »… : `const.EXAM_WORDS`) : pas de tolérance de présence. Titre
+  ambigu (« test », « évaluation », « contrôle », « épreuve », « QCM », « oral »… :
+  `const.EXAM_DOUBT_WORDS`) ⇒ question « est-ce un examen ? » avant le cours, et en attendant
+  toute la marge d'arrivée (côté sûr). La réponse (`set_exam`) vaut pour toute la série iCal
+  (UID, réglage `exam_answers`).
 - **Personnel** : rendez-vous fixes, sorties/activités flexibles dans une fenêtre ; durée
   inconnue ⇒ question, jamais de durée arbitraire.
 - **Disponibilités** (un seul mécanisme, `planning.service.load_rules`) : fenêtres
@@ -498,10 +504,15 @@ partagé par l'étude, le sport, les trajets, les résidences et les séjours :
   journée (la base pouvant changer dans la journée : « je pars de chez papa et je rentre chez
   maman après les cours »). Aucun retour automatique entre deux activités ; un retour
   intermédiaire n'existe que si l'utilisateur le demande (lieu prévu sur ce créneau) ;
-- l'utilisateur est **absent de la résidence** de son premier départ à son dernier retour, pendant
-  un séjour hors des résidences et pendant les périodes incertaines : un entraînement sans lieu
-  (« à la résidence ») n'y est jamais placé (donc jamais entre deux cours) ; l'étude, elle, se
-  fait là où il est (résidence, université, séjour) ;
+- un entraînement sans lieu (« à la résidence ») n'a jamais lieu pendant un séjour hors des
+  résidences ni pendant une période incertaine ; pendant une sortie, il reste possible mais
+  fortement évité entre deux cours (préférence, C1) : s'il n'y a pas d'autre créneau, les
+  trajets vers la maison et retour sont planifiés pour lui. L'étude se fait là où est
+  l'utilisateur (résidence, université, séjour) ;
+- **changement de base hors sortie** : aller à un lieu prévu (arrivée à son début), en revenir
+  (départ à sa fin), passer à la résidence suivante à l'heure de changement donnée (départ à
+  cette heure) sont des trajets obligatoires comme les autres ; un changement pendant une
+  sortie est simplement son retour ;
 - deux lieux prévus qui se chevauchent, un lieu iCal inconnu ou un jour de changement de
   résidence sans heure connue ⇒ question ; seule la période concernée est incertaine.
 `get_location` donne à l'assistant où l'utilisateur est ou sera à un instant (GPS réel
@@ -539,10 +550,13 @@ Résidences multiples (générique, rien de personnel dans le code) :
 - **Trajets** : automatiques pour les cours et examens ; pour un autre événement avec un lieu,
   l'assistant demande s'il faut planifier l'aller et le retour (`create_event.remote`).
 - **Préférences d'entraînement** (réglage `training_preferences`, actives par défaut, permanentes
-  ou temporaires) : jours sans cours, puis matin, puis après-midi, soir en dernier recours ;
+  ou temporaires) : jours sans cours ; moment de la journée `time_of_day` (matin par défaut,
+  puis après-midi, soir en dernier ; `afternoon` ou `evening` quand l'utilisateur préfère
+  l'après-midi ou le soir, `none` sans préférence ; une séance compte selon son milieu :
+  avant 12:00, avant 18:00, après) ;
   éviter fortement le noir pour une séance extérieure (`indoor` sinon ; lever et coucher du
   soleil à la résidence de référence, la première de l'alternance, les résidences étant proches ;
-  bibliothèque `astral`) ; jamais entre deux cours. Préférences, jamais interdictions (§8). Les
+  bibliothèque `astral`) ; éviter l'entre-deux-cours. Préférences, jamais interdictions (§8). Les
   lieux autorisés, l'ordre du coach, la semaine et la récupération explicite restent des
   contraintes dures.
 - **Heures transmises au modèle** : les horodatages des résultats d'outils sont convertis
@@ -612,7 +626,10 @@ Faits vérifiés par requêtes réelles (23 et 25/11/2026) :
   le relais répond 503 et MOTIS abandonne ce temps réel (vérifié) : le routage continue sur
   les horaires statiques. Il retire `start_time` des TEC (décalage de 12 h en amont ;
   résolution 50 % → 100 %).
-- Alertes : consultatives, filtrées par période d'impact, jamais d'exclusion de trajet ;
+- Alertes : consultatives, jamais d'exclusion de trajet ; signalées seulement si leur période
+  d'impact chevauche le tronçon ET si leur texte nomme sa ligne ou l'un de ses arrêts (MOTIS
+  attache aux tronçons d'un exploitant ses avis sur tout le réseau ; les avis sans période ne
+  sont jamais signalés) ;
   annulations et retards viennent des TripUpdates. Un retard réel de +7 min a été observé.
 - MOTIS national : import 3 min 29 s, 1,8 Go, serveur 0,7–0,9 Go, requête médiane 100–130 ms.
 
@@ -692,8 +709,8 @@ validateur indépendant (`scheduler/validate.py`) sur le plan final.
 **Contraintes dures** (solveur et validateur, jamais relâchées) :
 - aucun chevauchement entre engagements, trajets, périodes incertaines, séances et activités ;
 - disponibilités d'étude (horaires seulement), fenêtres et plages autorisées des activités
-  (fenêtres de catégorie, indisponibilités générales ou par catégorie, présence à la résidence
-  pour un entraînement sans lieu) ;
+  (fenêtres de catégorie, indisponibilités générales ou par catégorie, séjour ailleurs ou période
+  incertaine pour un entraînement sans lieu) ;
 - toutes les échéances (souples et strictes) : aucun travail après sans accord ;
 - éléments verrouillés, en cours et épinglés gardés tels quels ;
 - ordre de la semaine du coach ; récupération explicite (`rest_days` de la séance ou réglage
@@ -724,7 +741,7 @@ autre (un seul modèle).
 | Écart à l'heure préférée d'une activité | 15 000 + 10/min | bat les préférences générales, pas le noir |
 | Entraînement entre deux cours | 10 000 | C1 |
 | Jour de cours (entraînement) | 8 000 | jours sans cours d'abord |
-| Soir / après-midi (entraînement) | 3 000 / 1 000 | matin, puis après-midi, soir en dernier |
+| Moment de la journée (entraînement) | 1 000 période voisine / 3 000 opposée | matin par défaut ; après-midi ou soir sur demande |
 | Jour suggéré du coach | 500 par jour d'écart | |
 | Stabilité | 4 000 / (jours d'avance + 1) + décalage | demain 2 000, dans une semaine ~500 |
 | Au-delà de la part quotidienne régulière | 5 par minute | répartition jusqu'à l'échéance |
@@ -738,13 +755,16 @@ utiles avant l'échéance, au moins une séance de 90 min.
 conversation, la valeur en base prime) : horizon 14 jours, marge d'arrivée 10 min (examens
 compris), tolérance de cours 10 min (jamais pour un examen), rappels de départ 60 et 15 min,
 trajet maximal 180 min, heures d'activité 06:00–22:00, séances 90 min (30 à 90), pause 15 min,
-écart de matière 60 min, préférences d'entraînement actives (jours sans cours, matin, éviter le
-noir), récupération 0 jour.
+écart de matière 60 min, préférences d'entraînement actives (jours sans cours, `time_of_day`
+matin, éviter le noir), récupération 0 jour.
 
-**Horizon** : plan détaillé glissant de 14 jours ; une échéance plus lointaine ne planifie que
-la part de son travail proportionnelle à la capacité d'étude de l'horizon (disponibilités moins
-cours connus jusqu'à l'échéance) ; si la capacité totale avant l'échéance ne suffit plus, un
-avertissement est notifié.
+**Horizon** : plan détaillé glissant de 14 jours. Une échéance plus lointaine planifie
+maintenant la plus grande de deux parts : sa part proportionnelle à la capacité d'étude de
+l'horizon, et ce que la capacité connue après l'horizon ne pourra pas absorber. Les échéances
+sont prises dans l'ordre (la plus proche d'abord, avec le travail des précédentes) et la
+capacité tient compte des disponibilités, exceptions, cours et événements fixes connus jusqu'à
+l'échéance (iCal sur 60 jours). Si le travail cumulé dépasse la capacité avant une échéance,
+un avertissement est notifié.
 
 **Stabilité** : déplacer un élément publié coûte d'autant plus qu'il est proche (nombre
 d'éléments déplacés, amplitude du décalage, temps restant) ; le jour même, il est épinglé.
@@ -840,9 +860,19 @@ stateDiagram-v2
 - Accord et refus se font en conversation (`decide_proposal` sur une proposition identifiée,
   uniquement sur réponse explicite).
 - **Un seul suivi des points ouverts** : questions, problèmes et pannes passent par
-  `db.store.notify` (dédupliqués par clé) ; une question ou un problème que le dernier plan ne
-  soulève plus est clos automatiquement. Questions de la conversation : posées directement par
-  Gemini ; questions du planificateur et des sources : notifications `question`.
+  `db.store.notify` (dédupliqués par clé). Une question du planificateur ou des sources (lieu
+  inconnu, jour de changement sans cours, examen incertain) est une notification `question`
+  persistante avec son échéance (`due_at`) et sa résolution (`resolved_at`, distincte de
+  l'affichage : Home Assistant acquitte à la remise sans répondre) ; elle est close quand le
+  dernier plan ne la soulève plus (réponse appliquée) et rouverte si elle revient. À chaque
+  message, la question ouverte la plus urgente (échéance la plus proche, puis la plus ancienne)
+  est donnée à Gemini pour qu'il applique une réponse, et **Tempo l'ajoute lui-même à la fin de
+  la réponse** (déterministe) : une seule à la fois, la suivante dès que la précédente est
+  résolue, y compris dans la même réponse. Home Assistant ne laisse pas un agent Assist parler
+  le premier : la première interaction possible est le premier message de toute conversation
+  (« bonjour » suffit), et la notification reste affichée dans Home Assistant. Les questions
+  de clarification de la conversation elle-même restent dans l'historique, commun à toutes les
+  conversations Assist (un seul utilisateur, 24 h, en base : redémarrages compris).
 
 ## 10. Worker, rappels et notifications
 
@@ -938,7 +968,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 
 | Besoin | État | Preuve / écart |
 |---|---|---|
-| B01 Conversation | Partiel | Agent Gemini à outils testé avec un client simulé (`tests/integration/test_assistant.py`) et **avec le vrai Gemini** le 26/11/2026 (base jetable, données fictives) : questions quand la date est ambiguë (« vendredi prochain », « jeudi qui vient »), question sur le fractionnement d'une tâche de 3 h, indisponibilité générale créée pour « pas disponible samedi », activité déplacée à l'heure demandée sans verrou, « cette semaine le soir » enregistré comme préférence temporaire, aucune tâche inventée ; quota Vertex AI atteint une fois (429, annoncé « quota LLM atteint »). Sans Gemini, la conversation annonce la panne et ne modifie rien (test). Limite : il n'existe pas d'option « préférer le soir » (seulement ne plus préférer le matin). Contrat HA ↔ backend vérifié avec le vrai client HA. |
+| B01 Conversation | Partiel | Agent Gemini à outils testé avec un client simulé (`tests/integration/test_assistant.py`) et **avec le vrai Gemini** le 26/11/2026 (base jetable, données fictives) : questions quand la date est ambiguë (« vendredi prochain », « jeudi qui vient »), question sur le fractionnement d'une tâche de 3 h, indisponibilité générale créée pour « pas disponible samedi », activité déplacée à l'heure demandée sans verrou, « cette semaine le soir » enregistré comme préférence temporaire, aucune tâche inventée ; quota Vertex AI atteint une fois (429, annoncé « quota LLM atteint »). Sans Gemini, la conversation annonce la panne et ne modifie rien (test, et vrai Home Assistant). Questions persistantes ajoutées par Tempo à la fin de chaque réponse, une à la fois par urgence, et historique commun à toutes les conversations : testés avec un client simulé (`test_assistant.py`) ; avec le vrai Gemini, voir §12. Contrat HA ↔ backend vérifié avec le vrai client HA. |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente ; fractionnement demandé au-delà de 90 min, indépendant du lieu ; tâche située fractionnable en plusieurs séances avec trajets ; tâche terminée : toutes les séances restantes annulées, verrouillées comprises, jamais signalées manquées (`test_decisions.py`, `test_domain_rules.py`). |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, repères, invalides) notifiés. **Flux réel de l'université validé localement** le 25/11/2026 (secret `tempo_ics_url`) : téléchargement sécurisé, 36 cours importés dans une base jetable, seconde synchronisation sans changement ; ses congés codés en durée nulle ont révélé un défaut corrigé (`test_ics.py`). Pas encore en service continu (worker non déployé). |
@@ -963,14 +993,19 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution complète (26/11/2026, version 0.7.0) : backend **549 tests réussis**
-(534 sur PostgreSQL 16 réel avec le vrai client HA, puis 9 sur un **vrai MOTIS** Bruxelles
-v2.11.4 et 6 avec GreenMail IMAP et la passerelle Belgian Mobility réelle), couverture 93,5 % ;
-seuls les 4 tests du MOTIS national restent non exécutés (graphe national non démarré) ; Ruff et
-mypy strict propres. Intégration HA : 68 tests (WSL), mypy strict et Ruff propres. Essai avec le
-vrai Gemini décrit en B01. Non réexécutés pour cette version : `scripts/live_scenario.py`
-(pile Docker complète) et le vrai Home Assistant (`scripts/ha_e2e.py`), mis à jour pour le
-nouveau contrat.
+Dernière exécution complète (26/11/2026, version 0.8.0), sans aucun test ignoré : backend
+**565 tests réussis** sur PostgreSQL 16 réel avec le vrai client HA, le **MOTIS national**
+(7 tests, et les 9 tests « MOTIS réel » sur ce même graphe), GreenMail IMAP et la passerelle
+Belgian Mobility réelle ; couverture 93,5 % ; Ruff et mypy strict propres. Pile Docker complète
+(PostgreSQL, migrations jusqu'à 0009, API, worker, relais temps réel, MOTIS national) :
+`scripts/live_scenario.py` **15/15**. **Vrai Home Assistant 2026.11.2** jetable relié à la
+pile (`scripts/ha_e2e.py`) : **14/14** (flux de configuration, entités, agent Assist, GPS,
+liste de tâches, panne Gemini annoncée sans modification). **Vrai Gemini** (base jetable,
+données fictives) : au premier message (« Bonjour ! »), la question la plus urgente (lieu d'un
+cours) est posée ; la réponse est appliquée (alias), le plan recalculé, la question suivante
+(examen incertain) suit dans la même réponse ; la réponse « cours normal » est appliquée
+(`set_exam`) et les deux questions sont closes en base. Intégration HA 0.7.0 inchangée
+(68 tests), compatible avec le backend 0.8.0 (test de contrat).
 
 Bloquants nécessitant l'utilisateur : quota Vertex AI suffisant pour la conversation, installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de

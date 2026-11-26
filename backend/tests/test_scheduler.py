@@ -12,13 +12,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tempo.const import (
-    AFTERNOON_COST,
     BETWEEN_CLASSES_COST,
     CLASS_DAY_COST,
     COACH_DAY_COST,
     DARK_COST,
     DISTRIBUTION_PER_MINUTE,
-    EVENING_COST,
     MISSING_BREAK_COST,
     NO_DEADLINE_PER_MINUTE,
     OUTSIDE_HOURS_COST,
@@ -26,6 +24,8 @@ from tempo.const import (
     SAME_SUBJECT_COST,
     SHORT_BLOCK_COST,
     STABILITY_COST,
+    TIME_OF_DAY_FAR_COST,
+    TIME_OF_DAY_STEP_COST,
     UNPLANNED_PER_MINUTE,
 )
 from tempo.domain.models import TargetKind
@@ -61,7 +61,7 @@ def problem(**overrides: Any) -> PlanningProblem:
         "timezone": TZ,
         "availability": windows(7, 13),
         "busy": [],
-        "training": TrainingPreferences(free_days=False, mornings=False, daylight=False),
+        "training": TrainingPreferences(free_days=False, time_of_day=None, daylight=False),
     }
     values.update(overrides)
     return PlanningProblem(**values)
@@ -336,20 +336,35 @@ def test_recovery_after_a_fixed_race() -> None:
 def test_training_prefers_days_without_classes_then_mornings() -> None:
     """C11: free days first, then mornings, then afternoons, evenings last."""
     week = training(earliest_start=at(7, 6), latest_end=at(9, 22))
-    prefs = TrainingPreferences(free_days=True, mornings=True, daylight=False)
+    prefs = TrainingPreferences(free_days=True, time_of_day="morning", daylight=False)
     classes = [ClassSlot(at(d, 10), at(d, 12), "Cours") for d in (7, 9)]
     result = run(problem(activities=[week], training=prefs, classes=classes))
     start = result.activities[0].start.astimezone(TZ)
     assert start.date() == date(2026, 12, 8) and start.hour < 12
 
 
+def test_evening_preference_is_supported() -> None:
+    """A user who prefers evenings gets the evening (same mechanism, other period)."""
+    week = training(earliest_start=at(8, 6), latest_end=at(8, 22))
+    prefs = TrainingPreferences(free_days=False, time_of_day="evening", daylight=False)
+    start = run(problem(activities=[week], training=prefs)).activities[0].start.astimezone(TZ)
+    assert start.hour >= 17
+
+
 def test_time_of_day_order_morning_afternoon_evening() -> None:
-    assert 0 < AFTERNOON_COST < EVENING_COST < CLASS_DAY_COST < BETWEEN_CLASSES_COST < DARK_COST
+    assert (
+        0
+        < TIME_OF_DAY_STEP_COST
+        < TIME_OF_DAY_FAR_COST
+        < CLASS_DAY_COST
+        < BETWEEN_CLASSES_COST
+        < DARK_COST
+    )
 
 
 def test_training_avoids_the_dark_but_is_not_forbidden_there() -> None:
     sun = lambda _day: (at(8, 8, 30), at(8, 16, 40))  # noqa: E731 - test double
-    prefs = TrainingPreferences(free_days=False, mornings=False, daylight=True)
+    prefs = TrainingPreferences(free_days=False, time_of_day=None, daylight=True)
     day = run(problem(activities=[training()], training=prefs, sun=sun))
     start = day.activities[0].start
     assert at(8, 8, 30) <= start and utc(day.activities[0].end) <= utc(at(8, 16, 40))
@@ -414,7 +429,7 @@ def test_categories_compete_only_through_priority_and_deadline() -> None:
 
 def test_preferences_never_outweigh_placing_work() -> None:
     """Every soft cost one item can accumulate stays below leaving it unplanned (C9, C11, C24)."""
-    general = CLASS_DAY_COST + EVENING_COST
+    general = CLASS_DAY_COST + TIME_OF_DAY_FAR_COST
     assert general < PREFERRED_START_COST < DARK_COST  # an explicit time beats general prefs
     activity_worst = (
         PREFERRED_START_COST
@@ -422,7 +437,7 @@ def test_preferences_never_outweigh_placing_work() -> None:
         + DARK_COST
         + BETWEEN_CLASSES_COST
         + CLASS_DAY_COST
-        + EVENING_COST
+        + TIME_OF_DAY_FAR_COST
         + COACH_DAY_COST * 6
         + 2 * STABILITY_COST
     )

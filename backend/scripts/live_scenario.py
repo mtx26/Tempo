@@ -42,14 +42,6 @@ def try_op(operation: str, /, **args: Any) -> tuple[int, Any]:
     return r.status_code, r.json()
 
 
-def say(text: str) -> dict[str, Any]:
-    r = http.post(
-        f"{API}/v1/conversation", json={"text": text, "conversation_id": "scenario"}, headers=H
-    )
-    r.raise_for_status()
-    return dict(r.json())
-
-
 def blocks(task_id: str) -> set[tuple[str, str]]:
     today = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     items = op(
@@ -147,7 +139,7 @@ overlap = [
 ]
 check("no study during travel", not overlap, overlap)
 
-# 4. Protected commitment conflict -> proposal, approved in conversation.
+# 4. Protected commitment conflict -> proposal, approved on an explicit decision.
 sched = op(
     "get_schedule", start=f"{d}T00:00", end=(day + timedelta(days=3)).isoformat() + "T23:59"
 )["items"]
@@ -170,8 +162,15 @@ check(
     any(p["kind"] == "unlock_block" for p in pending),
     [p["title"] for p in pending],
 )
-decision = say("approuve") if len(pending) == 1 else {"reply": "plusieurs propositions"}
-check("approved through the conversation", "approuvée" in decision["reply"], decision["reply"])
+# Without Gemini in the dev stack, the decision goes through the same operation the assistant
+# calls on an explicit answer: one identified proposal.
+unlock = next(
+    p
+    for p in pending
+    if p["kind"] == "unlock_block" and p["details"]["block_id"] == free_block["block_id"]
+)
+decided = op("decide_proposal", proposal_id=unlock["id"], approve=True)["proposal"]
+check("approved on an explicit decision", decided["status"] == "approved", decided["status"])
 
 # 5. Partial planning: impossible strict deadline -> partial, capacity, alternatives.
 op(

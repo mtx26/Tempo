@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from tempo.const import EXAM_WORDS
+from tempo.const import EXAM_DOUBT_WORDS, EXAM_WORDS
 from tempo.timeutil import utc
 
 
@@ -19,6 +19,20 @@ class TargetKind(StrEnum):
     """Default. Work is never planned after it automatically; Tempo may propose postponing."""
     HARD = "hard"
     """Explicitly strict: never relaxed silently; violations reported, never hidden."""
+
+
+def exam_status(title: str) -> bool | None:
+    """True: an examination; False: not one; None: uncertain (to ask). From the title,
+    accents and case ignored (``EXAM_WORDS``, ``EXAM_DOUBT_WORDS``)."""
+    import unicodedata
+
+    plain = unicodedata.normalize("NFKD", title.casefold())
+    words = set(
+        "".join(c if c.isalnum() else " " for c in plain if not unicodedata.combining(c)).split()
+    )
+    if EXAM_WORDS & words:
+        return True
+    return None if EXAM_DOUBT_WORDS & words else False
 
 
 def is_exam(title: str) -> bool:

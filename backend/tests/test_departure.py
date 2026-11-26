@@ -142,7 +142,7 @@ def test_inside_the_buffer_skips_arrive_by_and_checks_asap() -> None:
 
 def test_warnings_report_delay_and_timed_disruption() -> None:
     alert = ServiceAlert(
-        "Travaux",
+        "Travaux IC",
         effect="DETOUR",
         impact_periods=((NOW, NOW + timedelta(hours=4)),),
     )
@@ -150,7 +150,7 @@ def test_warnings_report_delay_and_timed_disruption() -> None:
     advice = check_departure(LECTURE, fresh(), Provider([journey]), now=NOW)
     assert advice.warnings == [
         "retard en temps réel +4 min sur IC",
-        "perturbation DETOUR : Travaux",
+        "perturbation DETOUR : Travaux IC",
     ]
 
 

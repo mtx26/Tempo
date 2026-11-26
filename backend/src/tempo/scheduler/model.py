@@ -118,7 +118,8 @@ class TrainingPreferences:
     afternoons, evenings as a fallback; avoid the dark for outdoor sessions."""
 
     free_days: bool = True
-    mornings: bool = True
+    time_of_day: str | None = "morning"
+    """Preferred period (``const.TIMES_OF_DAY``); None: no preference."""
     daylight: bool = True
     rest_days: int = 0
     """Calendar days the user requires between two trainings (0 = no rule; never invented)."""

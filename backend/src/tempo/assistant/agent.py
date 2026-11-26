@@ -20,7 +20,13 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from tempo.ai.llm import log_usage, selected_model
-from tempo.assistant.catalog import OpContext, run_operation, tool_definitions
+from tempo.assistant.catalog import (
+    CATALOG,
+    OpContext,
+    pending_question,
+    run_operation,
+    tool_definitions,
+)
 from tempo.const import (
     CONVERSATION_BUDGET_SECONDS,
     MAX_AGENT_STEPS,
@@ -48,6 +54,9 @@ modification, même réversible : pose UNE question courte. À sa réponse, comb
 demande en attente et exécute. Ne demande pas ce qui est déjà dit ou confirmé (list_places, \
 get_rules, get_residence_schedule, get_context) ni ce qui ne change pas le résultat. Un refus \
 d'outil n'est jamais contourné par un autre appel.
+- Le message peut indiquer une question en attente : si l'utilisateur y répond, \
+applique sa réponse (outil adapté) ; ne la pose pas toi-même, Tempo l'ajoute à la fin de \
+ta réponse tant qu'elle n'est pas résolue.
 - Ponctuel ou permanent : déduis la durée voulue du contexte quand elle est claire (« cette \
 semaine », « demain » = temporaire ; « toujours », « désormais » = permanent), sinon demande. \
 Temporaire : lieu prévu, point d'accès pour une période, exceptions de disponibilité datées, \
@@ -78,7 +87,8 @@ l'utilisateur le demande (set_planned_location sur ce créneau).
 un jour de changement sans cours, demande l'heure (set_residence_switch).
 - Les cours universitaires (iCal) et les compétitions sont fixes : tu ne les modifies pas. Si \
 l'utilisateur ne va pas à un cours, arrive plus tard ou part plus tôt : set_class_attendance \
-pour cette séance. Ce qu'aucun outil n'a enregistré n'est pas « noté » : dis-le. Les \
+pour cette séance. S'il dit qu'un cours est (ou n'est pas) un examen : set_exam. Ce \
+qu'aucun outil n'a enregistré n'est pas « noté » : dis-le. Les \
 entraînements et l'étude sont flexibles.
 - Après des changements qui touchent le planning, appelle plan_now (mode local) pour obtenir \
 le résultat réel. Les éléments déjà prévus aujourd'hui ne bougent qu'avec l'accord de \
@@ -191,10 +201,34 @@ class ToolLoopAssistant:
         self._clock = clock
 
     def reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
+        answer = self._answer(ctx, text, history)
+        # Changes that touch the plan without a re-plan in this turn: re-plan now, so an
+        # answered question is closed and the next one can follow right away.
+        stale = False
+        for name in ctx.changed:
+            stale = False if name == "plan_now" else stale or CATALOG[name].replan
+        if stale:
+            run_operation(ctx, "plan_now", {})
+        # The most urgent open question ends every answer, one at a time (the next one as
+        # soon as this one is resolved): asked at the first interaction of any conversation.
+        waiting = pending_question(ctx.session)
+        if waiting is not None and waiting["question"].split("?")[0] not in answer.text:
+            answer.text = f"{answer.text}\n{waiting['question']}".strip()
+        return answer
+
+    def _answer(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
         local = ctx.now.astimezone(ctx.tz)
+        waiting = pending_question(ctx.session)
+        note = (
+            ""
+            if waiting is None
+            else f" [Question en attente (la plus urgente, {waiting['others']} autre(s) "
+            f"ensuite) : « {waiting['question']} » ; réponse utile avant : "
+            f"{waiting['needed_by'] or 'non précisé'}]"
+        )
         conversation = self._model.open(
             history,
-            f"[{local.strftime('%A %d/%m/%Y %H:%M')} {ctx.tz}] {text}",
+            f"[{local.strftime('%A %d/%m/%Y %H:%M')} {ctx.tz}]{note} {text}",
             selected_model(ctx.session, self._default_model),
         )
         operations: list[dict[str, Any]] = []

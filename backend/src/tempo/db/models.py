@@ -467,6 +467,11 @@ class NotificationRow(Base):
     dedupe_key: Mapped[str] = mapped_column(String(300), unique=True)
     created_at: Mapped[datetime]
     acknowledged_at: Mapped[datetime | None]
+    """Delivered to / read by the user (Home Assistant acknowledges on delivery)."""
+    due_at: Mapped[datetime | None]
+    """Questions: when the answer is needed (urgency order)."""
+    resolved_at: Mapped[datetime | None]
+    """Questions: answered, or no longer raised by the latest plan."""
 
 
 class SettingRow(Base):

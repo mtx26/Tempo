@@ -1,5 +1,6 @@
-"""One-shot database jobs: ``python -m tempo.db upgrade`` and
-``python -m tempo.db grant-runtime <role>``.
+"""One-shot database jobs: ``python -m tempo.db upgrade``, ``python -m tempo.db downgrade
+<revision>`` (rollback to an older release, run with the NEWER image before switching back:
+README.md) and ``python -m tempo.db grant-runtime <role>``.
 
 Reads only the database URL (env ``TEMPO_DATABASE_URL`` or Docker secret
 ``/run/secrets/tempo_database_url``), never the API token: the migration role is separate from
@@ -14,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine, text
 
 from tempo.const import DOCKER_SECRETS_DIR
-from tempo.db.migrations import upgrade_to_head
+from tempo.db.migrations import downgrade_to, upgrade_to_head
 
 
 class MigrationSettings(BaseSettings):
@@ -29,7 +30,8 @@ class MigrationSettings(BaseSettings):
 
 
 ROLE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
-USAGE = "usage: python -m tempo.db upgrade | grant-runtime <role>"
+USAGE = "usage: python -m tempo.db upgrade | downgrade <revision> | grant-runtime <role>"
+REVISION = re.compile(r"^\d{4}$")
 
 
 def grant_runtime(database_url: str, role: str) -> None:
@@ -56,7 +58,11 @@ def grant_runtime(database_url: str, role: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if not argv or argv[0] not in ("upgrade", "grant-runtime"):
+    valid = argv == ["upgrade"] or (
+        len(argv) == 2
+        and (argv[0] == "grant-runtime" or (argv[0] == "downgrade" and REVISION.match(argv[1])))
+    )
+    if not valid:
         print(USAGE, file=sys.stderr)
         return 2
     settings = MigrationSettings()
@@ -65,9 +71,10 @@ def main(argv: list[str]) -> int:
         upgrade_to_head(url)
         print("database schema at head")
         return 0
-    if len(argv) != 2:
-        print(USAGE, file=sys.stderr)
-        return 2
+    if argv[0] == "downgrade":
+        downgrade_to(url, argv[1])
+        print(f"database schema at {argv[1]}")
+        return 0
     grant_runtime(url, argv[1])
     print(f"runtime privileges granted to {argv[1]}")
     return 0

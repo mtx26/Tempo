@@ -82,8 +82,17 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
-def notify(session: Session, kind: str, title: str, message: str, dedupe_key: str) -> None:
-    """Insert a notification once per ``dedupe_key`` (repeated issues do not spam)."""
+def notify(
+    session: Session,
+    kind: str,
+    title: str,
+    message: str,
+    dedupe_key: str,
+    *,
+    due_at: datetime | None = None,
+) -> None:
+    """Insert a notification once per ``dedupe_key`` (repeated issues do not spam). A
+    question raised again while it was resolved is open again (never silently dropped)."""
     stmt = insert(NotificationRow).values(
         id=uuid.uuid4(),
         kind=kind,
@@ -91,8 +100,29 @@ def notify(session: Session, kind: str, title: str, message: str, dedupe_key: st
         message=message,
         dedupe_key=dedupe_key[:300],
         created_at=datetime.now(UTC),
+        due_at=due_at,
     )
-    session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
+    if kind == "question":
+        session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["dedupe_key"],
+                set_={"resolved_at": None, "due_at": stmt.excluded.due_at},
+            )
+        )
+    else:
+        session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
+
+
+def open_questions(session: Session) -> list[NotificationRow]:
+    """Unresolved questions of every origin (planning, sources, conversation), most urgent
+    first: the earliest needed answer, then the oldest question."""
+    return list(
+        session.scalars(
+            select(NotificationRow)
+            .where(NotificationRow.kind == "question", NotificationRow.resolved_at.is_(None))
+            .order_by(NotificationRow.due_at.asc().nulls_last(), NotificationRow.created_at)
+        )
+    )
 
 
 def proposal_revision(session: Session, details: dict[str, Any]) -> str | None:

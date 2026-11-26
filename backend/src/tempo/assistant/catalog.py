@@ -26,10 +26,10 @@ from tempo.const import (
     ACCESS_OVERRIDES_SETTING,
     ALTERNATION_SETTING,
     CLASS_ATTENDANCE_SETTING,
+    EXAM_SETTING,
     MAX_ALTERNATIVE_TASKS,
     MAX_SCHEDULE_SPAN,
     POSTPONE_STEPS_DAYS,
-    SESSION_MINUTES,
     SWITCHES_SETTING,
     TEMPORARY_SETTING,
 )
@@ -59,6 +59,7 @@ from tempo.db.store import (
     audit,
     declared_stays,
     get_setting,
+    open_questions,
     place_directory,
     reference_residence,
     residence_alternation,
@@ -1231,11 +1232,10 @@ class TaskIn(Strict):
         le=3,
         description="1 low, 2 normal, 3 high: matters only when time runs out",
     )
-    splittable: bool | None = Field(
-        default=None,
-        description="Can the work be done in several sessions? From the task's nature and the "
-        "user's words, independent of its place; ask when unclear. Required above 90 minutes "
-        "(a shorter task is one session anyway)",
+    splittable: bool = Field(
+        description="Can the work be done in several sessions? Decide from the task's nature "
+        "and the user's words (a study volume: yes; one appointment-like errand: no), never "
+        "from its place; ask the user when unclear"
     )
     place_id: str | None = None
     notes: str = Field(default="", max_length=5000)
@@ -1254,12 +1254,6 @@ class TaskIn(Strict):
 )
 def create_task(ctx: OpContext, body: TaskIn) -> dict[str, Any]:
     _place_exists(ctx, body.place_id)
-    long = body.estimated_minutes is not None and body.estimated_minutes > SESSION_MINUTES
-    if body.splittable is None and long:
-        raise OpError(
-            "fractionnable ? demandez à l'utilisateur si ce travail peut se faire en plusieurs "
-            "séances (splittable)"
-        )
     if body.target_date is not None and body.target_date < ctx.now.astimezone(ctx.tz).date():
         raise OpError("échéance déjà passée")
     row = StudyTaskRow(
@@ -1269,7 +1263,7 @@ def create_task(ctx: OpContext, body: TaskIn) -> dict[str, Any]:
         target_date=body.target_date,
         target_kind=TargetKind.HARD if body.hard_deadline else TargetKind.SOFT,
         priority=body.priority,
-        splittable=body.splittable is not False,
+        splittable=body.splittable,
         place_id=body.place_id,
         notes=body.notes,
     )
@@ -1573,8 +1567,10 @@ class ActivityHoursIn(Strict):
 
 class TrainingPreferencesIn(Strict):
     free_days: bool | None = Field(default=None, description="Prefer days without classes")
-    mornings: bool | None = Field(
-        default=None, description="Prefer mornings, then afternoons, evenings as a fallback"
+    time_of_day: Literal["morning", "afternoon", "evening", "none"] | None = Field(
+        default=None,
+        description="Preferred time of day for trainings (default morning, then afternoon, "
+        "evening last); evening = prefer evenings; none = no preference",
     )
     daylight: bool | None = Field(default=None, description="Avoid the dark outdoors (soft)")
     rest_days: int | None = Field(
@@ -1641,7 +1637,7 @@ TEMPORARY_KEYS = ("training_preferences", "activity_hours")
     "appointments, tolerance to arrive late / leave early at classes, departure reminders "
     "(minutes before leaving, several allowed), study "
     "preferences (90-minute blocks...), preferred hours of flexible activities, "
-    "training preferences (days without classes, mornings, avoid the dark).",
+    "training preferences (days without classes, time of day, avoid the dark).",
     SettingsChangeIn,
     mutates=True,
     replan=True,
@@ -2291,6 +2287,43 @@ def decide_proposal(ctx: OpContext, body: DecideIn) -> dict[str, Any]:
             actor=ctx.actor,
             now=ctx.now,
         )
+    }
+
+
+class ExamIn(Strict):
+    event_id: str = Field(description="event:<id> of one occurrence (get_schedule)")
+    exam: bool = Field(description="As stated by the user: an examination or a regular class")
+
+
+@operation(
+    "set_exam",
+    "Whether a university event (and every occurrence of its iCal series) is an examination "
+    "(full arrival margin, no tolerance) or a regular class, as the user says.",
+    ExamIn,
+    mutates=True,
+    replan=True,
+)
+def set_exam(ctx: OpContext, body: ExamIn) -> dict[str, Any]:
+    event = ctx.session.get(FixedEventRow, _uuid(body.event_id, "event"))
+    if event is None:
+        raise OpError("événement universitaire introuvable")
+    answers = dict(get_setting(ctx.session, EXAM_SETTING, {}) or {})
+    answers[event.uid] = body.exam
+    set_setting(ctx.session, EXAM_SETTING, answers)
+    return {"title": event.summary, "exam": body.exam}
+
+
+def pending_question(session: Session) -> dict[str, Any] | None:
+    """The most urgent unresolved question, with how many others wait (one at a time)."""
+    rows = open_questions(session)
+    if not rows:
+        return None
+    first = rows[0]
+    return {
+        "id": str(first.id),
+        "question": first.message,
+        "needed_by": _iso(first.due_at),
+        "others": len(rows) - 1,
     }
 
 

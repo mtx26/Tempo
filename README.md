@@ -199,8 +199,15 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
    `deploy/secrets/swarm/tempo_api_token`, « Vérifier le SSL » décoché (réseau interne),
    puis le `device_tracker` du téléphone.
 8. **Mettre à jour** : sauvegarde, nouvelle étiquette `vX.Y.Z`, puis *Update the stack* avec
-   `TEMPO_VERSION` (stop-first, retour arrière automatique). Retour arrière : version
-   précédente ; les migrations sont en avant uniquement (restaurer la sauvegarde si besoin).
+   `TEMPO_VERSION` (stop-first, retour arrière automatique en cas d'échec du démarrage).
+   **Retour arrière vers une version au schéma plus ancien** : d'abord descendre le schéma avec
+   l'image **récente** (seule à connaître ses migrations), puis remettre l'ancienne version :
+   `docker run --rm --network <réseau backend> -e TEMPO_DATABASE_URL=<URL propriétaire>
+   ghcr.io/mtx26/tempo-backend:<récente> python -m tempo.db downgrade <révision>` (0.6.x :
+   `0007`). La descente garde les données que l'ancien schéma peut contenir (0008 : fenêtres
+   d'étude rattachées à la première résidence, heure de changement remise à 12:00 si aucune
+   n'était donnée ; perdus : indisponibilités propres à une autre catégorie que l'étude, séances
+   `indoor` / `rest_days`) ; sinon, restaurer la sauvegarde prise avant la mise à jour.
 9. **Agenda du téléphone** (facultatif) : publier uniquement le chemin `/calendar/` par un
    tunnel Cloudflare (*Zero Trust > Networks > Tunnels > Public Hostname* : chemin
    `^/calendar/`, service `http://localhost:18000`, sans application Cloudflare Access sur

@@ -23,7 +23,13 @@ from tempo.api.app import create_app
 from tempo.assistant.agent import SYSTEM, GeminiChat, LLMUnavailableError, ToolLoopAssistant
 from tempo.assistant.catalog import OpContext
 from tempo.config import Settings
-from tempo.db.models import ActivityRow, Base, ConversationTurnRow, StudyTaskRow
+from tempo.db.models import (
+    ActivityRow,
+    Base,
+    ConversationTurnRow,
+    NotificationRow,
+    StudyTaskRow,
+)
 from tests.integration.test_planning_service import NOW, TZ, seed
 from tests.test_engine import FakeRouting
 
@@ -318,7 +324,8 @@ def test_llm_outage_after_a_change_never_replays_the_request(session: Session) -
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     reply = assistant(llm).reply(ctx, "ajoute 1 h de chimie", [])
     assert "indisponible" in reply.text and "create_task" in reply.text
-    assert ctx.changed == ["create_task"]
+    # Never replayed; what was applied is still planned (deterministic re-plan request).
+    assert ctx.changed == ["create_task", "plan_now"]
 
 
 def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
@@ -349,3 +356,56 @@ def test_model_chosen_in_home_assistant_is_used_without_restart(session: Session
     set_setting(session, LLM_MODEL_SETTING, "gemini-other-model")
     agent.reply(ctx, "salut", [])
     assert [r["model"] for r in llm.requests] == ["gemini-model-under-test", "gemini-other-model"]
+
+
+def test_open_questions_are_asked_one_at_a_time_by_urgency(session: Session) -> None:
+    """Questions persist in the database (not per conversation), the most urgent is given to
+    the model and ends the answer, one at a time; reading one in Home Assistant does not answer
+    it; once resolved, the next one follows in the same answer."""
+    from datetime import timedelta
+
+    from tempo.db.store import notify
+
+    seed(session)
+    for text_, key, days in (
+        ("Où a lieu le TP ?", "question:tp", 1),
+        ("Est-ce un examen ?", "question:exam", 3),
+    ):
+        notify(session, "question", "Q", text_, key, due_at=NOW + timedelta(days=days))
+    for row in session.scalars(select(NotificationRow)):
+        row.acknowledged_at = NOW  # Home Assistant delivered them
+    session.flush()
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
+    fresh = ScriptedModels(response(say("Bonjour !")))
+    first = assistant(fresh).reply(ctx, "bonjour", [])  # a NEW conversation, no history
+    sent = fresh.requests[0]["contents"][-1].parts[0].text
+    assert "Où a lieu le TP ?" in sent and "1 autre(s)" in sent and "examen" not in sent
+    assert first.text == "Bonjour !\nOù a lieu le TP ?"
+    tp = next(n for n in session.scalars(select(NotificationRow)) if "TP" in n.message)
+    tp.resolved_at = NOW  # answered: the planner no longer raises it
+    session.flush()
+    following = assistant(ScriptedModels(response(say("C'est noté.")))).reply(ctx, "salle B", [])
+    assert following.text == "C'est noté.\nEst-ce un examen ?"
+
+
+def test_history_is_shared_by_every_assist_conversation(
+    sessions: sessionmaker[Session], database_url: str
+) -> None:
+    """A clarification asked in one Assist conversation is still known in the next one."""
+    with sessions() as s:
+        seed(s)
+        s.commit()
+    llm = ScriptedModels(
+        response(say("Fractionnable en plusieurs séances ?")), response(say("Noté."))
+    )
+    app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    with TestClient(app) as api:
+        app.state.assistant = assistant(llm)
+        for words, conversation in (("rapport 3 h", "a"), ("oui", "b")):
+            api.post(
+                "/v1/conversation",
+                headers=AUTH,
+                json={"text": words, "conversation_id": conversation},
+            )
+    second = llm.requests[1]["contents"]
+    assert second[0].parts[0].text == "rapport 3 h"  # the earlier conversation is in context

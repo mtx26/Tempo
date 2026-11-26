@@ -121,7 +121,8 @@ def _label(origin: Place, destination: Place, when: datetime) -> str:
 
 def _journey_warnings(plan: TravelPlan, journey: Journey, label: str) -> None:
     notes = journey_notes(journey)
-    for message in [*(f"{note} ({label})" for note in notes.specific), *notes.general]:
+    # Only notices about this journey; untimed operator-wide notices are never reported.
+    for message in (f"{note} ({label})" for note in notes.specific):
         if message not in plan.warnings:
             plan.warnings.append(message)
 

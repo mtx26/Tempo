@@ -104,7 +104,9 @@ def check_departure(
                 advice = DepartureStatus.LEAVE_NOW
             else:
                 advice = DepartureStatus.ON_TIME
-            return DepartureAdvice(advice, best, leave_at, warnings=journey_notes(best).all)
+            return DepartureAdvice(
+                advice, best, leave_at, warnings=list(journey_notes(best).specific)
+            )
 
         earliest = find_trips(
             provider,
@@ -128,7 +130,7 @@ def check_departure(
             utc(earliest.departure),
             reason=f"arrives {int((start - arrival).total_seconds() // 60)} min before the "
             f"start, less than the {int(buffer.total_seconds() // 60)} min margin",
-            warnings=journey_notes(earliest).all,
+            warnings=list(journey_notes(earliest).specific),
         )
     return DepartureAdvice(
         DepartureStatus.LATE,
@@ -136,5 +138,5 @@ def check_departure(
         utc(earliest.departure),
         minutes_late=-(-int((arrival - start).total_seconds()) // 60),
         reason="earliest possible arrival is after the start",
-        warnings=journey_notes(earliest).all,
+        warnings=list(journey_notes(earliest).specific),
     )

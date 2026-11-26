@@ -3,6 +3,7 @@
 Providers must raise ``RoutingUnavailableError`` rather than return partial or invented journeys.
 """
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -34,6 +35,13 @@ STREET_MODES = frozenset(
 SEVERE_EFFECTS = frozenset(
     {"NO_SERVICE", "REDUCED_SERVICE", "SIGNIFICANT_DELAYS", "DETOUR", "STOP_MOVED"}
 )
+
+
+def _words(text: str) -> frozenset[str]:
+    """Lower-case words without accents (alert relevance)."""
+    plain = unicodedata.normalize("NFKD", text.casefold())
+    plain = "".join(c if c.isalnum() else " " for c in plain if not unicodedata.combining(c))
+    return frozenset(plain.split())
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +115,20 @@ class Leg:
 
     @property
     def relevant_alerts(self) -> tuple[ServiceAlert, ...]:
-        """Alerts whose impact period overlaps the leg (scheduled or live times)."""
+        """Alerts about THIS leg: impact period overlapping it (scheduled or live times) and
+        text naming its line or one of its stops. MOTIS attaches network-wide notices to every
+        leg of an operator; those name other lines or places and are left out."""
         first = min(utc(self.start, "s"), utc(self.scheduled_start, "s"))
         last = max(utc(self.end, "e"), utc(self.scheduled_end, "e"))
-        return tuple(a for a in self.alerts if a.active_during(first, last))
+        return tuple(a for a in self.alerts if a.active_during(first, last) and self._named_in(a))
+
+    def _named_in(self, alert: ServiceAlert) -> bool:
+        words = _words(f"{alert.header} {alert.description}")
+        line = _words(self.line or "")
+        stops = [_words(name) for name in (self.origin_name, self.destination_name)]
+        return bool(line and line <= words) or any(
+            stop and stop <= words for stop in stops if sum(len(w) for w in stop) >= 4
+        )
 
 
 @dataclass(frozen=True, slots=True)

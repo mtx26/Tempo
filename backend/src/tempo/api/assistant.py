@@ -99,10 +99,9 @@ def _history(session: Any, conversation_id: str, now: datetime) -> list[dict[str
     rows = list(
         session.scalars(
             select(ConversationTurnRow)
-            .where(
-                ConversationTurnRow.conversation_id == conversation_id,
-                ConversationTurnRow.created_at >= now - HISTORY_WINDOW,
-            )
+            # One user: a clarification asked in another Assist conversation (or before a
+            # restart) is still in context; the conversation id only labels the turns.
+            .where(ConversationTurnRow.created_at >= now - HISTORY_WINDOW)
             .order_by(ConversationTurnRow.created_at.desc())
             .limit(HISTORY_TURNS)
         )

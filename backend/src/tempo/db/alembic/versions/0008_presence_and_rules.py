@@ -64,35 +64,38 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Back to the 0.6 schema WITHOUT losing the study windows: the place they need again is
+    the first residence of the alternation (the only place 0.6 could plan from); rows are
+    removed only when no residence exists. What 0.6 cannot represent is dropped and
+    documented: per-category unavailability other than study (0.6 applied exceptions to study
+    only), ``indoor`` and ``rest_days`` of activities. A stated change time is kept; without
+    one, 0.6 needs a fixed time again (12:00, its old default)."""
     op.drop_constraint(op.f("ck_activity_rest_days_range"), "activity", type_="check")
     op.drop_column("activity", "rest_days")
     op.drop_column("activity", "indoor")
+    op.execute("DELETE FROM availability_exception WHERE kind IS NOT NULL AND kind <> 'study'")
     op.drop_constraint(
         op.f("ck_availability_exception_kind"), "availability_exception", type_="check"
     )
     op.drop_column("availability_exception", "kind")
-    # Places of study windows cannot be recovered: the windows are removed (documented).
-    op.execute("DELETE FROM availability_window")
-    op.add_column(
-        "availability_exception",
-        sa.Column(
-            "place_id",
-            sa.String(length=50),
-            sa.ForeignKey(
-                "place.id",
-                ondelete="CASCADE",
-                name="fk_availability_exception_place_id_place",
-            ),
-        ),
+    residence = (
+        "(SELECT value->'value'->'residences'->>0 FROM app_setting "
+        "WHERE key = 'residence_alternation')"
     )
-    op.add_column(
-        "availability_window",
-        sa.Column(
-            "place_id",
-            sa.String(length=50),
-            sa.ForeignKey(
-                "place.id", ondelete="CASCADE", name="fk_availability_window_place_id_place"
+    for table in ("availability_window", "availability_exception"):
+        op.add_column(
+            table,
+            sa.Column(
+                "place_id",
+                sa.String(length=50),
+                sa.ForeignKey("place.id", ondelete="CASCADE", name=f"fk_{table}_place_id_place"),
             ),
-            nullable=False,
-        ),
+        )
+    op.execute(f"UPDATE availability_window SET place_id = {residence}")  # noqa: S608 - constant SQL
+    op.execute("DELETE FROM availability_window WHERE place_id IS NULL")
+    op.alter_column("availability_window", "place_id", nullable=False)
+    op.execute(f"UPDATE availability_exception SET place_id = {residence} WHERE available")  # noqa: S608 - constant SQL
+    op.execute(
+        "UPDATE app_setting SET value = jsonb_set(value, '{value,switch_at}', '\"12:00\"') "
+        "WHERE key = 'residence_alternation' AND (value->'value'->>'switch_at') IS NULL"
     )

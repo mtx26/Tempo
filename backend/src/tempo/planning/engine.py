@@ -296,6 +296,7 @@ class PlanningOutcome:
     conflicts: list[Conflict] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
     """Missing information to ask the user; only the affected items and periods wait."""
+    question_due: dict[str, datetime] = field(default_factory=dict)
     pending: list[PendingMove] = field(default_factory=list)
     kept_blocks: list[PlannedBlock] = field(default_factory=list)
     """Pinned blocks kept as they are (carried into the new version)."""
@@ -345,10 +346,14 @@ class Outings:
     issues: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
+    question_due: dict[str, datetime] = field(default_factory=dict)
+    """When each answer is needed (urgency order of the questions)."""
     uncertain: list[Interval] = field(default_factory=list)
     """Periods around a commitment whose place or origin is unknown: nothing is planned."""
     away: list[Interval] = field(default_factory=list)
-    """When the user is not at the residence: outings, stays elsewhere, unknown periods."""
+    """When the user cannot be at the residence at all: stays elsewhere, unknown periods.
+    During an outing a training at the residence stays possible (the journeys home and back
+    are then planned), only avoided between two classes (soft, C1)."""
 
 
 def _stay_between(
@@ -385,6 +390,7 @@ def route_outings(
         )
         if question not in out.questions:
             out.questions.append(question)
+            out.question_due[question] = when
 
     days: dict[date, list[LocatedEvent]] = {}
     for event in events:
@@ -421,6 +427,7 @@ def route_outings(
             last_event = max(current, key=lambda e: utc(e.end))
             end_moment = max(last_event.end, last_event.official_end or last_event.end, key=utc)
             sequence.append((current, start_base, base(end_moment), start_known, True))
+    spans: list[Interval] = []
     for index, (outing, start_base, end_base, start_known, end_known) in enumerate(sequence):
         first = outing[0]
         last = max(outing, key=lambda e: utc(e.end))
@@ -457,9 +464,13 @@ def route_outings(
         out.travel += plan.blocks
         out.issues += plan.issues
         out.warnings += [w for w in plan.warnings if w not in out.warnings]
-        span_start = min([first.start, *(b.start for b in plan.blocks)], key=utc)
-        span_end = max([last.end, *(b.end for b in plan.blocks)], key=utc)
-        out.away.append(Interval(span_start, span_end))
+        spans.append(
+            Interval(
+                min([first.start, *(b.start for b in plan.blocks)], key=utc),
+                max([last.end, *(b.end for b in plan.blocks)], key=utc),
+            )
+        )
+    _base_changes(data, routing, spans, out)
     residences = {p.id for p in data.alternation.residences}
     out.away += [Interval(s.start, s.end) for s in data.stays if s.place.id not in residences]
     out.away += out.uncertain
@@ -474,7 +485,61 @@ def route_outings(
         )
         if question not in out.questions:
             out.questions.append(question)
+            out.question_due[question] = start
     return out
+
+
+def _base_changes(
+    data: PlanningInput, routing: RoutingProvider, spans: list[Interval], out: Outings
+) -> None:
+    """Journeys of a change of base outside any outing: going to a planned location at its
+    start (arriving by then), coming back at its end, moving to the next residence at a stated
+    change time (leaving then). A change inside an outing is already its return."""
+    now, end = utc(data.now), utc(data.horizon_end)
+    moments: list[tuple[datetime, bool]] = []  # (instant, arrive by it?)
+    for stay in data.stays:
+        moments += [(stay.start, True), (stay.end, False)]
+    alternation = data.alternation
+    if len(alternation.residences) > 1:
+        today = now.astimezone(data.timezone).date()
+        index = (today - alternation.first_day).days // alternation.period_days
+        while alternation.change_day(index) <= end.astimezone(data.timezone).date():
+            moment = alternation.switch_moment(index)
+            if moment is not None:
+                moments.append((moment, False))
+            index += 1
+    for moment, arrive in sorted(moments, key=lambda m: utc(m[0])):
+        if not now < utc(moment) < end or any(
+            utc(s.start) <= utc(moment) <= utc(s.end) for s in spans
+        ):
+            continue
+        before = base_at(moment - timedelta(minutes=1), data.stays, alternation)
+        after = base_at(moment, data.stays, alternation)
+        if before is None or after is None or before == after:
+            continue  # unknown bases are asked elsewhere; no move, no journey
+        title = f"Vers {after.name}"
+        if arrive:
+            target = LocatedEvent(moment, moment + timedelta(minutes=1), after, "", title)
+            plan = plan_day_travel(
+                [target],
+                routing,
+                buffer=timedelta(0),
+                start_place=before,
+                max_journey=data.max_journey,
+                previous=data.previous_travel,
+            )
+        else:
+            leave = LocatedEvent(moment - timedelta(minutes=1), moment, before, "", title)
+            plan = plan_day_travel(
+                [leave],
+                routing,
+                end_place=after,
+                max_journey=data.max_journey,
+                previous=data.previous_travel,
+            )
+        out.travel += plan.blocks
+        out.issues += plan.issues
+        out.warnings += [w for w in plan.warnings if w not in out.warnings]
 
 
 def _estimate_travel(
@@ -554,6 +619,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     horizon = Interval(now, utc(data.horizon_end))
     issues: list[str] = []
     questions: list[str] = []
+    due: dict[str, datetime] = {}
 
     fixed = [c for c in data.commitments if utc(c.end) > now and utc(c.start) < horizon.end]
     for c in fixed:
@@ -562,10 +628,12 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 f"unknown location '{c.location_text}' for '{c.title}': add a place alias "
                 "(time blocked, travel not planned)"
             )
-            questions.append(
+            question = (
                 f"Où a lieu « {c.title} » (lieu indiqué : « {c.location_text} ») ? Donnez le "
                 "lieu ou son adresse pour que je planifie le trajet."
             )
+            questions.append(question)
+            due[question] = c.start
     conflicts = find_conflicts(fixed, data.fixed_blocks, data.now)
     by_id = {r.activity_id: r for r in data.activities}
 
@@ -703,6 +771,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
                 issues=issues,
                 conflicts=conflicts,
                 questions=questions + outings.questions,
+                question_due={**due, **outings.question_due},
             )
         # 4. Final journeys with the placed activities, then real-travel corrections.
         placed = {p.activity_id: p for p in result.activities}
@@ -866,6 +935,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         outside_hours=result.outside_hours,
         conflicts=conflicts,
         questions=questions + [q for q in final.questions if q not in questions],
+        question_due={**due, **final.question_due},
         pending=pending,
         kept_blocks=kept_blocks,
     )
