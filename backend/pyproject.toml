@@ -1,6 +1,6 @@
 [project]
 name = "tempo-backend"
-version = "0.5.0"
+version = "0.6.0"
 description = "Tempo private planning backend (Home Assistant is the only UI)"
 requires-python = ">=3.13,<3.14"
 dependencies = [
