@@ -64,6 +64,11 @@ def test_feed_lists_the_published_plan(sessions: sessionmaker[Session], database
     assert str(calendar["X-WR-CALNAME"]) == "Tempo"
     # Classes are left out: the phone already subscribes to the university calendar.
     assert "CATEGORIES:class" not in response.text
+    trips = [e for e in events if str(e["SUMMARY"]).startswith("Trajet ")]
+    assert trips, "journeys are in the feed"
+    details = [str(e.get("DESCRIPTION", "")) for e in trips]
+    assert any(d.startswith("BUS : a ") and " → b " in d for d in details), details  # legs
+    assert not any("+00:00" in d or "UTC" in d for d in details)  # local times only
     assert API_TOKEN not in response.text and FEED_TOKEN not in response.text
 
 

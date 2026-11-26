@@ -12,6 +12,7 @@ is not revealed) and counts as a failed attempt for the shared limiter.
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from icalendar import Calendar, Event
@@ -25,7 +26,7 @@ FUTURE = timedelta(days=60)
 REFRESH = "PT15M"
 
 
-def calendar_router(token: bytes, limiter: FailureLimiter) -> APIRouter:
+def calendar_router(token: bytes, limiter: FailureLimiter, tz: ZoneInfo) -> APIRouter:
     router = APIRouter()
 
     @router.get("/calendar/{presented}.ics", include_in_schema=False)
@@ -50,7 +51,7 @@ def calendar_router(token: bytes, limiter: FailureLimiter) -> APIRouter:
             if item["type"] != "class"  # already on the phone through the university calendar
         ]
         return Response(
-            content=to_ical(items, now),
+            content=to_ical(items, now, tz),
             media_type="text/calendar; charset=utf-8",
             headers={"Cache-Control": "no-store"},
         )
@@ -58,7 +59,7 @@ def calendar_router(token: bytes, limiter: FailureLimiter) -> APIRouter:
     return router
 
 
-def to_ical(items: list[dict[str, Any]], now: datetime) -> bytes:
+def to_ical(items: list[dict[str, Any]], now: datetime, tz: ZoneInfo) -> bytes:
     calendar = Calendar()
     calendar.add("prodid", "-//Tempo//Planning//FR")
     calendar.add("version", "2.0")
@@ -82,7 +83,7 @@ def to_ical(items: list[dict[str, Any]], now: datetime) -> bytes:
             event.add("dtend", end.astimezone(UTC))
         if item.get("location"):
             event.add("location", item["location"])
-        description = _description(item)
+        description = _description(item, tz)
         if description:
             event.add("description", description)
         event.add("categories", [item["type"]])
@@ -93,13 +94,27 @@ def to_ical(items: list[dict[str, Any]], now: datetime) -> bytes:
     return payload
 
 
-def _description(item: dict[str, Any]) -> str:
+def _description(item: dict[str, Any], tz: ZoneInfo) -> str:
     if item["type"] == "travel":
-        lines = [f"Statut : {item.get('status')}"]
-        if item.get("departure"):
-            lines.append(f"Départ : {item['departure']}")
-        if item.get("arrival"):
-            lines.append(f"Arrivée : {item['arrival']}")
-        return "\n".join(lines)
+        if item.get("status") == "impossible":
+            return "Aucun trajet possible à temps : à vérifier."
+        if item.get("status") != "routed":
+            return "Trajet non calculé (lieu ou routage indisponible)."
+        return "\n".join(_leg_line(leg, tz) for leg in item.get("legs") or [])
     notes: str = item.get("notes") or ""
     return notes
+
+
+def _leg_line(leg: dict[str, Any], tz: ZoneInfo) -> str:
+    """One journey leg, local times: the line to take, or the walk / drop-off."""
+    start, end = datetime.fromisoformat(leg["start"]), datetime.fromisoformat(leg["end"])
+    minutes = round((end - start).total_seconds() / 60)
+    if leg["mode"] == "WALK":
+        return f"À pied jusqu'à {leg['to']} ({minutes} min)"
+    if leg["mode"] == "ACCESS":
+        return f"Dépôt jusqu'à {leg['to']} ({minutes} min)"
+    line = " ".join(x for x in (leg.get("agency"), leg.get("line") or leg["mode"]) if x)
+    return (
+        f"{line} : {leg['from']} {start.astimezone(tz):%H:%M} → "
+        f"{leg['to']} {end.astimezone(tz):%H:%M}"
+    )

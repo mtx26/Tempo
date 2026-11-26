@@ -13,7 +13,9 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -123,6 +125,21 @@ class ChatModel(Protocol):
     ) -> None: ...
 
 
+def local_times(value: Any, tz: ZoneInfo) -> Any:
+    """``value`` with every timestamp in local time: the model misreads UTC times as local."""
+    if isinstance(value, dict):
+        return {k: local_times(v, tz) for k, v in value.items()}
+    if isinstance(value, list):
+        return [local_times(v, tz) for v in value]
+    if isinstance(value, str) and len(value) > 10 and value[10:11] == "T":
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+        return moment.astimezone(tz).isoformat() if moment.tzinfo else value
+    return value
+
+
 def dump_result(result: dict[str, Any]) -> str:
     text = json.dumps(result, ensure_ascii=False, default=str)
     if len(text) > MAX_RESULT_CHARS:
@@ -195,7 +212,7 @@ class ToolLoopAssistant:
                 operations.append(
                     {"name": call.name, "ok": outcome["ok"], "error": outcome.get("error")}
                 )
-                results.append((call, outcome))
+                results.append((call, local_times(outcome, ctx.tz)))
             self._model.add_results(conversation, results)
         return AgentReply(
             _partial("Demande trop longue à traiter en une fois", operations), operations

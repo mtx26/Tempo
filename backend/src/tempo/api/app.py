@@ -97,5 +97,5 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(llm_router, dependencies=[Depends(require_token)])
     if settings.calendar_token is not None:
         token = settings.calendar_token.get_secret_value().encode()
-        app.include_router(calendar_router(token, limiter))
+        app.include_router(calendar_router(token, limiter, ZoneInfo(settings.timezone)))
     return app
