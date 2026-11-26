@@ -21,14 +21,13 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from tempo.const import ICS_SUSPECT_MIN_REMOVALS, ICS_SUSPECT_REMOVAL_RATIO
 from tempo.db.models import AuditEntry, CalendarSource, FixedEventRow, SyncRun
 from tempo.domain.models import FixedEvent
 from tempo.sync.ics import IcsImport, Window
 
 type OccurrenceKey = tuple[str, str | None]
 
-SUSPECT_MIN_REMOVALS = 3
-SUSPECT_REMOVAL_RATIO = 0.5
 _FIELDS = ("start_at", "end_at", "summary", "location", "status")
 
 
@@ -79,7 +78,10 @@ def _find(session: Session, source: CalendarSource, key: OccurrenceKey) -> Fixed
 def _is_suspect(active_in_window: int, incoming_in_window: int, removals: int) -> bool:
     if active_in_window and incoming_in_window == 0:
         return True
-    return removals >= SUSPECT_MIN_REMOVALS and removals > SUSPECT_REMOVAL_RATIO * active_in_window
+    return (
+        removals >= ICS_SUSPECT_MIN_REMOVALS
+        and removals > ICS_SUSPECT_REMOVAL_RATIO * active_in_window
+    )
 
 
 class _ChangeLog:

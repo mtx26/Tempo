@@ -4,8 +4,11 @@ One implementation per business rule (no duplicate logic between HTTP routes and
 
 - work log: completed work is the SUM of ``work_log`` entries (idempotent by key; a correction
   is a negative entry); ``study_task.completed_minutes`` is only a cache of that sum;
-- task sessions: a task that has a place, or that must not be split, is planned as ONE
-  flexible activity (kind ``task``) linked to it; other tasks are planned as study blocks;
+- task sessions: a task that must not be split is planned as ONE flexible activity (kind
+  ``task``); a splittable task with a place as several located sessions (each with its
+  journeys); other tasks as study blocks. Splitting depends on the task, never on its place;
+- closing a task (completed or abandoned): every remaining planned session is cancelled,
+  locked ones included; history (done sessions, work log) is kept;
 - recurrence: RRULE series (python-dateutil) materialised as activity rows on a bounded
   horizon, wall-clock times in the series' timezone (DST-safe); exceptions keep the original
   occurrence key; editing one occurrence, the following ones or the whole series.
@@ -22,6 +25,13 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from tempo.const import (
+    MAX_SERIES_OCCURRENCES,
+    MIN_SESSION_MINUTES,
+    SERIES_HORIZON,
+    SESSION_MINUTES,
+    TASK_SESSION_HORIZON,
+)
 from tempo.db.models import (
     ActivityRow,
     RecurrenceExceptionRow,
@@ -30,12 +40,8 @@ from tempo.db.models import (
     StudyTaskRow,
     WorkLogRow,
 )
-from tempo.domain.models import TargetKind
 from tempo.timeutil import end_of_day
 
-SERIES_HORIZON = timedelta(days=60)
-MAX_OCCURRENCES = 400
-TASK_SESSION_HORIZON = timedelta(days=14)
 ACTIVE_STATES = ("active", "to_confirm")
 
 
@@ -79,11 +85,30 @@ def record_work(
     inserted = session.execute(statement.returning(WorkLogRow.id)).first() is not None
     task.completed_minutes = _logged(session, task.id)
     if task.effort_minutes is not None and task.completed_minutes >= task.effort_minutes:
-        task.archived = True
-    elif task.archived and task.effort_minutes is not None:
+        close_task(session, task, now, tz)
+        return inserted
+    if task.archived and task.effort_minutes is not None:
         task.archived = False  # a correction re-opens a task marked complete too early
     sync_task_session(session, task, now, tz)
     return inserted
+
+
+def close_task(session: Session, task: StudyTaskRow, now: datetime, tz: ZoneInfo) -> int:
+    """The task is completed (or abandoned): cancel every remaining planned study block,
+    locked ones included, and its sessions; never reported as missed. Returns the number of
+    cancelled blocks."""
+    task.archived = True
+    blocks = list(
+        session.scalars(
+            select(StudyBlockRow).where(
+                StudyBlockRow.task_id == task.id, StudyBlockRow.state == "planned"
+            )
+        )
+    )
+    for block in blocks:
+        block.state = "cancelled"
+    sync_task_session(session, task, now, tz)
+    return len(blocks)
 
 
 def _logged(session: Session, task_id: uuid.UUID) -> int:
@@ -119,52 +144,82 @@ def complete_block(
 
 
 def needs_session(task: StudyTaskRow) -> bool:
+    """Planned as activities (sessions) rather than study blocks: non-splittable work, or work
+    at a given place (each located session gets its journeys)."""
     return task.place_id is not None or not task.splittable
+
+
+def session_lengths(remaining: int) -> list[int]:
+    """Sessions of a splittable located task: ``SESSION_MINUTES`` each, the last one at
+    least ``MIN_SESSION_MINUTES``."""
+    count = -(-remaining // SESSION_MINUTES)
+    lengths = [SESSION_MINUTES] * (count - 1) + [remaining - SESSION_MINUTES * (count - 1)]
+    if count > 1 and lengths[-1] < MIN_SESSION_MINUTES:
+        lengths[-2] -= MIN_SESSION_MINUTES - lengths[-1]
+        lengths[-1] = MIN_SESSION_MINUTES
+    return lengths
 
 
 def sync_task_session(
     session: Session, task: StudyTaskRow, now: datetime, tz: ZoneInfo
-) -> ActivityRow | None:
-    """Keep the single flexible activity of a located / non-splittable task in line with the
-    task (duration = remaining work). Unknown duration: no session.
+) -> list[ActivityRow]:
+    """Keep the session activities of a task in line with it (remaining work, place, window).
 
-    Window: from now to the local end of the target day. A STRICT deadline is never moved: when
-    the work no longer fits, the window stays as it is and the planner reports the miss. A soft
-    target (or none) leaves room after it (``TASK_SESSION_HORIZON`` from now); the planner
-    penalises and reports lateness against the target."""
-    current = session.scalars(
-        select(ActivityRow).where(
-            ActivityRow.task_id == task.id, ActivityRow.status.in_(ACTIVE_STATES)
+    Window: from now to the local end of the deadline day (soft or strict: work is never
+    planned after a deadline without the user's approval); without deadline, the planning
+    horizon (no artificial deadline). A non-splittable task is one session; a splittable
+    located one is several, created for the work due within ``TASK_SESSION_HORIZON`` (regular
+    distribution, never everything at once)."""
+    current = list(
+        session.scalars(
+            select(ActivityRow)
+            .where(ActivityRow.task_id == task.id, ActivityRow.status.in_(ACTIVE_STATES))
+            .order_by(ActivityRow.sequence_index, ActivityRow.created_at)
         )
-    ).first()
+    )
     remaining = remaining_minutes(task)
     if task.archived or not needs_session(task) or not remaining:
-        if current is not None:
-            current.status = "cancelled"
-        return None
-    duration = timedelta(minutes=remaining)
-    start = now if current is None else min(current.earliest_start_at, now)
-    if task.target_date is not None and task.target_kind is TargetKind.HARD:
+        for row in current:
+            row.status = "cancelled"
+        return []
+    start = now
+    if task.target_date is not None:
         end = end_of_day(task.target_date, tz)
         if end <= start:
-            start = end - duration  # deadline already passed: kept visible, reported as missed
+            start = end - timedelta(minutes=remaining)  # passed: kept visible, reported
     else:
-        soft = None if task.target_date is None else end_of_day(task.target_date, tz)
-        end = max(soft or now, now + TASK_SESSION_HORIZON, start + duration)
-    if current is None:
-        current = ActivityRow(
-            kind="task", source="task", task_id=task.id, scheduling="flexible", status="active"
-        )
-        session.add(current)
-    current.title = task.subject
-    current.notes = task.notes
-    current.duration_minutes = remaining
-    current.earliest_start_at = start
-    current.latest_end_at = end
-    current.place_id = task.place_id
-    current.priority = task.priority
+        end = now + TASK_SESSION_HORIZON
+    if not task.splittable:
+        lengths = [remaining]
+    else:
+        due = remaining
+        if task.target_date is not None and end - now > TASK_SESSION_HORIZON:
+            share = remaining * TASK_SESSION_HORIZON / (end - now)
+            due = min(remaining, max(MIN_SESSION_MINUTES, -(-int(share) // 15) * 15))
+        lengths = session_lengths(due)
+    rows: list[ActivityRow] = []
+    for index, minutes in enumerate(lengths):
+        if index < len(current):
+            row = current[index]
+        else:
+            row = ActivityRow(
+                kind="task", source="task", task_id=task.id, scheduling="flexible", status="active"
+            )
+            session.add(row)
+        row.title = task.subject
+        row.notes = task.notes
+        row.duration_minutes = minutes
+        row.earliest_start_at = min(start, end - timedelta(minutes=minutes))
+        row.latest_end_at = max(end, row.earliest_start_at + timedelta(minutes=minutes))
+        row.place_id = task.place_id
+        row.priority = task.priority
+        row.sequence_group = f"task:{task.id}" if len(lengths) > 1 else None
+        row.sequence_index = index
+        rows.append(row)
+    for row in current[len(lengths) :]:
+        row.status = "cancelled"
     session.flush()
-    return current
+    return rows
 
 
 def refresh_task_sessions(session: Session, now: datetime, tz: ZoneInfo) -> None:
@@ -215,7 +270,7 @@ def occurrences(series: RecurrenceSeriesRow, start: datetime, end: datetime) -> 
     found: list[Occurrence] = []
     lower = start.astimezone(tz).replace(tzinfo=None) - timedelta(days=1)
     upper = end.astimezone(tz).replace(tzinfo=None)
-    for naive in rule.xafter(lower, inc=True, count=MAX_OCCURRENCES):
+    for naive in rule.xafter(lower, inc=True, count=MAX_SERIES_OCCURRENCES):
         if naive >= upper:
             break
         aware = naive.replace(tzinfo=tz)

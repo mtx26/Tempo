@@ -116,8 +116,7 @@ def setup(sessions: sessionmaker[Session]) -> str:
         s.flush()
         s.add(PlaceAliasRow(alias="auditoire a.1", place_id="campus"))
         s.add_all(
-            AvailabilityRow(weekday=d, start_minute=8 * 60, end_minute=20 * 60, place_id="home")
-            for d in range(7)
+            AvailabilityRow(weekday=d, start_minute=8 * 60, end_minute=20 * 60) for d in range(7)
         )
         set_setting(
             s,
@@ -131,9 +130,14 @@ def setup(sessions: sessionmaker[Session]) -> str:
         )
         set_setting(s, "tracker_entity_id", "device_tracker.phone")
         set_setting(s, "horizon_days", 7)
-        task = op(s, "create_task", title="maths", estimated_minutes=900, target_date="2026-12-12")[
-            "task"
-        ]
+        task = op(
+            s,
+            "create_task",
+            title="maths",
+            estimated_minutes=900,
+            splittable=True,
+            target_date="2026-12-12",
+        )["task"]
         op(
             s,
             "create_event",

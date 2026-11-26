@@ -29,6 +29,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx2
 
+from tempo.const import MAX_REDIRECTS, REDIRECTS
 from tempo.transport.feeds import (
     FEEDS,
     HOST,
@@ -159,10 +160,6 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp = path.with_suffix(path.suffix + ".part")
     tmp.write_bytes(data)
     tmp.replace(path)
-
-
-MAX_REDIRECTS = 5
-REDIRECTS = frozenset({301, 302, 303, 307, 308})
 
 
 @dataclass(slots=True)

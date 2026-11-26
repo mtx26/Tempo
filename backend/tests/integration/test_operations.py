@@ -147,9 +147,11 @@ def test_all_day_events_informative_or_busy(session: Session) -> None:
         start="2026-12-08",
         busy=False,
     )
+    from tempo.planning.service import build_input
+
+    loaded = build_input(session, NOW, TZ).data
+    assert not any(c.title == "Anniversaire" for c in loaded.commitments)  # blocks nothing
     replan(session, FakeRouting(), NOW, TZ, reason="t")
-    day8 = [b for b in session.scalars(select(StudyBlockRow)) if b.start_at.astimezone(TZ).day == 8]
-    assert day8, "an informative all-day event blocks nothing"
     ok(
         session,
         "create_event",
@@ -270,8 +272,9 @@ def test_invalid_rrule_rejected(session: Session) -> None:
 
 
 def test_lock_and_unlock_activity(session: Session) -> None:
+    """C15: lock only on explicit request; a requested time never locks."""
     seed(session)
-    made = ok(
+    fixed = ok(
         session,
         "create_event",
         title="Kiné",
@@ -279,10 +282,39 @@ def test_lock_and_unlock_activity(session: Session) -> None:
         start="2026-12-09T17:00",
         duration_minutes=45,
         remote=True,
+    )["activity"]
+    assert "fixe" in err(session, "set_lock", target_id=fixed["id"], locked=True)
+    outing = ok(
+        session,
+        "create_event",
+        title="Marche",
+        scheduling="flexible",
+        duration_minutes=60,
+        window_start="2026-12-09T08:00",
+        window_end="2026-12-09T20:00",
+        remote=True,
+    )["activity"]
+    assert "placée" in err(session, "set_lock", target_id=outing["id"], locked=True)
+    moved = ok(session, "update_event", activity_id=outing["id"], start="2026-12-09T15:00")
+    assert moved["activity"]["locked"] is False
+    row = session.get(ActivityRow, __import__("uuid").UUID(outing["id"]))
+    assert row is not None and row.preferred_start_at == row.planned_start_at
+    assert "fenêtre" in err(
+        session, "update_event", activity_id=outing["id"], start="2026-12-10T15:00"
     )
-    activity_id = made["activity"]["id"]
-    assert ok(session, "set_lock", target_id=activity_id, locked=True)["activity"]["locked"]
-    assert not ok(session, "set_lock", target_id=activity_id, locked=False)["activity"]["locked"]
+    assert ok(session, "set_lock", target_id=outing["id"], locked=True)["activity"]["locked"]
+    assert not ok(session, "set_lock", target_id=outing["id"], locked=False)["activity"]["locked"]
+    assert "heure" in err(
+        session,
+        "create_event",
+        title="Yoga",
+        scheduling="flexible",
+        duration_minutes=60,
+        window_start="2026-12-10T08:00",
+        window_end="2026-12-10T20:00",
+        remote=True,
+        locked=True,
+    )
 
 
 def test_task_without_duration_then_estimated_then_partial_progress(session: Session) -> None:
@@ -297,7 +329,14 @@ def test_task_without_duration_then_estimated_then_partial_progress(session: Ses
             select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == version.id)
         )
     }
-    ok(session, "update_task", task_id=task["id"], estimated_minutes=120, target_date="2026-12-10")
+    ok(
+        session,
+        "update_task",
+        task_id=task["id"],
+        estimated_minutes=120,
+        splittable=True,
+        target_date="2026-12-10",
+    )
     version = replan(session, FakeRouting(), NOW, TZ, reason="t2")
     planned = sum(
         (b.end_at - b.start_at).total_seconds() // 60
@@ -317,7 +356,12 @@ def test_study_volume_with_correction_never_double_counts(session: Session) -> N
     """B05: 15 h before Friday, blocks near 90 min; done blocks and corrections."""
     seed(session)
     task = ok(
-        session, "create_task", title="Physique", estimated_minutes=900, target_date="2026-12-11"
+        session,
+        "create_task",
+        title="Physique",
+        estimated_minutes=900,
+        splittable=True,
+        target_date="2026-12-11",
     )["task"]
     version = replan(session, FakeRouting(), NOW, TZ, reason="t")
     blocks = [
@@ -350,6 +394,7 @@ def test_not_enough_time_reports_remainder_and_strict_violation(session: Session
         "create_task",
         title="Chimie",
         estimated_minutes=3000,
+        splittable=True,
         target_date="2026-12-08",
         hard_deadline=True,
     )["task"]
@@ -395,7 +440,14 @@ def test_non_splittable_located_task_is_one_session(session: Session) -> None:
 def test_dated_exception_blocks_a_day(session: Session) -> None:
     """B07: a dated exception removes availability that day only."""
     seed(session)
-    ok(session, "create_task", title="Histoire", estimated_minutes=600, target_date="2026-12-12")
+    ok(
+        session,
+        "create_task",
+        title="Histoire",
+        estimated_minutes=600,
+        splittable=True,
+        target_date="2026-12-12",
+    )
     ok(
         session,
         "add_availability_exception",
@@ -699,7 +751,7 @@ def test_category_windows_restrict_trainings_through_the_conversation(session: S
     assert training.planned_start_at is not None
     ok(session, "plan_now", mode="global")  # explicit reorganisation: preferred slot again
     session.refresh(training)
-    assert training.planned_start_at == at(8, 18)
+    assert training.planned_start_at == at(8, 14)
 
 
 def test_category_windows_reject_unknown_category_and_bad_hours(session: Session) -> None:
@@ -720,6 +772,7 @@ def test_impossible_strict_deadline_gets_simulated_alternatives(session: Session
         "create_task",
         title="Chimie",
         estimated_minutes=3000,
+        splittable=True,
         target_date="2026-12-08",
         hard_deadline=True,
     )["task"]
@@ -731,14 +784,12 @@ def test_impossible_strict_deadline_gets_simulated_alternatives(session: Session
     kinds = {a["kind"]: a for a in chimie["alternatives"]}
     assert kinds["postpone_deadline"]["resolves"] is True
     assert kinds["postpone_deadline"]["new_target_date"] > "2026-12-08"
-    soft = kinds["make_deadline_soft"]
-    assert soft["strict_miss"] is False
-    assert soft["unplanned_minutes"] < chimie["unplanned_minutes"]
+    assert "make_deadline_soft" not in kinds  # relaxing a deadline is never an automatic fix
     reduce = kinds["reduce_volume"]
     # Really simulated: the reduced volume is re-planned and its real outcome reported.
     assert 0 < reduce["new_estimated_minutes"] < 3000
     assert reduce["valid"] is True and "unplanned_minutes" in reduce
-    assert reduce["resolves"] is (reduce["unplanned_minutes"] == 0 and not reduce["strict_miss"])
+    assert reduce["resolves"] is (reduce["unplanned_minutes"] == 0 and not reduce["deadline_miss"])
     assert active_version(session) == published
     row = session.get(StudyTaskRow, __import__("uuid").UUID(task["id"]))
     assert row is not None and row.target_date == date(2026, 12, 8)

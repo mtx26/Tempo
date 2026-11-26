@@ -1,31 +1,35 @@
-"""End-to-end planning pipeline on a realistic week (fake routing: 30 min between places)."""
+"""End-to-end planning pipeline with a fake MOTIS (journey durations per pair of places).
+
+Each test names the validated decision it checks (ARCHITECTURE.md §7-8)."""
 
 from dataclasses import replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from tempo.domain.models import TargetKind
 from tempo.planning.engine import (
+    ActivityRequest,
     Commitment,
     CommitmentKind,
     OutcomeStatus,
     PlanningInput,
-    TrainingRequest,
+    PlanningOutcome,
     run_planning,
 )
-from tempo.scheduler.model import PlannedBlock, StudyDemand
+from tempo.scheduler.model import PlannedBlock, StudyDemand, TrainingPreferences
 from tempo.timeutil import Interval, utc
-from tempo.transport.location import DeclaredStay
+from tempo.transport.location import Alternation, DeclaredStay
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
-from tempo.transport.travel import StudyWindow, TravelStatus
+from tempo.transport.travel import TravelStatus
 
 TZ = ZoneInfo("Europe/Brussels")
-HOME = Place("home", "Kot", Coordinates(50.668, 4.612))
+HOME = Place("home", "Maman", Coordinates(50.668, 4.612))
+DAD = Place("dad", "Papa", Coordinates(50.60, 4.70))
 CAMPUS = Place("campus", "Campus", Coordinates(50.85, 4.35))
 CLUB = Place("club", "Club", Coordinates(50.70, 4.60))
-MUM = Place("mum", "Maman", Coordinates(50.40, 4.40))
-TRIP = timedelta(minutes=30)
+FRIEND = Place("friend", "Ami", Coordinates(50.50, 4.50))
+PLACES = {p.coordinates: p.id for p in (HOME, DAD, CAMPUS, CLUB, FRIEND)}
 
 
 def at(day: int, hour: int, minute: int = 0) -> datetime:
@@ -33,7 +37,10 @@ def at(day: int, hour: int, minute: int = 0) -> datetime:
 
 
 class FakeRouting:
-    def __init__(self, fail: bool = False) -> None:
+    """Door-to-door minutes per pair of places (30 by default), any departure time."""
+
+    def __init__(self, minutes: dict[frozenset[str], int] | None = None, fail: bool = False):
+        self.minutes = minutes or {}
         self.fail = fail
 
     def plan(
@@ -41,423 +48,342 @@ class FakeRouting:
     ) -> list[Journey]:
         if self.fail:
             raise RoutingUnavailableError("MOTIS down")
-        start = time - TRIP if arrive_by else time
-        leg = Leg("BUS", "a", "b", start, start + TRIP, start, start + TRIP, realtime=False)
-        return [Journey((leg,), start, start + TRIP, 0, "fake")]
+        pair = frozenset(
+            {PLACES.get(origin, str(origin)), PLACES.get(destination, str(destination))}
+        )
+        trip = timedelta(minutes=self.minutes.get(pair, 30))
+        start = time - trip if arrive_by else time
+        leg = Leg("BUS", "a", "b", start, start + trip, start, start + trip, realtime=False)
+        return [Journey((leg,), start, start + trip, 0, "fake")]
 
 
-def week(**overrides: object) -> PlanningInput:
-    base: dict[str, object] = {
+# Monday 7 December 2026; residences change every Friday (11, 18...) after the last class.
+ALTERNATION = Alternation((HOME, DAD), date(2026, 12, 4), 7, TZ, switches={})
+
+
+def lecture(day: int, start: int, end: int, title: str = "Analyse", **kw: Any) -> Commitment:
+    return Commitment(
+        f"class-{day}-{start}",
+        title,
+        at(day, start),
+        at(day, end),
+        CommitmentKind.CLASS,
+        CAMPUS,
+        **kw,
+    )
+
+
+def data(**overrides: Any) -> PlanningInput:
+    values: dict[str, Any] = {
         "now": at(7, 6),
-        "horizon_end": at(13, 23),
+        "horizon_end": at(10, 23, 59),
         "timezone": TZ,
-        "home": HOME,
-        "commitments": [
-            Commitment(f"class-{d}", "Analyse", at(d, 10), at(d, 12), CommitmentKind.CLASS, CAMPUS)
-            for d in (7, 8, 9, 10, 11)
-        ]
-        + [Commitment("race", "10 km", at(12, 10), at(12, 11), CommitmentKind.RACE, CLUB)],
-        "trainings": [
-            TrainingRequest(
-                "t1",
-                "Fractionné",
-                timedelta(minutes=60),
-                at(8, 0),
-                at(9, 23),
-                place=CLUB,
-                preferred_start=at(8, 18),
-            )
-        ],
-        "availability": [StudyWindow(Interval(at(d, 8), at(d, 20)), HOME) for d in range(7, 14)],
-        "demands": [
-            StudyDemand("maths", "maths", 360, at(12, 23, 59)),
-            StudyDemand("physique", "physique", 270, at(13, 23, 59), TargetKind.HARD),
-        ],
-    }
-    base.update(overrides)
-    return PlanningInput(**base)  # type: ignore[arg-type]
-
-
-def overlaps(a: Interval, items: list[Interval]) -> bool:
-    return any(a.overlaps(i) for i in items)
-
-
-def test_realistic_week_is_complete_and_consistent() -> None:
-    outcome = run_planning(week(), FakeRouting())
-    assert outcome.status is OutcomeStatus.COMPLETE, outcome.issues
-    assert outcome.result is not None
-    training = outcome.trainings[0]
-    assert training.start == at(8, 18)
-    # 30 min trip arriving 10 min early (buffer) + 60 min session + 30 min back.
-    assert training.reserved == Interval(at(8, 17, 20), at(8, 19, 30))
-    travel = [Interval(b.start, b.end) for b in outcome.travel if b.end > b.start]
-    assert all(b.status is TravelStatus.ROUTED for b in outcome.travel)
-    # Every class day has an outbound trip arriving 10 min early, and a return.
-    for d in (7, 8, 9, 10, 11):
-        assert any(b.end == at(d, 10) and b.destination == CAMPUS for b in outcome.travel)
-        assert any(b.start == at(d, 12) and b.destination == HOME for b in outcome.travel)
-    busy = travel + [training.reserved] + [Interval(at(d, 10), at(d, 12)) for d in range(7, 12)]
-    for block in outcome.result.blocks:
-        assert not overlaps(block.interval, busy)
-    assert outcome.issues == []
-
-
-def test_unknown_location_blocks_time_and_is_reported() -> None:
-    odd = Commitment("x", "TP", at(9, 14), at(9, 16), CommitmentKind.CLASS, None, "Salle Z.99")
-    outcome = run_planning(week(commitments=[odd], trainings=[]), FakeRouting())
-    assert any("unknown location 'Salle Z.99'" in i for i in outcome.issues)
-    assert outcome.result is not None
-    assert not overlaps(Interval(at(9, 14), at(9, 16)), [b.interval for b in outcome.result.blocks])
-
-
-def test_routing_outage_blocks_gaps_and_reports_instead_of_inventing() -> None:
-    outcome = run_planning(week(), FakeRouting(fail=True))
-    assert outcome.status in (OutcomeStatus.COMPLETE, OutcomeStatus.PARTIAL)
-    assert any("routing unavailable" in i for i in outcome.issues)
-    assert {b.status for b in outcome.travel} == {TravelStatus.UNKNOWN}
-    training = outcome.trainings[0]
-    # No invented travel duration: nothing is reserved around the session, it is reported.
-    assert training.reserved == Interval(training.start, training.end)
-    assert any("travel not reserved" in i for i in outcome.issues)
-
-
-def test_base_may_change_during_a_day() -> None:
-    """D03: leave from dad's in the morning, go back to mum's after class."""
-    dad = Place("dad", "Papa", Coordinates(50.50, 4.50))
-    stays = [DeclaredStay(dad, at(8, 0), at(8, 11)), DeclaredStay(MUM, at(8, 11), at(9, 0))]
-    only_tuesday = [
-        Commitment("class-8", "Analyse", at(8, 10), at(8, 12), CommitmentKind.CLASS, CAMPUS)
-    ]
-    outcome = run_planning(week(commitments=only_tuesday, trainings=[], stays=stays), FakeRouting())
-    outbound = [b for b in outcome.travel if b.destination == CAMPUS]
-    back = [b for b in outcome.travel if b.origin == CAMPUS]
-    assert outbound and outbound[0].origin == dad
-    assert back and back[0].destination == MUM
-
-
-def test_unplaced_activity_makes_the_plan_partial() -> None:
-    impossible = TrainingRequest(
-        "t9", "Sortie", timedelta(hours=3), at(10, 10), at(10, 12), place=None
-    )
-    outcome = run_planning(week(trainings=[impossible]), FakeRouting())
-    assert outcome.unplaced_trainings == ["t9"]
-    assert outcome.status is OutcomeStatus.PARTIAL
-
-
-def test_strict_task_session_that_does_not_fit_is_a_hard_miss() -> None:
-    request = TrainingRequest(
-        "s1",
-        "Dossier",
-        timedelta(hours=20),
-        at(7, 6),
-        at(8, 0),
-        place=CAMPUS,
-        task_id="dossier",
-        target=at(8, 0),
-        strict=True,
-    )
-    outcome = run_planning(week(trainings=[request]), FakeRouting())
-    assert "dossier" in outcome.hard_deadline_misses
-    assert outcome.unplanned_minutes["dossier"] == 20 * 60
-    assert outcome.status is OutcomeStatus.PARTIAL
-
-
-def test_overlapping_activity_is_rejected_by_the_independent_validator() -> None:
-    from tempo.scheduler.validate import Occupied, PlacedSession, validate_schedule
-
-    session = PlacedSession("activity:x", "Sortie", at(8, 10), at(8, 11), at(8, 8), at(8, 20))
-    found = validate_schedule(
-        [session], [Occupied("Analyse", Interval(at(8, 10), at(8, 12)))], [], TZ
-    )
-    assert found and "overlaps Analyse" in found[0]
-
-
-def test_declared_stay_changes_the_day_base_without_automatic_switching() -> None:
-    stay = DeclaredStay(MUM, at(12, 0), at(13, 0))
-    outcome = run_planning(week(stays=[stay]), FakeRouting())
-    race_trips = [b for b in outcome.travel if b.destination == CLUB and b.end.day == 12]
-    assert race_trips and race_trips[0].origin == MUM
-    assert all(b.origin != MUM for b in outcome.travel if b.start < at(12, 0))
-
-
-def test_past_commitments_and_locked_blocks() -> None:
-    locked = PlannedBlock("maths", "maths", at(9, 14), at(9, 15, 30), locked=True)
-    outcome = run_planning(week(now=at(9, 13), locked_blocks=[locked]), FakeRouting())
-    assert outcome.result is not None
-    assert locked in outcome.result.blocks
-    assert all(utc(b.start) >= utc(at(9, 13)) for b in outcome.result.blocks)
-    assert all(b.end > at(9, 13) for b in outcome.travel)
-
-
-def test_training_without_slot_is_reported() -> None:
-    blocked = Commitment("exam", "Examen", at(8, 0), at(9, 23, 30), CommitmentKind.OTHER, None)
-    outcome = run_planning(week(commitments=[blocked]), FakeRouting())
-    assert outcome.unplaced_trainings == ["t1"]
-    assert any("aucun créneau libre" in i for i in outcome.issues)
-
-
-def test_impossible_hard_deadline_is_partial_not_invalid() -> None:
-    demands = [StudyDemand("huge", "huge", 6000, at(8, 23), TargetKind.HARD)]
-    outcome = run_planning(week(demands=demands), FakeRouting())
-    assert outcome.status is OutcomeStatus.PARTIAL
-    assert outcome.result is not None and outcome.result.hard_deadline_misses == ["huge"]
-
-
-def test_long_gap_means_going_home_between_commitments() -> None:
-    outcome = run_planning(week(), FakeRouting())
-    day8 = sorted((b for b in outcome.travel if b.start.day == 8), key=lambda b: b.start)
-    legs = [(b.origin.id, b.destination.id) for b in day8]
-    assert legs == [("home", "campus"), ("campus", "home"), ("home", "club"), ("club", "home")]
-
-
-def test_free_minutes_before_a_deadline_counts_overlapping_busy_time_once() -> None:
-    from tempo.planning.engine import free_minutes
-
-    window = [Interval(at(7, 8), at(7, 20))]
-    busy = [Interval(at(7, 10), at(7, 12)), Interval(at(7, 11), at(7, 13))]
-    assert free_minutes(window, busy, at(7, 23)) == 720 - 180
-    assert free_minutes(window, busy, at(7, 15)) == 420 - 180
-    assert free_minutes(window, busy, at(7, 7)) == 0
-
-
-def test_overlapping_planned_locations_are_reported_not_guessed() -> None:
-    stays = [DeclaredStay(MUM, at(11, 0), at(13, 0)), DeclaredStay(HOME, at(12, 6), at(12, 23))]
-    outcome = run_planning(week(stays=stays), FakeRouting())
-    assert any("planned locations overlap at 2026-12-12" in i for i in outcome.issues)
-    assert not [b for b in outcome.travel if b.start.day == 12 and b.origin == HOME]
-
-
-def test_mandatory_travel_blocks_keep_their_alternatives() -> None:
-    class Several(FakeRouting):
-        """Three journeys per answer, 15 min apart."""
-
-        def plan(self, origin, destination, time, *, arrive_by):  # type: ignore[no-untyped-def]
-            first = super().plan(origin, destination, time, arrive_by=arrive_by)[0]
-            step = timedelta(minutes=-15 if arrive_by else 15)
-            return [
-                Journey(
-                    tuple(
-                        replace(
-                            leg,
-                            start=leg.start + k * step,
-                            end=leg.end + k * step,
-                            scheduled_start=leg.start + k * step,
-                            scheduled_end=leg.end + k * step,
-                        )
-                        for leg in first.legs
-                    ),
-                    first.departure + k * step,
-                    first.arrival + k * step,
-                    0,
-                    "fake",
-                )
-                for k in range(3)
-            ]
-
-    outcome = run_planning(week(), Several())
-    routed = [b for b in outcome.travel if b.journey is not None]
-    assert routed and all(b.alternatives for b in routed)
-    assert all(b.journey not in b.alternatives for b in routed)
-
-
-def _day9_legs(second_start: datetime) -> list[tuple[str, str]]:
-    commitments = [
-        Commitment("c", "Analyse", at(9, 10), at(9, 12), CommitmentKind.CLASS, CAMPUS),
-        Commitment(
-            "m",
-            "Réunion",
-            second_start,
-            second_start + timedelta(hours=1),
-            CommitmentKind.OTHER,
-            CLUB,
+        "alternation": ALTERNATION,
+        "commitments": [],
+        "activities": [],
+        "availability": [Interval(at(d, 8), at(d, 20)) for d in range(7, 11)],
+        "demands": [],
+        "training_preferences": TrainingPreferences(
+            free_days=False, mornings=False, daylight=False
         ),
+        "class_tolerance": timedelta(0),
+        "solver_seconds": 5.0,
+    }
+    values.update(overrides)
+    return PlanningInput(**values)
+
+
+def trips(outcome: PlanningOutcome, day: int) -> list[tuple[str, str]]:
+    return [
+        (b.origin.id, b.destination.id)
+        for b in sorted(outcome.travel, key=lambda b: utc(b.start))
+        if b.start.astimezone(TZ).day == day
     ]
-    outcome = run_planning(week(commitments=commitments, trainings=[]), FakeRouting())
-    day9 = sorted((b for b in outcome.travel if b.start.day == 9), key=lambda b: b.start)
-    return [(b.origin.id, b.destination.id) for b in day9]
 
 
-def test_going_home_between_commitments_only_when_worth_it() -> None:
-    """30 min trips, 10 min margin: 2 h 30 between them leaves 1 h 20 at home (go home);
-    1 h 40 leaves 30 min (go directly). No fixed 3 h rule."""
-    assert _day9_legs(at(9, 14, 30)) == [
+def check(outcome: PlanningOutcome) -> None:
+    assert outcome.status not in (OutcomeStatus.INVALID, OutcomeStatus.NO_SOLUTION), (
+        outcome.violations
+    )
+
+
+def test_day_is_one_outing_without_automatic_return_between_classes() -> None:
+    """C19: direct journeys; never back home only because there is time."""
+    outcome = run_planning(data(commitments=[lecture(8, 8, 10), lecture(8, 16, 18)]), FakeRouting())
+    check(outcome)
+    assert trips(outcome, 8) == [("home", "campus"), ("campus", "home")]
+    assert outcome.status is OutcomeStatus.COMPLETE
+
+
+def test_explicit_planned_location_between_classes_is_an_intermediate_return() -> None:
+    """C19: an intermediate return only when the user asks (planned location)."""
+    stay = DeclaredStay(HOME, at(8, 11), at(8, 15))
+    outcome = run_planning(
+        data(commitments=[lecture(8, 8, 10), lecture(8, 16, 18)], stays=[stay]), FakeRouting()
+    )
+    check(outcome)
+    assert trips(outcome, 8) == [
         ("home", "campus"),
         ("campus", "home"),
-        ("home", "club"),
-        ("club", "home"),
+        ("home", "campus"),
+        ("campus", "home"),
     ]
-    assert _day9_legs(at(9, 13, 40)) == [("home", "campus"), ("campus", "club"), ("club", "home")]
 
 
-def test_journey_of_a_flexible_activity_over_a_commitment_is_a_violation() -> None:
-    from tempo.scheduler.validate import Occupied, validate_schedule
-
-    trip = Occupied("Kot -> Club", Interval(at(8, 17), at(8, 18)))
-    found = validate_schedule(
-        [], [Occupied("Analyse", Interval(at(8, 17, 30), at(8, 19)))], [], TZ, [trip]
-    )
-    assert found == ["journey Kot -> Club overlaps Analyse"]
-
-
-def test_find_conflicts_covers_every_category_and_never_hides_one() -> None:
-    from tempo.planning.engine import ConflictKind, find_conflicts
-
-    exam = Commitment("event:1", "Examen", at(9, 9), at(9, 11), CommitmentKind.CLASS, CAMPUS)
-    race = Commitment("activity:r", "10 km", at(9, 10), at(9, 11), CommitmentKind.RACE, CLUB)
-    locked = Commitment(
-        "activity:t", "Footing", at(9, 10, 30), at(9, 11, 30), CommitmentKind.TRAINING, movable=True
-    )
-    running = Commitment(
-        "activity:u", "Sortie", at(9, 10, 45), at(9, 12), CommitmentKind.OTHER, underway=True
-    )
-    block = PlannedBlock("maths", "maths", at(9, 8), at(9, 9, 30), locked=True, ref="block:b1")
-    computed = PlannedBlock("maths", "maths", at(9, 8), at(9, 9, 30), locked=True)
-    found = find_conflicts([exam, race, locked, running], [block, computed], at(9, 6))
-    kinds = {(c.kind, c.subject_ref, c.other.ref) for c in found}
-    # Two fixed commitments: reported even though nothing can be resolved automatically.
-    assert (ConflictKind.FIXED, "event:1", "activity:r") in kinds
-    # A locked flexible activity is the subject of an approval, never the under-way one.
-    assert (ConflictKind.LOCKED_ACTIVITY, "activity:t", "event:1") in kinds
-    assert not any(
-        c.subject_ref == "activity:u" and c.kind is not ConflictKind.FIXED for c in found
-    )
-    # Stored locked block vs commitment; a computed (under-way) block is not a protection.
-    assert [c.subject_ref for c in found if c.kind is ConflictKind.LOCKED_BLOCK] == ["block:b1"]
-
-
-def test_conflicts_are_reported_even_without_a_usable_plan() -> None:
-    clash = [
-        Commitment("a", "Cours", at(9, 10), at(9, 12), CommitmentKind.CLASS, None),
-        Commitment("b", "Dentiste", at(9, 11), at(9, 12), CommitmentKind.OTHER, None),
-    ]
-    outcome = run_planning(week(commitments=clash, trainings=[]), FakeRouting())
-    assert next(c.describe() for c in outcome.conflicts).startswith("fixed: class 'Cours'")
-
-
-def _residence_training(**kw: object) -> TrainingRequest:
-    values: dict[str, object] = {
-        "activity_id": "run",
-        "title": "Endurance",
-        "duration": timedelta(minutes=60),
-        "earliest_start": at(8, 0),
-        "latest_end": at(8, 23, 59),
-        "preferred_start": at(8, 11),
-    }
-    values.update(kw)
-    return TrainingRequest(**values)  # type: ignore[arg-type]
-
-
-def test_training_without_place_happens_at_the_residence_never_during_an_outing() -> None:
-    # Two classes with a short gap: the user stays at the campus between them.
-    classes = [
-        Commitment("c1", "Analyse", at(8, 9), at(8, 11), CommitmentKind.CLASS, CAMPUS),
-        Commitment("c2", "Algèbre", at(8, 12), at(8, 14), CommitmentKind.CLASS, CAMPUS),
-    ]
+def test_study_between_classes_happens_where_the_user_is() -> None:
+    """C2: study availability has no place: between two classes the user studies on campus."""
+    demand = StudyDemand("a", "Chimie", 180, at(8, 23, 59))
     outcome = run_planning(
-        week(commitments=classes, trainings=[_residence_training()]), FakeRouting()
-    )
-    (run,) = outcome.trainings
-    day8 = [b for b in outcome.travel if b.start.day == 8]
-    first_departure = min(b.start for b in day8)
-    last_return = max(b.end for b in day8)
-    span = Interval(run.start, run.start + timedelta(minutes=60))
-    assert not span.overlaps(Interval(first_departure, last_return)), (run.start, day8)
-    assert outcome.issues == []
-
-
-def test_training_without_any_slot_at_the_residence_is_unplaced_not_forced() -> None:
-    all_day = [Commitment("x", "Stage", at(8, 0), at(8, 23, 30), CommitmentKind.CLASS, CAMPUS)]
-    request = _residence_training(earliest_start=at(8, 6), latest_end=at(8, 22))
-    outcome = run_planning(week(commitments=all_day, trainings=[request]), FakeRouting())
-    assert outcome.unplaced_trainings == ["run"]
-    assert outcome.status is OutcomeStatus.PARTIAL
-    assert any("aucun créneau libre à la résidence" in i for i in outcome.issues)
-
-
-def test_residence_training_respects_flexible_outings_and_their_journeys() -> None:
-    club_session = TrainingRequest(
-        "club",
-        "Fractionné",
-        timedelta(minutes=60),
-        at(8, 0),
-        at(8, 23, 59),
-        place=CLUB,
-        preferred_start=at(8, 18),
-    )
-    home_run = _residence_training(preferred_start=at(8, 18))
-    outcome = run_planning(week(commitments=[], trainings=[club_session, home_run]), FakeRouting())
-    assert outcome.violations == [] and not outcome.unplaced_trainings
-    placed = {t.activity_id: t for t in outcome.trainings}
-    run = placed["run"]
-    run_span = Interval(run.start, run.start + timedelta(minutes=60))
-    assert not run_span.overlaps(placed["club"].reserved)  # club session + its journeys
-    for block in outcome.travel:
-        assert not run_span.overlaps(Interval(block.start, block.end))
-
-
-def test_unknown_class_location_is_a_question() -> None:
-    unknown = Commitment(
-        "c", "Analyse", at(8, 10), at(8, 12), CommitmentKind.CLASS, None, location_text="NiX.1"
-    )
-    outcome = run_planning(week(commitments=[unknown]), FakeRouting())
-    assert outcome.questions and "NiX.1" in outcome.questions[0]
-
-
-def test_training_preferences_free_day_morning_in_daylight() -> None:
-    from tempo.scheduler.activities import TrainingPreferences
-
-    session = _residence_training(
-        earliest_start=at(11, 0),
-        latest_end=at(13, 23, 59),
-        preferred_start=at(11, 18),
-        training=True,
-    )
-    prefs = TrainingPreferences(free_days=True, mornings=True, daylight=True)
-    outcome = run_planning(
-        week(trainings=[session], training_preferences=prefs, activity_hours=(time(8), time(22))),
+        data(
+            commitments=[lecture(8, 8, 10), lecture(8, 16, 18)],
+            demands=[demand],
+            availability=[Interval(at(8, 10), at(8, 16))],
+            horizon_end=at(8, 23, 59),
+        ),
         FakeRouting(),
     )
-    assert outcome.violations == [] and not outcome.unplaced_trainings
-    placed = outcome.trainings[0]
-    assert placed.start.date() == at(13, 0).date()  # Sunday: no class (Fri 11: class)
-    assert placed.start >= at(13, 8, 40)  # after sunrise (about 08:39 in mid-December)
-    assert placed.start + timedelta(minutes=60) <= at(13, 12)  # finished by noon
-    # Without the preferences the session stays near its preferred start (Friday evening).
-    plain = run_planning(week(trainings=[session]), FakeRouting()).trainings[0]
-    assert plain.start.date() == at(11, 0).date()
+    check(outcome)
+    assert outcome.result is not None
+    assert sum(int(b.duration.total_seconds() // 60) for b in outcome.result.blocks) == 180
 
 
-def test_no_residence_training_during_a_stay_away_from_the_residences() -> None:
-    from tempo.transport.location import DeclaredStay
-
-    friend = Place("friend", "Chez une amie", Coordinates(50.50, 4.40))
-    stay = DeclaredStay(friend, at(12, 18), at(13, 12))  # Saturday evening -> Sunday noon
-    session = _residence_training(
-        earliest_start=at(12, 0), latest_end=at(13, 23, 59), preferred_start=at(13, 7)
+def test_training_at_the_residence_never_between_classes() -> None:
+    """C1: no training at home between two classes, even with time to go back."""
+    request = ActivityRequest(
+        "t", "Renforcement", timedelta(minutes=60), at(8, 6), at(8, 22), training=True
     )
-    outcome = run_planning(week(commitments=[], trainings=[session], stays=[stay]), FakeRouting())
-    assert outcome.violations == [] and not outcome.unplaced_trainings
-    placed = outcome.trainings[0]
-    assert not Interval(placed.start, placed.start + timedelta(minutes=60)).overlaps(
-        Interval(stay.start, stay.end)
-    )
-    # A stay at a residence (the home itself) does not take the user away from it.
-    at_home = DeclaredStay(HOME, at(12, 18), at(13, 12))
-    kept = run_planning(
-        week(commitments=[], trainings=[session], stays=[at_home]), FakeRouting()
-    ).trainings[0]
-    assert kept.start == at(13, 7)
-
-
-def test_class_tolerance_lets_journeys_overlap_the_class_edges() -> None:
-    """With a tolerance, the user may arrive a few minutes after a class starts and leave a
-    few minutes before it ends; other commitments (the race) keep their exact times."""
     outcome = run_planning(
-        week(buffer=timedelta(0), class_tolerance=timedelta(minutes=5)), FakeRouting()
+        data(commitments=[lecture(8, 8, 10), lecture(8, 16, 18)], activities=[request]),
+        FakeRouting(),
     )
-    to_campus = [b for b in outcome.travel if b.destination == CAMPUS and b.journey]
-    back = [b for b in outcome.travel if b.origin == CAMPUS and b.journey]
-    assert to_campus and all(b.journey.arrival.minute == 5 for b in to_campus)  # type: ignore[union-attr]
-    assert back and all(b.journey.departure.minute == 55 for b in back)  # type: ignore[union-attr]
-    to_race = [b for b in outcome.travel if b.destination == CLUB and b.end == at(12, 10)]
-    assert to_race and to_race[0].journey.arrival == at(12, 10)  # type: ignore[union-attr]
+    check(outcome)
+    (placed,) = outcome.activities
+    assert utc(placed.start) >= utc(at(8, 18, 30)) or utc(placed.end) <= utc(at(8, 7, 20))
+
+
+def test_stay_elsewhere_excludes_residence_trainings_not_study() -> None:
+    """C2: study follows the user; trainings at the residence do not happen at a friend's."""
+    stay = DeclaredStay(FRIEND, at(8, 0), at(9, 0))
+    request = ActivityRequest(
+        "t", "Gainage", timedelta(minutes=60), at(8, 6), at(8, 22), training=True
+    )
+    outcome = run_planning(
+        data(
+            stays=[stay],
+            activities=[request],
+            demands=[StudyDemand("a", "a", 90, at(8, 23, 59))],
+            horizon_end=at(8, 23, 59),
+        ),
+        FakeRouting(),
+    )
+    check(outcome)
+    assert outcome.unplaced_activities == ["t"]
+    assert outcome.result is not None and len(outcome.result.blocks) == 1
+
+
+def test_exam_keeps_the_full_arrival_margin_classes_get_the_tolerance() -> None:
+    """C4: tolerance for regular classes, never for exams; C18: official start shown."""
+    exam = Commitment("exam", "Examen d'analyse", at(8, 9), at(8, 12), CommitmentKind.EXAM, CAMPUS)
+    lesson = lecture(9, 9, 12)
+    outcome = run_planning(
+        data(commitments=[exam, lesson], class_tolerance=timedelta(minutes=10)), FakeRouting()
+    )
+    check(outcome)
+    to_exam = next(b for b in outcome.travel if b.destination == CAMPUS and b.start.day == 8)
+    to_class = next(b for b in outcome.travel if b.destination == CAMPUS and b.start.day == 9)
+    assert to_exam.end == at(8, 9) and to_exam.journey is not None
+    assert to_exam.journey.arrival == at(8, 8, 50)
+    assert to_class.end == at(9, 9, 10) and to_class.event_start == at(9, 9)
+
+
+def test_unknown_location_blocks_only_around_it_and_asks() -> None:
+    """C5: plan what is safe, block only the uncertain period, ask the question."""
+    odd = Commitment("x", "TP", at(9, 14), at(9, 16), CommitmentKind.CLASS, None, "Salle Z.99")
+    outcome = run_planning(
+        data(
+            commitments=[odd, lecture(8, 10, 12)],
+            demands=[StudyDemand("a", "a", 360, at(10, 23, 59))],
+        ),
+        FakeRouting(),
+    )
+    check(outcome)
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert any("Salle Z.99" in q for q in outcome.questions)
+    assert outcome.result is not None
+    blocks = [b.interval for b in outcome.result.blocks]
+    assert sum(int(b.duration.total_seconds() // 60) for b in outcome.result.blocks) == 360
+    assert not any(b.overlaps(Interval(at(9, 14), at(9, 16))) for b in blocks)
+    assert trips(outcome, 8) == [("home", "campus"), ("campus", "home")]
+
+
+def test_outage_keeps_previous_itineraries_and_the_plan_is_not_complete() -> None:
+    """C6: preserved itineraries, marked not revalidated; never reported complete."""
+    first = run_planning(data(commitments=[lecture(8, 10, 12)]), FakeRouting())
+    kept = {
+        (b.origin.id, b.destination.id, utc(b.end if not b.returning else b.start)): b.journey
+        for b in first.travel
+    }
+
+    def previous(origin: Place, target: Place, when: datetime, outbound: bool) -> Journey | None:
+        return kept.get((origin.id, target.id, utc(when)))
+
+    down = run_planning(
+        data(commitments=[lecture(8, 10, 12)], previous_travel=previous), FakeRouting(fail=True)
+    )
+    check(down)
+    assert {b.status for b in down.travel} == {TravelStatus.STALE}
+    assert down.status is OutcomeStatus.PARTIAL and down.unconfirmed_journeys == 2
+    blind = run_planning(data(commitments=[lecture(8, 10, 12)]), FakeRouting(fail=True))
+    assert {b.status for b in blind.travel} == {TravelStatus.UNKNOWN}
+    assert blind.status is OutcomeStatus.PARTIAL
+
+
+def test_real_itinerary_conflict_is_corrected_without_invalid_plan() -> None:
+    """C8: the real journey (campus -> club, 80 min) moves the session to a feasible slot."""
+    routing = FakeRouting({frozenset({"campus", "club"}): 80})
+    request = ActivityRequest(
+        "t",
+        "Entraînement",
+        timedelta(minutes=60),
+        at(7, 17),
+        at(7, 20),
+        place=CLUB,
+        preferred_start=at(7, 17, 30),
+    )
+    outcome = run_planning(
+        data(commitments=[lecture(7, 14, 17)], activities=[request], horizon_end=at(7, 23, 59)),
+        routing,
+    )
+    check(outcome)
+    (placed,) = outcome.activities
+    assert placed.start == at(7, 18, 45)
+    assert all(b.status is TravelStatus.ROUTED for b in outcome.travel)
+    assert outcome.status is OutcomeStatus.COMPLETE
+
+
+def test_planned_slot_made_infeasible_by_the_itinerary_is_proposed_not_moved() -> None:
+    """C8: a planned slot that the real journey no longer allows: alternative + approval."""
+    routing = FakeRouting({frozenset({"campus", "club"}): 80})
+    request = ActivityRequest(
+        "t",
+        "Entraînement",
+        timedelta(minutes=60),
+        at(8, 17),
+        at(8, 21),
+        place=CLUB,
+        previous_start=at(8, 17, 30),
+    )
+    outcome = run_planning(data(commitments=[lecture(8, 14, 17)], activities=[request]), routing)
+    check(outcome)
+    (move,) = outcome.pending
+    assert move.ref == "activity:t" and move.reason == "itinerary"
+    assert move.to_start is not None and utc(move.to_start) >= utc(at(8, 18, 45))
+    assert outcome.activities == [] and outcome.unplaced_activities == []
+    assert outcome.status is OutcomeStatus.PENDING_APPROVAL
+
+
+def test_today_items_stay_pinned_and_a_conflict_becomes_a_proposal() -> None:
+    """C31: a new class on today's pinned training: proposal, never an automatic move."""
+    pinned = Commitment(
+        "activity:t", "Footing", at(7, 14), at(7, 15), CommitmentKind.TRAINING, CLUB, pinned=True
+    )
+    request = ActivityRequest(
+        "t", "Footing", timedelta(minutes=60), at(7, 8), at(7, 22), place=CLUB, training=True
+    )
+    outcome = run_planning(
+        data(
+            commitments=[pinned, lecture(7, 13, 16)],
+            activities=[request],
+            horizon_end=at(7, 23, 59),
+        ),
+        FakeRouting(),
+    )
+    check(outcome)
+    (move,) = outcome.pending
+    assert move.reason == "same_day" and move.start == at(7, 14)
+    assert outcome.activities == []
+    free = run_planning(data(commitments=[pinned], horizon_end=at(7, 23, 59)), FakeRouting())
+    assert free.pending == [] and any(b.destination == CLUB for b in free.travel)
+
+
+def test_pinned_block_displaced_by_a_new_class_is_proposed() -> None:
+    block = PlannedBlock("a", "maths", at(7, 14), at(7, 15, 30))
+    outcome = run_planning(
+        data(
+            commitments=[lecture(7, 14, 16)],
+            demands=[StudyDemand("a", "maths", 90, at(10, 23, 59))],
+            pinned_blocks=[block],
+        ),
+        FakeRouting(),
+    )
+    check(outcome)
+    (move,) = outcome.pending
+    assert move.task_id == "a" and move.to_start is not None
+    assert outcome.result is not None and outcome.result.blocks == []
+
+
+def test_residence_changes_after_the_last_class_of_the_change_day() -> None:
+    """C12: leave from the current residence, go to the next one after the last class."""
+    switches = {date(2026, 12, 11): at(11, 16)}
+    alternation = replace(ALTERNATION, switches=switches)
+    outcome = run_planning(
+        data(
+            alternation=alternation,
+            commitments=[lecture(11, 8, 10), lecture(11, 14, 16)],
+            now=at(10, 20),
+            horizon_end=at(11, 23, 59),
+        ),
+        FakeRouting(),
+    )
+    check(outcome)
+    assert trips(outcome, 11) == [("home", "campus"), ("campus", "dad")]
+
+
+def test_change_day_without_class_asks_and_blocks_only_that_day() -> None:
+    """C12: no class on the change day: ask when; residence trainings wait that day only."""
+    request = ActivityRequest(
+        "t", "Gainage", timedelta(minutes=60), at(11, 6), at(12, 22), training=True
+    )
+    outcome = run_planning(
+        data(activities=[request], now=at(10, 20), horizon_end=at(12, 23, 59)), FakeRouting()
+    )
+    check(outcome)
+    assert any("changement de résidence" in q for q in outcome.questions)
+    (placed,) = outcome.activities
+    assert placed.start.astimezone(TZ).date() == date(2026, 12, 12)
+    assert outcome.status is OutcomeStatus.PARTIAL
+
+
+def test_realistic_week_is_valid_and_consistent() -> None:
+    classes = [lecture(d, 10, 12) for d in (7, 8, 9, 10)]
+    activities = [
+        ActivityRequest(
+            "t1",
+            "Fractionné",
+            timedelta(minutes=60),
+            at(8, 6),
+            at(9, 22),
+            place=CLUB,
+            training=True,
+        ),
+        ActivityRequest(
+            "t2", "Footing", timedelta(minutes=45), at(9, 6), at(10, 22), training=True
+        ),
+    ]
+    demands = [
+        StudyDemand("m", "Maths", 360, at(10, 23, 59)),
+        StudyDemand("p", "Physique", 270, None),
+    ]
+    outcome = run_planning(
+        data(commitments=classes, activities=activities, demands=demands), FakeRouting()
+    )
+    check(outcome)
+    assert outcome.status is OutcomeStatus.COMPLETE, (outcome.issues, outcome.unplanned_minutes)
+    assert outcome.result is not None
+    busy = [Interval(b.start, b.end) for b in outcome.travel] + [
+        Interval(c.start, c.end) for c in classes
+    ]
+    busy += [a.reserved for a in outcome.activities]
+    for block in outcome.result.blocks:
+        assert not any(block.interval.overlaps(b) for b in busy)
+    assert time(0) <= outcome.activities[0].start.astimezone(TZ).time()

@@ -36,7 +36,13 @@ def api(database_url: str, engine: Engine) -> Iterator[TestClient]:
 
 def create_task(api: TestClient, **overrides: object) -> dict[str, object]:
     """Tasks are created through the operation catalogue (never a dedicated REST route)."""
-    body = {"title": "Analyse", "estimated_minutes": 600, "target_date": "2027-01-15", **overrides}
+    body = {
+        "title": "Analyse",
+        "estimated_minutes": 600,
+        "splittable": True,
+        "target_date": "2027-01-15",
+        **overrides,
+    }
     response = api.post("/v1/operations/create_task", json=body, headers=AUTH)
     assert response.status_code == 200, response.text
     result: dict[str, object] = response.json()["result"]["task"]
@@ -88,11 +94,22 @@ def test_progress_update_changes_remaining_effort(api: TestClient) -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        {"title": "", "estimated_minutes": 60, "target_date": "2027-01-15"},
-        {"title": "A", "estimated_minutes": 0, "target_date": "2027-01-15"},
-        {"title": "A", "estimated_minutes": 60, "target_date": "not-a-date"},
-        {"title": "A", "estimated_minutes": 60, "target_date": "2027-01-15", "priority": 9},
-        {"title": "A" * 201, "estimated_minutes": 60, "target_date": "2027-01-15"},
+        {"title": "", "estimated_minutes": 60, "splittable": True, "target_date": "2027-01-15"},
+        {"title": "A", "estimated_minutes": 0, "splittable": True, "target_date": "2027-01-15"},
+        {"title": "A", "estimated_minutes": 60, "splittable": True, "target_date": "not-a-date"},
+        {
+            "title": "A",
+            "estimated_minutes": 60,
+            "splittable": True,
+            "target_date": "2027-01-15",
+            "priority": 9,
+        },
+        {
+            "title": "A" * 201,
+            "estimated_minutes": 60,
+            "splittable": True,
+            "target_date": "2027-01-15",
+        },
     ],
 )
 def test_invalid_tasks_are_rejected(api: TestClient, body: dict[str, object]) -> None:

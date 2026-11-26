@@ -1,14 +1,19 @@
 """Independent deterministic validation of a whole plan against its HARD rules.
 
-Kept separate from the solvers on purpose: production code runs it on every planning output,
-and a plan with violations is never published (CLAUDE.md: deterministic code verifies rules).
-Soft preferences (daily study cap, blocks per subject, activity hours, suggested days) are
-never violations: they are penalised by the solvers and reported.
+Kept separate from the solver on purpose: it runs on every planning output, on the FINAL plan
+(the journeys actually routed by MOTIS after placement, not the estimates the solver used), and
+a plan with violations is never published. Soft preferences (activity hours, darkness, days,
+breaks, alternation, distribution, stability) are never violations: they are penalised by the
+solver and reported.
 
-Checked: study blocks (``validate_plan``) and every other planned item (``validate_schedule``):
-flexible activities inside their window, their category windows and before a strict target;
-the order and recovery days of a coach week; no overlap between flexible activities, fixed
-commitments and routed journeys.
+Checked: study blocks (``validate_plan``): horizon, grid, length bounds, study availability,
+no overlap with busy time or activities, deadlines (soft or strict: never exceeded without the
+user's approval), kept fixed blocks, volume. Everything else (``validate_schedule``): flexible
+activities inside their window and allowed intervals, before their deadline, not where the
+user cannot be (stay elsewhere, unknown location), coach order and explicit recovery, no
+overlap with commitments, journeys, other activities or study; every journey to or from a
+flexible activity is feasible (routed, or a previous itinerary kept during an outage) and
+does not overlap a commitment.
 """
 
 import itertools
@@ -18,7 +23,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from tempo.domain.models import TargetKind
 from tempo.scheduler.model import PlannedBlock, PlanningProblem, PlanResult, PlanStatus
 from tempo.timeutil import Interval, utc
 
@@ -41,7 +45,11 @@ def _merged(windows: list[Interval]) -> list[tuple[datetime, datetime]]:
     return merged
 
 
-def _check_block(problem: PlanningProblem, block: PlannedBlock) -> list[str]:
+def _overlap(a: Interval, b: Interval) -> bool:
+    return utc(a.start) < utc(b.end) and utc(b.start) < utc(a.end)
+
+
+def _check_block(problem: PlanningProblem, block: PlannedBlock, taken: list[Interval]) -> list[str]:
     prefs = problem.preferences
     label = _label(block)
     demand = next((d for d in problem.demands if d.task_id == block.task_id), None)
@@ -60,40 +68,40 @@ def _check_block(problem: PlanningProblem, block: PlannedBlock) -> list[str]:
     start, end = utc(block.start), utc(block.end)
     if not any(s <= start and end <= e for s, e in _merged(problem.availability)):
         found.append(f"block outside availability: {label}")
-    if any(busy.overlaps(block.interval) for busy in problem.busy):
+    if any(_overlap(busy, block.interval) for busy in [*problem.busy, *taken]):
         found.append(f"block overlaps a busy interval: {label}")
-    if demand.target_kind is TargetKind.HARD and end > utc(demand.target):
-        found.append(f"block after hard deadline: {label}")
+    if demand.target is not None and end > utc(demand.target):
+        found.append(f"block after the deadline: {label}")
+    if demand.not_before is not None and start < utc(demand.not_before):
+        found.append(f"block before its allowed start: {label}")
     return found
 
 
 def validate_plan(problem: PlanningProblem, result: PlanResult) -> list[str]:
+    """Study blocks of the final plan (``taken``: placed activities with their travel)."""
     prefs = problem.preferences
     demands = {d.task_id: d for d in problem.demands}
     violations: list[str] = []
-
-    for locked in problem.locked_blocks:
-        if locked not in result.blocks:
-            violations.append(f"locked block dropped or moved: {_label(locked)}")
+    taken = [a.reserved for a in result.activities]
+    for kept in problem.fixed_blocks:
+        if kept not in result.blocks:
+            violations.append(f"fixed block dropped or moved: {_label(kept)}")
     for block in result.blocks:
-        if not block.locked:
-            violations.extend(_check_block(problem, block))
-
+        if block not in problem.fixed_blocks:
+            violations.extend(_check_block(problem, block, taken))
     ordered = sorted(result.blocks, key=lambda b: utc(b.start))
     for i, first in enumerate(ordered):
         for second in ordered[i + 1 :]:
             if utc(second.start) >= utc(first.end):
-                continue
-            if not (first.locked and second.locked):
+                break
+            if not (first in problem.fixed_blocks and second in problem.fixed_blocks):
                 violations.append(f"blocks overlap: {_label(first)} / {_label(second)}")
-
     planned: defaultdict[str, int] = defaultdict(int)
     for block in result.blocks:
         planned[block.task_id] += _minutes(block)
-
     for task_id, total in planned.items():
-        # The solver may round the last block up to the grid (overshoot <= one minimum block).
         demand = demands.get(task_id)
+        # The last block may be rounded up to the grid (overshoot <= one minimum block).
         if demand is not None and total > demand.remaining_minutes + prefs.min_block_minutes:
             violations.append(f"{task_id}: {total} min planned, more than requested")
     if result.status is PlanStatus.COMPLETE:
@@ -105,7 +113,7 @@ def validate_plan(problem: PlanningProblem, result: PlanResult) -> list[str]:
 
 @dataclass(frozen=True, slots=True)
 class PlacedSession:
-    """A flexible activity as placed by the activity planner, with the rules it must obey."""
+    """A flexible activity as placed, with the hard rules it must obey."""
 
     ref: str
     title: str
@@ -114,37 +122,49 @@ class PlacedSession:
     earliest_start: datetime
     latest_end: datetime
     allowed: tuple[Interval, ...] | None = None
-    strict_target: datetime | None = None
+    deadline: datetime | None = None
     sequence_group: str | None = None
     sequence_index: int = 0
-    min_days_after_previous: int = 0
+    training: bool = False
+    rest_days: int = 0
+    """Explicit recovery (days) required after the previous training."""
 
 
 @dataclass(frozen=True, slots=True)
 class Occupied:
-    """Time a planned item takes (fixed commitment or routed journey)."""
+    """Time a planned item takes (commitment, journey, study block)."""
 
     label: str
     interval: Interval
 
 
-def _overlap(a: Interval, b: Interval) -> bool:
-    return utc(a.start) < utc(b.end) and utc(b.start) < utc(a.end)
+@dataclass(frozen=True, slots=True)
+class Trip:
+    """A journey of the final plan, with the flexible session it serves (if any)."""
+
+    label: str
+    interval: Interval
+    feasible: bool
+    """Routed, or a previous itinerary kept during an outage."""
+    serves: str | None = None
+    """``activity:<id>`` reached or left by this journey (None: fixed commitments only)."""
 
 
 def validate_schedule(
     sessions: Sequence[PlacedSession],
     fixed: Sequence[Occupied],
-    journeys: Sequence[Occupied],
+    trips: Sequence[Trip],
     timezone: ZoneInfo,
-    chosen_journeys: Sequence[Occupied] = (),
+    *,
+    study: Sequence[Occupied] = (),
+    away: Sequence[Interval] = (),
+    at_home: frozenset[str] = frozenset(),
+    sport_days: Sequence[datetime] = (),
 ) -> list[str]:
-    """Hard rules of everything that is not a study block (see the module docstring).
+    """Hard rules of everything that is not a study block (module docstring).
 
     Overlaps between FIXED commitments (or the journeys linking them) are source conflicts,
-    reported for arbitration, not plan violations: the planner did not choose them. Journeys
-    to or from a flexible activity (``chosen_journeys``) follow from the planner's choice, so
-    they must not overlap any fixed commitment either."""
+    reported for arbitration, not plan violations: the planner did not choose them."""
     found: list[str] = []
     for s in sessions:
         span = Interval(s.start, s.end)
@@ -152,13 +172,15 @@ def validate_schedule(
         if utc(s.start) < utc(s.earliest_start) or utc(s.end) > utc(s.latest_end):
             found.append(f"activity outside its window: {label}")
         if s.allowed is not None and not any(w.contains(span) for w in s.allowed):
-            found.append(f"activity outside its category windows: {label}")
-        if s.strict_target is not None and utc(s.end) > utc(s.strict_target):
-            found.append(f"activity after its strict deadline: {label}")
-        for item in fixed:
+            found.append(f"activity outside its allowed periods: {label}")
+        if s.deadline is not None and utc(s.end) > utc(s.deadline):
+            found.append(f"activity after its deadline: {label}")
+        if s.ref in at_home and any(_overlap(span, a) for a in away):
+            found.append(f"activity at the residence while the user is away: {label}")
+        for item in [*fixed, *study]:
             if _overlap(span, item.interval):
                 found.append(f"activity overlaps {item.label}: {label}")
-        for trip in journeys:
+        for trip in trips:
             if _overlap(span, trip.interval):
                 found.append(f"activity overlaps journey {trip.label}: {label}")
     ordered = sorted(sessions, key=lambda x: utc(x.start))
@@ -175,14 +197,31 @@ def validate_schedule(
         members.sort(key=lambda x: x.sequence_index)
         for before, after in itertools.pairwise(members):
             if utc(after.start) < utc(before.end):
-                found.append(f"coach order broken: {after.title} before {before.title}")
-            gap = (
-                after.start.astimezone(timezone).date() - before.start.astimezone(timezone).date()
-            ).days
-            if gap < after.min_days_after_previous:
-                found.append(f"recovery too short before {after.title} ({gap} day(s))")
-    for trip in chosen_journeys:
+                found.append(f"order broken: {after.title} before {before.title}")
+    sport: list[tuple[datetime, PlacedSession | None]] = [
+        (s.start, s) for s in sessions if s.training
+    ] + [(d, None) for d in sport_days]
+    sport.sort(key=lambda x: utc(x[0]))
+    for (earlier, _), (later, session) in itertools.pairwise(sport):
+        if session is None or not session.rest_days:
+            continue
+        gap = (later.astimezone(timezone).date() - earlier.astimezone(timezone).date()).days
+        if gap < session.rest_days:
+            found.append(f"recovery too short before {session.title} ({gap} day(s))")
+    for trip in trips:
+        for block in study:
+            if _overlap(trip.interval, block.interval):
+                found.append(f"journey {trip.label} overlaps {block.label}")
+        if trip.serves is None:
+            continue
+        if not trip.feasible:
+            found.append(f"journey {trip.label} for {trip.serves} is not feasible")
         for item in fixed:
             if _overlap(trip.interval, item.interval):
                 found.append(f"journey {trip.label} overlaps {item.label}")
+        for other in sessions:
+            if other.ref != trip.serves and _overlap(
+                trip.interval, Interval(other.start, other.end)
+            ):
+                found.append(f"journey {trip.label} overlaps {other.title}")
     return found

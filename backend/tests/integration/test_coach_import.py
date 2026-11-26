@@ -114,9 +114,7 @@ def test_confirm_api_and_planning_respects_order_and_recovery(
         s.add(PlaceRow(id="home", name="Kot", latitude=50.67, longitude=4.61))
         s.flush()
         for weekday in range(7):
-            s.add(
-                AvailabilityRow(weekday=weekday, start_minute=480, end_minute=1200, place_id="home")
-            )
+            s.add(AvailabilityRow(weekday=weekday, start_minute=480, end_minute=1200))
         set_setting(
             s,
             "residence_alternation",

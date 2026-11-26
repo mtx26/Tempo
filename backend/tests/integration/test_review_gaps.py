@@ -20,7 +20,6 @@ from tempo.db.models import (
     NotificationRow,
     PhonePositionRow,
     ProposalRow,
-    StudyBlockRow,
 )
 from tempo.db.store import set_setting
 from tempo.domain.models import EventStatus
@@ -150,53 +149,5 @@ def test_departure_reminders_fire_once_per_threshold(sessions: sessionmaker[Sess
         reminders = [
             n.title for n in s.scalars(select(NotificationRow)) if n.kind == "departure_reminder"
         ]
-    assert len(reminders) == 2 and reminders[0].startswith("Départ dans 50 min")
-
-
-def test_conversational_approve_and_done(
-    sessions: sessionmaker[Session], database_url: str
-) -> None:
-    with sessions() as s:
-        seed(s)
-        task_id = s.scalars(select(StudyBlockRow.task_id)).first()
-        version = replan(s, FakeRouting(), NOW, TZ, reason="talk")
-        s.add(
-            ProposalRow(
-                kind="unlock_block",
-                title="test",
-                details={"block_id": "00000000-0000-0000-0000-000000000000"},
-                dedupe_key="talk",
-                created_at=NOW,
-            )
-        )
-        s.commit()
-        first = min(
-            s.scalars(select(StudyBlockRow).where(StudyBlockRow.schedule_version_id == version.id)),
-            key=lambda b: b.start_at,
-        )
-        _ = task_id
-    with TestClient(create_app(Settings(api_token=TOKEN, database_url=database_url))) as api:
-
-        def say(phrase: str) -> dict[str, object]:
-            result: dict[str, object] = api.post(
-                "/v1/conversation", json={"text": phrase}, headers=AUTH
-            ).json()
-            return result
-
-        approved = say("approuve")
-        assert approved["changed"] and approved["operations"] == ["decide_proposal"]
-        assert not say("refuse")["changed"]  # nothing pending any more
-    with sessions() as s:
-        assert s.scalars(select(ProposalRow)).one().status == "approved"
-        # "c'est fait" relies on the real clock: mark the earliest block as under way now.
-        block = s.get(StudyBlockRow, first.id)
-        assert block is not None
-        now = datetime.now(UTC)
-        block.start_at, block.end_at = now - timedelta(minutes=10), now + timedelta(minutes=80)
-        s.commit()
-    with TestClient(create_app(Settings(api_token=TOKEN, database_url=database_url))) as api:
-        done = api.post("/v1/conversation", json={"text": "c'est fait !"}, headers=AUTH).json()
-    assert done["changed"] and "marquée comme faite" in done["reply"]
-    assert done["operations"] == ["log_work"]
-    with sessions() as s:
-        assert s.get(StudyBlockRow, first.id).state == "done"  # type: ignore[union-attr]
+    # C18: departure time and official start only.
+    assert len(reminders) == 2 and all(r.startswith("Départ à ") for r in reminders)

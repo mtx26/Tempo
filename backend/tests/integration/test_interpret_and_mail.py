@@ -1,4 +1,4 @@
-"""Deterministic conversation fallback and training e-mails on a REAL PostgreSQL (LLM
+"""Conversation without Gemini and training e-mails on a REAL PostgreSQL (LLM
 faked for e-mails)."""
 
 from collections.abc import Iterator
@@ -66,60 +66,17 @@ def api(database_url: str, clean: sessionmaker[Session]) -> Iterator[TestClient]
         yield client
 
 
-def say(api: TestClient, phrase: str) -> dict[str, object]:
-    """No API key: the conversation answers with the deterministic fallback."""
-    response = api.post("/v1/conversation", json={"text": phrase}, headers=AUTH)
+def test_conversation_without_gemini_reports_the_error_and_changes_nothing(
+    api: TestClient, clean: sessionmaker[Session]
+) -> None:
+    """No deterministic conversational path: the outage is reported as is."""
+    response = api.post("/v1/conversation", json={"text": "ajoute 5h de maths"}, headers=AUTH)
     assert response.status_code == 200, response.text
-    result: dict[str, object] = response.json()
-    assert result["fallback"] is True and result["used_llm"] is False
-    return result
-
-
-def test_fallback_adds_a_soft_task_through_the_catalogue(
-    api: TestClient, clean: sessionmaker[Session]
-) -> None:
-    answer = say(api, f"ajoute 5h de maths pour le {dmy(ahead(20))}")
-    assert answer["changed"] and answer["operations"] == ["create_task"]
+    result = response.json()
+    assert result["used_llm"] is False and result["error"] == "llm_unavailable"
+    assert result["changed"] is False and "Rien n'a été modifié" in result["reply"]
     with clean() as s:
-        task = s.scalars(select(StudyTaskRow)).one()
-        assert (task.subject, task.effort_minutes, task.target_kind.value) == ("maths", 300, "soft")
-
-
-def test_fallback_unknown_text_explains_supported_phrasings(api: TestClient) -> None:
-    answer = say(api, "organise ma vie")
-    assert not answer["changed"]
-    assert "Exemples" in str(answer["reply"])
-
-
-def test_fallback_past_or_far_dates_are_rejected_not_fixed(api: TestClient) -> None:
-    assert "passée" in str(say(api, "ajoute 2h de chimie pour le 01/01/2020")["reply"])
-    far = say(api, f"ajoute 2h de chimie pour le {dmy(ahead(400))}")
-    assert not far["changed"] and "plus d'un an" in str(far["reply"])
-
-
-def test_fallback_adds_trainings_and_races_through_the_catalogue(
-    api: TestClient, clean: sessionmaker[Session]
-) -> None:
-    with clean() as s:
-        s.add(PlaceRow(id="club", name="Club", latitude=50.7, longitude=4.6))
-        s.commit()
-    answer = say(
-        api,
-        f"{dmy(ahead(3))} 18:30 : fractionné 60 min @club - 6 x 800 m\n"
-        f"course {dmy(ahead(9))} 10:00 : 10 km 60 min @club",
-    )
-    assert answer["changed"] and answer["operations"] == ["create_event", "create_event"]
-    with clean() as s:
-        rows = {a.kind: a for a in s.scalars(select(ActivityRow))}
-    assert rows["race"].scheduling == "fixed" and rows["race"].duration_minutes == 60
-    assert rows["training"].scheduling == "flexible" and rows["training"].notes == "6 x 800 m"
-    assert rows["training"].preferred_start_at is not None
-
-
-def test_too_many_items_are_refused(api: TestClient) -> None:
-    lines = "\n".join(f"ajoute 1h de sujet{i} pour le {dmy(ahead(30))}" for i in range(21))
-    answer = say(api, lines)
-    assert not answer["changed"] and "plus de 20" in str(answer["reply"])
+        assert list(s.scalars(select(StudyTaskRow))) == []
 
 
 def test_training_mail_import_is_narrow_idempotent_and_protects_races(

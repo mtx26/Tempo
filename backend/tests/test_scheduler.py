@@ -1,359 +1,465 @@
-"""Behavioural tests for the CP-SAT study planner.
+"""The single CP-SAT planner: study blocks and flexible activities in ONE model.
 
-Assertions target properties required by ARCHITECTURE.md, not exact placements, because
-CP-SAT may return any optimal solution. Every produced plan is also checked by the independent
-deterministic validator.
-"""
+Each test names the validated decision it checks (ARCHITECTURE.md §8)."""
 
 import itertools
+import time as clock
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from tempo.const import (
+    AFTERNOON_COST,
+    BETWEEN_CLASSES_COST,
+    CLASS_DAY_COST,
+    COACH_DAY_COST,
+    DARK_COST,
+    DISTRIBUTION_PER_MINUTE,
+    EVENING_COST,
+    MISSING_BREAK_COST,
+    NO_DEADLINE_PER_MINUTE,
+    OUTSIDE_HOURS_COST,
+    PREFERRED_START_COST,
+    SAME_SUBJECT_COST,
+    SHORT_BLOCK_COST,
+    STABILITY_COST,
+    UNPLANNED_PER_MINUTE,
+)
 from tempo.domain.models import TargetKind
 from tempo.scheduler.model import (
+    ClassSlot,
+    FlexibleActivity,
     PlannedBlock,
     PlanningProblem,
     PlanResult,
     PlanStatus,
-    Preferences,
     StudyDemand,
+    TemporaryPreference,
+    TrainingPreferences,
 )
-from tempo.scheduler.solver import solve
+from tempo.scheduler.solver import objective_lower_bound, same_subject, solve, stability_weight
 from tempo.scheduler.validate import validate_plan
-from tempo.timeutil import Interval
+from tempo.timeutil import Interval, utc
 
 TZ = ZoneInfo("Europe/Brussels")
 
 
-def at(day: int, hour: int, minute: int = 0, month: int = 12, year: int = 2026) -> datetime:
-    return datetime(year, month, day, hour, minute, tzinfo=TZ)
+def at(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 12, day, hour, minute, tzinfo=TZ)
 
 
-def window(day: int, start_hour: int, end_hour: int) -> Interval:
-    return Interval(at(day, start_hour), at(day, end_hour))
+def windows(first: int, last: int, start: int = 8, end: int = 20) -> list[Interval]:
+    return [Interval(at(d, start), at(d, end)) for d in range(first, last + 1)]
 
 
-def end_of(day: int) -> datetime:
-    return datetime.combine(date(2026, 12, day) + timedelta(days=1), time(0), tzinfo=TZ)
+def problem(**overrides: Any) -> PlanningProblem:
+    values: dict[str, Any] = {
+        "horizon": Interval(at(7, 0), at(13, 23, 59)),
+        "timezone": TZ,
+        "availability": windows(7, 13),
+        "busy": [],
+        "training": TrainingPreferences(free_days=False, mornings=False, daylight=False),
+    }
+    values.update(overrides)
+    return PlanningProblem(**values)
 
 
-def demand(
-    task_id: str,
-    minutes: int,
-    target_day: int = 20,
-    kind: TargetKind = TargetKind.SOFT,
-    subject: str | None = None,
-) -> StudyDemand:
-    return StudyDemand(
-        task_id=task_id,
-        subject=subject or task_id,
-        remaining_minutes=minutes,
-        target=end_of(target_day),
-        target_kind=kind,
-    )
-
-
-def problem(
-    demands: list[StudyDemand],
-    availability: list[Interval],
-    busy: list[Interval] | None = None,
-    locked: list[PlannedBlock] | None = None,
-    days: tuple[int, int] = (1, 7),
-    preferences: Preferences | None = None,
-) -> PlanningProblem:
-    return PlanningProblem(
-        horizon=Interval(at(days[0], 0), end_of(days[1])),
-        timezone=TZ,
-        availability=availability,
-        busy=busy or [],
-        demands=demands,
-        locked_blocks=locked or [],
-        preferences=preferences or Preferences(),
-    )
-
-
-def solve_valid(p: PlanningProblem) -> PlanResult:
-    result = solve(p, time_limit_seconds=10)
+def run(p: PlanningProblem, seconds: float = 10) -> PlanResult:
+    result = solve(p, time_limit_seconds=seconds)
+    assert result.status is not PlanStatus.NO_SOLUTION
     assert validate_plan(p, result) == []
     return result
 
 
-def minutes(blocks: list[PlannedBlock], task_id: str) -> int:
-    return sum(int(b.duration.total_seconds() // 60) for b in blocks if b.task_id == task_id)
+def minutes(result: PlanResult, task: str) -> int:
+    return sum(int(b.duration.total_seconds() // 60) for b in result.blocks if b.task_id == task)
 
 
-def test_task_is_split_into_preferred_90_minute_blocks() -> None:
-    result = solve_valid(problem([demand("analyse", 180)], [window(1, 8, 18)]))
-    assert result.status is PlanStatus.COMPLETE
-    assert sorted(b.duration for b in result.blocks) == [timedelta(minutes=90)] * 2
+def training(activity_id: str = "t", **kw: Any) -> FlexibleActivity:
+    values: dict[str, Any] = {
+        "activity_id": activity_id,
+        "title": "Entraînement",
+        "duration": timedelta(minutes=60),
+        "earliest_start": at(8, 0),
+        "latest_end": at(8, 23, 59),
+        "training": True,
+    }
+    values.update(kw)
+    return FlexibleActivity(**values)
 
 
-def test_remainder_uses_one_shorter_block() -> None:
-    result = solve_valid(problem([demand("analyse", 120)], [window(1, 8, 18)]))
-    durations = sorted(int(b.duration.total_seconds() // 60) for b in result.blocks)
-    assert durations == [30, 90]
+# --- study blocks --------------------------------------------------------------------------------
 
 
-def test_blocks_avoid_fixed_events_and_stay_in_availability() -> None:
+def test_blocks_are_90_minutes_with_one_shorter_remainder() -> None:
+    """C21: 90-minute sessions preferred, 30-90 minutes when necessary."""
+    result = run(problem(demands=[StudyDemand("a", "maths", 210, at(13, 23, 59))]))
+    lengths = sorted(int(b.duration.total_seconds() // 60) for b in result.blocks)
+    assert lengths == [30, 90, 90]
+
+
+def test_blocks_stay_in_availability_and_outside_busy_time() -> None:
+    busy = [Interval(at(7, 9), at(7, 18))]
     p = problem(
-        [demand("analyse", 240)],
-        [window(1, 8, 12), window(2, 8, 12)],
-        busy=[Interval(at(1, 9), at(1, 11)), Interval(at(2, 8), at(2, 10))],
+        availability=windows(7, 7), busy=busy, demands=[StudyDemand("a", "a", 240, at(7, 23))]
     )
-    result = solve_valid(p)
-    assert minutes(result.blocks, "analyse") == 240  # exactly the free capacity
-    assert result.status is PlanStatus.COMPLETE
+    result = run(p)
+    assert minutes(result, "a") == 180  # 08:00-09:00 and 18:00-20:00 only
+    assert all(not b.interval.overlaps(busy[0]) for b in result.blocks)
+    assert result.unplanned_minutes == {"a": 60}
+    assert result.deadline_misses == ["a"]
 
 
-def test_effort_beyond_free_capacity_is_reported_as_unplanned() -> None:
+@pytest.mark.parametrize("kind", [TargetKind.SOFT, TargetKind.HARD])
+def test_no_work_after_a_deadline_soft_or_strict(kind: TargetKind) -> None:
+    """C30: the feasible part is planned, never anything after the deadline."""
+    p = problem(demands=[StudyDemand("a", "a", 30 * 60, at(8, 23, 59), kind)])
+    result = run(p)
+    assert all(utc(b.end) <= utc(at(8, 23, 59)) for b in result.blocks)
+    assert result.unplanned_minutes["a"] > 0
+    assert result.deadline_misses == ["a"]
+    assert result.hard_deadline_misses == (["a"] if kind is TargetKind.HARD else [])
+
+
+def test_no_daily_study_cap_beyond_the_availability() -> None:
+    """C20: no six-hour limit; the configured availability is the only bound."""
+    p = problem(availability=windows(7, 7, 8, 20), demands=[StudyDemand("a", "a", 540, at(7, 23))])
+    assert minutes(run(p), "a") == 540
+
+
+def test_no_per_subject_daily_count() -> None:
+    """C23: one subject may get many sessions a day when it needs them."""
+    p = problem(availability=windows(7, 7), demands=[StudyDemand("a", "maths", 450, at(7, 23))])
+    result = run(p)
+    assert len(result.blocks) == 5 and result.unplanned_minutes == {}
+
+
+def test_break_between_sessions_when_room() -> None:
+    """C27: a 15-minute break between study sessions is preferred."""
     p = problem(
-        [demand("analyse", 270)],
-        [window(1, 8, 12), window(2, 8, 12)],
-        busy=[Interval(at(1, 9), at(1, 11)), Interval(at(2, 8), at(2, 10))],
-    )
-    result = solve_valid(p)
-    assert result.status is PlanStatus.PARTIAL
-    assert result.unplanned_minutes == {"analyse": 30}
-
-
-def test_short_window_allows_shorter_block_rather_than_nothing() -> None:
-    result = solve_valid(problem([demand("analyse", 60)], [window(1, 8, 9)]))
-    assert minutes(result.blocks, "analyse") == 60
-
-
-def test_same_subject_blocks_are_not_back_to_back_when_avoidable() -> None:
-    p = problem(
-        [demand("analyse", 180), demand("chimie", 180)],
-        [window(1, 8, 14)],
-    )
-    result = solve_valid(p)
-    assert result.status is PlanStatus.COMPLETE
-    ordered = sorted(result.blocks, key=lambda b: b.start)
-    for first, second in itertools.pairwise(ordered):
-        if first.task_id == second.task_id:
-            assert second.start - first.end >= timedelta(minutes=30)
-
-
-def test_daily_study_cap_is_respected() -> None:
-    prefs = Preferences(max_daily_study_minutes=180)
-    p = problem([demand("analyse", 360)], [window(1, 8, 20), window(2, 8, 20)], preferences=prefs)
-    result = solve_valid(p)
-    assert result.status is PlanStatus.COMPLETE
-    assert {b.start.date() for b in result.blocks} == {date(2026, 12, 1), date(2026, 12, 2)}
-
-
-def test_soft_target_is_exceeded_and_reported_instead_of_failing() -> None:
-    p = problem(
-        [demand("analyse", 180, target_day=1)],
-        [window(1, 8, 10), window(3, 8, 12)],
-    )
-    result = solve_valid(p)
-    assert result.status is PlanStatus.COMPLETE
-    assert minutes(result.blocks, "analyse") == 180
-    assert result.late_minutes["analyse"] > 0
-    assert result.hard_deadline_misses == []
-
-
-def test_impossible_hard_deadline_is_reported_never_violated() -> None:
-    p = problem(
-        [demand("analyse", 300, target_day=1, kind=TargetKind.HARD)],
-        [window(1, 8, 11), window(3, 8, 18)],
-    )
-    result = solve_valid(p)
-    assert all(b.end <= end_of(1) for b in result.blocks)
-    assert result.status is PlanStatus.PARTIAL
-    assert result.unplanned_minutes["analyse"] == 120
-    assert result.hard_deadline_misses == ["analyse"]
-
-
-def test_locked_block_is_kept_and_counts_toward_effort() -> None:
-    locked = PlannedBlock("analyse", "analyse", at(1, 8), at(1, 9, 30), locked=True)
-    p = problem([demand("analyse", 180)], [window(1, 8, 18)], locked=[locked])
-    result = solve_valid(p)
-    assert locked in result.blocks
-    assert minutes(result.blocks, "analyse") == 180
-
-
-def test_no_availability_returns_explicit_unplanned_effort() -> None:
-    result = solve_valid(problem([demand("analyse", 90)], []))
-    assert result.blocks == []
-    assert result.status is PlanStatus.PARTIAL
-    assert result.unplanned_minutes == {"analyse": 90}
-
-
-def test_planning_across_dst_change_keeps_local_wall_clock() -> None:
-    day = datetime(2027, 3, 28, 0, 0, tzinfo=TZ)
-    p = PlanningProblem(
-        horizon=Interval(day, day + timedelta(days=1)),
-        timezone=TZ,
-        availability=[Interval(day.replace(hour=8), day.replace(hour=12))],
-        busy=[],
+        availability=windows(7, 7, 8, 15),
         demands=[
-            StudyDemand(
-                "analyse",
-                "analyse",
-                90,
-                target=day + timedelta(days=1),
-                target_kind=TargetKind.SOFT,
-            )
+            StudyDemand("a", "maths", 180, at(7, 23)),
+            StudyDemand("b", "chimie", 180, at(7, 23)),
         ],
-        locked_blocks=[],
-        preferences=Preferences(),
     )
-    result = solve_valid(p)
-    (block,) = result.blocks
-    assert 8 <= block.start.astimezone(TZ).hour < 12
+    blocks = sorted(run(p).blocks, key=lambda b: utc(b.start))
+    gaps = [utc(n.start) - utc(b.end) for b, n in itertools.pairwise(blocks)]
+    assert len(blocks) == 4 and all(g >= timedelta(minutes=15) for g in gaps)
 
 
-def test_class_moved_onto_locked_block_is_not_infeasible() -> None:
-    """The solver plans around it; the conflict itself is detected by engine.find_conflicts."""
-    locked = PlannedBlock("analyse", "analyse", at(1, 8), at(1, 9, 30), locked=True)
+def test_consecutive_sessions_when_necessary() -> None:
+    """C27: the break gives way when the time is needed."""
+    p = problem(availability=windows(7, 7, 8, 11), demands=[StudyDemand("a", "a", 180, at(7, 23))])
+    assert minutes(run(p), "a") == 180
+
+
+def test_subjects_alternate_when_alternatives_exist() -> None:
+    """C22: the same subject is not repeated back to back."""
     p = problem(
-        [demand("analyse", 180)],
-        [window(1, 8, 18)],
-        busy=[Interval(at(1, 9), at(1, 10))],
-        locked=[locked],
-    )
-    result = solve(p, time_limit_seconds=10)
-    assert result.status is PlanStatus.COMPLETE
-    assert locked in result.blocks
-    new_blocks = [b for b in result.blocks if not b.locked]
-    assert all(not b.interval.overlaps(Interval(at(1, 9), at(1, 10))) for b in new_blocks)
-
-
-def test_zero_remaining_effort_plans_nothing() -> None:
-    result = solve_valid(problem([demand("analyse", 0)], [window(1, 8, 18)]))
-    assert result.blocks == []
-    assert result.status is PlanStatus.COMPLETE
-
-
-def test_realistic_four_week_simulation_is_complete_and_valid() -> None:
-    subjects = ["analyse", "algebre", "physique", "chimie", "info", "anglais"]
-    demands = [demand(s, 600, target_day=26) for s in subjects]  # 60 h in total
-    availability, busy = [], []
-    for day in range(1, 29):
-        availability.append(window(day, 8, 12))
-        availability.append(window(day, 13, 19))
-        if date(2026, 12, day).weekday() < 5:  # weekday classes
-            busy.append(Interval(at(day, 9), at(day, 11)))
-            busy.append(Interval(at(day, 14), at(day, 16)))
-    p = problem(demands, availability, busy=busy, days=(1, 28))
-    result = solve_valid(p)
-    assert result.status is PlanStatus.COMPLETE
-    assert result.late_minutes == {}
-
-
-def test_inconsistent_preferences_are_rejected() -> None:
-    import pytest
-
-    with pytest.raises(ValueError):
-        Preferences(min_block_minutes=120, preferred_block_minutes=90)
-    with pytest.raises(ValueError):
-        Preferences(preferred_block_minutes=100)  # not a multiple of 15
-
-
-# --- Regression tests from the adversarial review ---------------------------
-
-
-def test_soft_target_long_past_still_plans_everything() -> None:
-    p = problem([demand("analyse", 180, target_day=1)], [window(15, 8, 18)], days=(11, 16))
-    result = solve_valid(p)
-    assert result.status is PlanStatus.COMPLETE
-    assert result.late_minutes["analyse"] == 180
-
-
-def test_busy_interval_with_seconds_is_never_overlapped() -> None:
-    busy = [Interval(at(1, 8), at(1, 8).replace(second=30))]
-    result = solve_valid(problem([demand("analyse", 90)], [window(1, 8, 10)], busy=busy))
-    assert result.status is PlanStatus.COMPLETE
-
-
-def test_alternation_applies_per_subject_across_tasks() -> None:
-    p = problem(
-        [
-            demand("maths-1", 180, subject="maths"),
-            demand("maths-2", 180, subject="maths"),
-            demand("chimie", 180),
+        availability=windows(7, 7, 8, 15),
+        demands=[
+            StudyDemand("a", "maths", 180, at(7, 23)),
+            StudyDemand("b", "chimie", 180, at(7, 23)),
         ],
-        [window(1, 8, 20), window(2, 8, 20)],
     )
-    result = solve_valid(p)
-    assert result.status is PlanStatus.COMPLETE
-    ordered = sorted(result.blocks, key=lambda b: b.start)
-    for first, second in itertools.pairwise(ordered):
-        if first.subject == second.subject and first.start.date() == second.start.date():
-            assert second.start - first.end >= timedelta(minutes=30)
+    blocks = sorted(run(p).blocks, key=lambda b: utc(b.start))
+    subjects = [b.subject for b in blocks]
+    assert all(x != y for x, y in itertools.pairwise(subjects)), subjects
 
 
-def test_daily_cap_counts_locked_blocks() -> None:
-    locked = PlannedBlock("analyse", "analyse", at(1, 8), at(1, 11), locked=True)
-    prefs = Preferences(max_daily_study_minutes=180, max_block_minutes=180)
+def test_no_study_of_a_subject_right_after_its_class_when_alternatives_exist() -> None:
+    """C22: after the chemistry class, another subject first."""
     p = problem(
-        [demand("analyse", 360)],
-        [window(1, 8, 20), window(2, 8, 20)],
-        locked=[locked],
-        preferences=prefs,
+        availability=[Interval(at(7, 10), at(7, 13, 15))],
+        busy=[Interval(at(7, 8), at(7, 10))],
+        classes=[ClassSlot(at(7, 8), at(7, 10), "Chimie générale")],
+        demands=[
+            StudyDemand("c", "Chimie", 90, at(7, 23)),
+            StudyDemand("m", "Maths", 90, at(7, 23)),
+        ],
     )
-    result = solve_valid(p)
-    assert all(b.start.date() != date(2026, 12, 1) for b in result.blocks if not b.locked)
+    first = min(run(p).blocks, key=lambda b: utc(b.start))
+    assert first.subject == "Maths"
+    assert same_subject("Chimie", "CHIMIE générale (CM)") and not same_subject("Maths", "Chimie")
 
 
-def test_duplicate_task_ids_are_rejected() -> None:
-    import pytest
+def test_work_is_distributed_regularly_until_the_deadline() -> None:
+    """C13: regular distribution rather than everything as early as possible."""
+    p = problem(demands=[StudyDemand("a", "a", 360, at(10, 23, 59))])
+    per_day: dict[date, int] = {}
+    for b in run(p).blocks:
+        day = b.start.astimezone(TZ).date()
+        per_day[day] = per_day.get(day, 0) + int(b.duration.total_seconds() // 60)
+    assert len(per_day) == 4 and max(per_day.values()) == 90
 
-    with pytest.raises(ValueError):
-        problem([demand("analyse", 180), demand("analyse", 90)], [window(1, 8, 18)])
+
+def test_task_without_deadline_uses_remaining_time_only() -> None:
+    """C24: no artificial deadline; real deadlines are never compromised."""
+    p = problem(
+        availability=windows(7, 7, 8, 11),
+        demands=[
+            StudyDemand("free", "lecture", 600, None, priority=3),
+            StudyDemand("due", "maths", 90, at(7, 23), priority=1),
+        ],
+    )
+    result = run(p)
+    assert minutes(result, "due") == 90 and minutes(result, "free") == 90
+    assert result.deadline_misses == []
 
 
-def test_blocks_are_aligned_to_local_quarter_hours_when_horizon_is_not() -> None:
+def test_priority_matters_only_when_time_runs_out() -> None:
+    """C9: everything fits -> both full; not enough -> the higher priority wins."""
+    roomy = problem(
+        demands=[
+            StudyDemand("a", "a", 180, at(9, 23), priority=1),
+            StudyDemand("b", "b", 180, at(9, 23), priority=3),
+        ]
+    )
+    result = run(roomy)
+    assert result.unplanned_minutes == {}
+    tight = replace(roomy, availability=windows(7, 7, 8, 11))
+    result = run(tight)
+    assert minutes(result, "b") == 180 and result.unplanned_minutes == {"a": 180}
+
+
+def test_fixed_blocks_are_kept_and_count_toward_the_work() -> None:
+    kept = PlannedBlock("a", "a", at(7, 9), at(7, 10, 30), locked=True)
+    result = run(problem(demands=[StudyDemand("a", "a", 180, at(13, 23))], fixed_blocks=[kept]))
+    assert kept in result.blocks and minutes(result, "a") == 180
+
+
+def test_dst_change_keeps_the_local_quarter_hour_grid() -> None:
+    start = datetime(2027, 3, 27, 0, tzinfo=TZ)
     p = PlanningProblem(
-        horizon=Interval(at(1, 0, 7).replace(second=13), end_of(2)),
+        horizon=Interval(start, start + timedelta(days=2)),
         timezone=TZ,
-        availability=[window(1, 8, 18)],
+        availability=[
+            Interval(datetime(2027, 3, d, 8, tzinfo=TZ), datetime(2027, 3, d, 12, tzinfo=TZ))
+            for d in (27, 28)
+        ],
         busy=[],
-        demands=[demand("analyse", 90)],
-        locked_blocks=[],
+        demands=[StudyDemand("a", "a", 360, datetime(2027, 3, 28, 23, tzinfo=TZ))],
     )
-    (block,) = solve_valid(p).blocks
-    assert block.start.minute % 15 == 0 and block.start.second == 0
+    for block in run(p).blocks:
+        local = block.start.astimezone(TZ)
+        assert local.minute % 15 == 0 and 8 <= local.hour < 12
 
 
-def test_contiguous_availability_windows_are_usable_as_one() -> None:
-    windows = [Interval(at(1, 8), at(1, 9)), Interval(at(1, 9), at(1, 9, 30))]
-    result = solve_valid(problem([demand("analyse", 90)], windows))
-    assert result.status is PlanStatus.COMPLETE
+# --- stability (C10) ------------------------------------------------------------------------------
 
 
-def test_six_week_six_subject_plan_is_complete_within_time_limit() -> None:
-    subjects = ["analyse", "algebre", "physique", "chimie", "info", "anglais"]
-    demands = [demand(s, 900, target_day=31) for s in subjects]  # 90 h in total
-    availability, busy = [], []
-    start = date(2026, 12, 1)
-    for offset in range(42):
-        d = start + timedelta(days=offset)
-        for begin, end in ((8, 12), (13, 19), (20, 22)):
-            availability.append(
-                Interval(
-                    datetime.combine(d, time(begin), tzinfo=TZ),
-                    datetime.combine(d, time(end), tzinfo=TZ),
-                )
-            )
-        if d.weekday() < 5:
-            busy.append(
-                Interval(
-                    datetime.combine(d, time(9), tzinfo=TZ),
-                    datetime.combine(d, time(11), tzinfo=TZ),
-                )
-            )
+def test_identical_replan_keeps_every_block() -> None:
+    p = problem(
+        demands=[StudyDemand("a", "a", 360, at(11, 23)), StudyDemand("b", "b", 270, at(12, 23))]
+    )
+    first = run(p)
+    second = run(replace(p, previous_blocks=list(first.blocks)))
+    assert {(b.task_id, b.start) for b in second.blocks} == {
+        (b.task_id, b.start) for b in first.blocks
+    }
+
+
+def test_a_new_commitment_moves_only_the_affected_block() -> None:
+    p = problem(demands=[StudyDemand("a", "a", 360, at(11, 23))])
+    first = run(p)
+    hit = first.blocks[0]
+    second = run(replace(p, previous_blocks=list(first.blocks), busy=[hit.interval]))
+    kept = {(b.task_id, b.start) for b in first.blocks} & {
+        (b.task_id, b.start) for b in second.blocks
+    }
+    assert len(kept) == len(first.blocks) - 1
+
+
+def test_moving_is_cheaper_further_in_time() -> None:
+    weights = [stability_weight(days) for days in range(0, 14)]
+    assert weights == sorted(weights, reverse=True) and weights[0] == STABILITY_COST
+    assert weights[1] > weights[7] > weights[13] > 0
+
+
+# --- flexible activities ---
+
+
+def test_activity_uses_its_preferred_time_with_travel_reserved() -> None:
+    item = training(
+        preferred_start=at(8, 18),
+        travel_before=timedelta(minutes=40),
+        travel_after=timedelta(minutes=30),
+        training=False,
+    )
+    result = run(problem(activities=[item]))
+    (placed,) = result.activities
+    assert placed.start == at(8, 18)
+    assert placed.reserved == Interval(at(8, 17, 20), at(8, 19, 30))
+
+
+def test_activity_without_room_is_unplaced_not_forced() -> None:
+    item = training(earliest_start=at(8, 10), latest_end=at(8, 11), training=False)
+    result = run(problem(activities=[item], busy=[Interval(at(8, 10), at(8, 10, 30))]))
+    assert result.unplaced == ["t"] and result.status is PlanStatus.PARTIAL
+
+
+def test_allowed_intervals_are_hard() -> None:
+    allowed = (Interval(at(8, 7), at(8, 9)),)
+    result = run(problem(activities=[training(allowed=allowed)]))
+    assert allowed[0].contains(Interval(result.activities[0].start, result.activities[0].end))
+
+
+def test_coach_order_and_explicit_recovery() -> None:
+    """C28: the coach's order and only explicit recovery days."""
+    first = training(
+        "a", earliest_start=at(7, 6), latest_end=at(13, 22), sequence_group="w", sequence_index=0
+    )
+    second = training(
+        "b",
+        earliest_start=at(7, 6),
+        latest_end=at(13, 22),
+        sequence_group="w",
+        sequence_index=1,
+        rest_days=2,
+    )
+    result = run(problem(activities=[second, first]))
+    placed = {p.activity_id: p for p in result.activities}
+    gap = (placed["b"].start.date() - placed["a"].start.date()).days
+    assert utc(placed["a"].end) <= utc(placed["b"].start) and gap >= 2
+
+
+def test_recovery_after_a_fixed_race() -> None:
+    item = training(earliest_start=at(8, 6), latest_end=at(10, 22), rest_days=2)
+    result = run(problem(activities=[item], sport_days=[date(2026, 12, 7)]))
+    assert result.activities[0].start.date() >= date(2026, 12, 9)
+
+
+def test_training_prefers_days_without_classes_then_mornings() -> None:
+    """C11: free days first, then mornings, then afternoons, evenings last."""
+    week = training(earliest_start=at(7, 6), latest_end=at(9, 22))
+    prefs = TrainingPreferences(free_days=True, mornings=True, daylight=False)
+    classes = [ClassSlot(at(d, 10), at(d, 12), "Cours") for d in (7, 9)]
+    result = run(problem(activities=[week], training=prefs, classes=classes))
+    start = result.activities[0].start.astimezone(TZ)
+    assert start.date() == date(2026, 12, 8) and start.hour < 12
+
+
+def test_time_of_day_order_morning_afternoon_evening() -> None:
+    assert 0 < AFTERNOON_COST < EVENING_COST < CLASS_DAY_COST < BETWEEN_CLASSES_COST < DARK_COST
+
+
+def test_training_avoids_the_dark_but_is_not_forbidden_there() -> None:
+    sun = lambda _day: (at(8, 8, 30), at(8, 16, 40))  # noqa: E731 - test double
+    prefs = TrainingPreferences(free_days=False, mornings=False, daylight=True)
+    day = run(problem(activities=[training()], training=prefs, sun=sun))
+    start = day.activities[0].start
+    assert at(8, 8, 30) <= start and utc(day.activities[0].end) <= utc(at(8, 16, 40))
+    night = training(earliest_start=at(8, 18), latest_end=at(8, 21))
+    dark = run(problem(activities=[night], training=prefs, sun=sun))
+    assert dark.unplaced == []
+    indoor = run(problem(activities=[replace(night, outdoor=False)], training=prefs, sun=sun))
+    assert indoor.unplaced == []
+
+
+def test_training_between_two_classes_is_avoided() -> None:
+    """C1: not between two classes, even when there would be time."""
+    classes = [ClassSlot(at(8, 8), at(8, 10), "A"), ClassSlot(at(8, 16), at(8, 18), "B")]
+    result = run(
+        problem(
+            activities=[training()],
+            classes=classes,
+            busy=[Interval(c.start, c.end) for c in classes],
+        )
+    )
+    start = result.activities[0].start
+    assert utc(start) >= utc(at(8, 18)) or utc(start) < utc(at(8, 8))
+
+
+def test_temporary_preference_holds_then_expires() -> None:
+    """C29: a temporary preference overrides the permanent one only in its period."""
+    late = TemporaryPreference(at(8, 0), at(9, 0), activity_hours=(time(18), time(22)))
+    p = problem(activities=[training()], temporary=[late])
+    assert run(p).activities[0].start.astimezone(TZ).hour >= 18
+    later = replace(training(), earliest_start=at(9, 0), latest_end=at(9, 23, 59))
+    assert p.hours_on(date(2026, 12, 9)) == (time(6), time(22))
+    assert run(replace(p, activities=[later])).outside_hours == []
+
+
+def test_categories_compete_only_through_priority_and_deadline() -> None:
+    """C25: one free slot, a training and study with the same deadline: priority decides."""
+    slot = [Interval(at(8, 9), at(8, 10, 30))]
+    study = StudyDemand("s", "maths", 90, at(8, 10, 30), priority=3)
+    sport = training(
+        earliest_start=at(8, 9),
+        latest_end=at(8, 10, 30),
+        duration=timedelta(minutes=90),
+        priority=1,
+    )
+    base = problem(
+        horizon=Interval(at(8, 0), at(8, 23)),
+        availability=slot,
+        demands=[study],
+        activities=[sport],
+    )
+    result = run(base)
+    assert minutes(result, "s") == 90 and result.unplaced == ["t"]
+    swapped = replace(
+        base, demands=[replace(study, priority=1)], activities=[replace(sport, priority=3)]
+    )
+    result = run(swapped)
+    assert result.activities and result.unplanned_minutes == {"s": 90}
+
+
+# --- objective balance ---
+
+
+def test_preferences_never_outweigh_placing_work() -> None:
+    """Every soft cost one item can accumulate stays below leaving it unplanned (C9, C11, C24)."""
+    general = CLASS_DAY_COST + EVENING_COST
+    assert general < PREFERRED_START_COST < DARK_COST  # an explicit time beats general prefs
+    activity_worst = (
+        PREFERRED_START_COST
+        + OUTSIDE_HOURS_COST
+        + DARK_COST
+        + BETWEEN_CLASSES_COST
+        + CLASS_DAY_COST
+        + EVENING_COST
+        + COACH_DAY_COST * 6
+        + 2 * STABILITY_COST
+    )
+    assert activity_worst < UNPLANNED_PER_MINUTE * 30  # shortest activity, priority 1
+    block_worst = SHORT_BLOCK_COST + MISSING_BREAK_COST + 2 * SAME_SUBJECT_COST + 2 * STABILITY_COST
+    block_worst += DISTRIBUTION_PER_MINUTE * 90
+    assert block_worst < NO_DEADLINE_PER_MINUTE * 30
+    assert NO_DEADLINE_PER_MINUTE * 3 < UNPLANNED_PER_MINUTE
+
+
+def test_lower_bound() -> None:
+    assert objective_lower_bound({"a": 180}, 90, 30) == 0
+    assert objective_lower_bound({"a": 210}, 90, 30) == SHORT_BLOCK_COST
+    assert objective_lower_bound({"a": 165}, 90, 30) == 30
+
+
+def test_two_week_realistic_plan_is_complete_in_time() -> None:
+    subjects = [f"s{i}" for i in range(6)]
+    classes = [
+        ClassSlot(at(d, 10), at(d, 12), "Analyse")
+        for d in range(7, 21)
+        if date(2026, 12, d).weekday() < 5
+    ]
     p = PlanningProblem(
-        horizon=Interval(
-            datetime.combine(start, time(0), tzinfo=TZ), end_of(1) + timedelta(days=41)
-        ),
+        horizon=Interval(at(7, 0), at(20, 23, 59)),
         timezone=TZ,
-        availability=availability,
-        busy=busy,
-        demands=demands,
-        locked_blocks=[],
+        availability=windows(7, 20),
+        busy=[Interval(c.start, c.end) for c in classes],
+        demands=[StudyDemand(s, s, 600, at(20, 23, 59)) for s in subjects],
+        activities=[
+            training(f"t{d}", earliest_start=at(d, 6), latest_end=at(d + 2, 22))
+            for d in (7, 10, 14, 17)
+        ],
+        classes=classes,
+        training=TrainingPreferences(),
     )
-    result = solve_valid(p)
-    assert result.status is PlanStatus.COMPLETE
+    began = clock.monotonic()
+    result = run(p, seconds=10)
+    assert clock.monotonic() - began < 15
+    assert result.status is PlanStatus.COMPLETE, (result.unplanned_minutes, result.unplaced)

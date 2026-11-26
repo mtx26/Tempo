@@ -92,7 +92,12 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
         response(
             tool_use(
                 "create_task",
-                {"title": "Physique", "estimated_minutes": 900, "target_date": "2026-12-11"},
+                {
+                    "title": "Physique",
+                    "estimated_minutes": 900,
+                    "splittable": True,
+                    "target_date": "2026-12-11",
+                },
             ),
             tool_use(
                 "create_event",
@@ -169,7 +174,7 @@ def test_failed_operation_is_reported_to_the_model_and_rolled_back(
     assert ctx.changed == []
 
 
-def test_unavailable_llm_raises_for_fallback(session: Session) -> None:
+def test_unavailable_llm_raises_to_be_reported(session: Session) -> None:
     llm = ScriptedModels(outage())
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     with pytest.raises(LLMUnavailableError):
@@ -195,7 +200,7 @@ def sessions(engine: Engine) -> Iterator[sessionmaker[Session]]:
         conn.execute(text(f"TRUNCATE {tables} CASCADE"))
 
 
-def test_conversation_route_keeps_context_and_falls_back(
+def test_conversation_route_keeps_context_and_reports_outages(
     sessions: sessionmaker[Session], database_url: str
 ) -> None:
     with sessions() as s:
@@ -227,19 +232,19 @@ def test_conversation_route_keeps_context_and_falls_back(
         history = llm.requests[2]["contents"]
         assert history[0].role == "user" and history[0].parts[0].text == "quelles tâches ?"
         assert history[1].role == "model"
-        # LLM outage: the deterministic parser still answers, nothing is invented
+        # Gemini outage: reported as is, nothing changed, nothing invented
         third = api.post(
             "/v1/conversation",
             headers=AUTH,
             json={"text": "combien d'heures d'étude il me reste ?"},
         )
         assert third.status_code == 200
-        assert third.json()["used_llm"] is False and third.json()["fallback"] is True
-        assert "300" in third.json()["reply"] or "5" in third.json()["reply"]
+        assert third.json()["used_llm"] is False and third.json()["error"] == "llm_unavailable"
+        assert third.json()["changed"] is False
         assert api.post("/v1/conversation", json={"text": "x"}).status_code == 401
     with sessions() as s:
-        # 2 LLM exchanges + 1 fallback exchange: the fallback turns are kept as context too
-        assert len(list(s.scalars(select(ConversationTurnRow)))) == 6
+        # 2 LLM exchanges kept as context; the failed one is not a conversation turn
+        assert len(list(s.scalars(select(ConversationTurnRow)))) == 4
 
 
 def test_operations_api_catalogue_and_idempotency(
@@ -252,7 +257,7 @@ def test_operations_api_catalogue_and_idempotency(
         catalogue = api.get("/v1/operations", headers=AUTH).json()
         names = {op["name"] for op in catalogue}
         assert {"create_event", "log_work", "decide_proposal", "search_journey"} <= names
-        body = {"title": "Rapport", "kind": "personal", "estimated_minutes": 60}
+        body = {"title": "Rapport", "kind": "personal", "estimated_minutes": 60, "splittable": True}
         headers = {**AUTH, "Idempotency-Key": "abc-1"}
         one = api.post("/v1/operations/create_task", headers=headers, json=body)
         two = api.post("/v1/operations/create_task", headers=headers, json=body)
@@ -303,7 +308,11 @@ def test_llm_outage_after_a_change_never_replays_the_request(session: Session) -
     """The deterministic path must not run the same text again over applied changes."""
     seed(session)
     llm = ScriptedModels(
-        response(tool_use("create_task", {"title": "Chimie", "estimated_minutes": 60})),
+        response(
+            tool_use(
+                "create_task", {"title": "Chimie", "estimated_minutes": 60, "splittable": True}
+            )
+        ),
         outage(),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
@@ -316,7 +325,9 @@ def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
     seed(session)
     ticks = iter([0.0, 0.0, 58.0, 58.0])
     llm = ScriptedModels(
-        response(tool_use("create_task", {"title": "Bio", "estimated_minutes": 30})),
+        response(
+            tool_use("create_task", {"title": "Bio", "estimated_minutes": 30, "splittable": True})
+        ),
         response(say("jamais atteint")),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
@@ -328,7 +339,7 @@ def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
 
 
 def test_model_chosen_in_home_assistant_is_used_without_restart(session: Session) -> None:
-    from tempo.ai.llm import LLM_MODEL_SETTING
+    from tempo.const import LLM_MODEL_SETTING
     from tempo.db.store import set_setting
 
     llm = ScriptedModels(response(say("Bonjour.")), response(say("Re.")))

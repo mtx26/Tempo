@@ -13,10 +13,8 @@ from tempo.transport.location import (
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
 from tempo.transport.travel import (
-    StudyWindow,
     TravelStatus,
     plan_day_travel,
-    travel_aware_study_windows,
 )
 
 HOME = Place("home", "Kot", Coordinates(50.668, 4.612))
@@ -95,53 +93,13 @@ def test_return_routing_outage_blocks_time_after_last_event() -> None:
     assert block.start == at(22)
 
 
-# 3. long trips beyond the old 3 h look-around ------------------------------------------------
-
-
-def test_long_trip_far_after_window_still_shrinks_it() -> None:
-    long_trip = Journey((leg(at(12), at(16, 50)),), at(12), at(16, 50), 0, "x")
-    back = Journey((leg(at(18), at(22, 50)),), at(18), at(22, 50), 0, "x")
-    result = travel_aware_study_windows(
-        [StudyWindow(Interval(at(10), at(14)), HOME)],
-        [LocatedEvent(at(17, 5), at(18), FAR)],
-        Scripted([long_trip, back]),
-    )
-    assert [(w.start, w.end) for w in result.windows] == [(at(10), at(12))]
-
-
-# 4/5/9. origin priorities --------------------------------------------------------------------
-
-
-# 6. partial blocking instead of dropping a whole study window -------------------------------
-
-
-class OutboundOnly:
-    def __init__(self, journey: Journey) -> None:
-        self.journey = journey
-
-    def plan(
-        self, origin: Coordinates, destination: Coordinates, time: datetime, *, arrive_by: bool
-    ) -> list[Journey]:
-        return [self.journey] if arrive_by else []
-
-
-def test_missing_return_only_blocks_after_the_event() -> None:
-    there = Journey((leg(at(18), at(18, 50)),), at(18), at(18, 50), 0, "x")
-    result = travel_aware_study_windows(
-        [StudyWindow(Interval(at(15), at(23)), HOME)],
-        [LocatedEvent(at(19), at(23), CAMPUS)],
-        OutboundOnly(there),
-    )
-    assert [(w.start, w.end) for w in result.windows] == [(at(15), at(18))]
-    assert result.issues
-
-
 # 7. first event without origin is reported ------------------------------------------------
 
 
-def test_first_event_without_start_place_is_reported() -> None:
+def test_first_event_without_start_place_plans_no_outbound_trip() -> None:
+    """The caller (engine) asks where the user leaves from; nothing is invented here."""
     plan = plan_day_travel([LocatedEvent(at(8), at(10), CAMPUS)], Scripted([]))
-    assert any("origin" in issue for issue in plan.issues)
+    assert plan.blocks == []
 
 
 # 8. naive datetimes rejected ---------------------------------------------------------------

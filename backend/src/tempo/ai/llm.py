@@ -21,13 +21,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from tempo.config import LlmSettings
+from tempo.const import LLM_MODEL_SETTING
 from tempo.db.store import get_setting
 
 logger = logging.getLogger(__name__)
 
 MAX_INPUT_CHARS = 20_000
-LLM_MODEL_SETTING = "llm_model"
-"""Model chosen in Home Assistant (technical setting); unset = ``TEMPO_LLM_MODEL``."""
 NOT_TEXT_MODELS = (
     "tts",
     "image",

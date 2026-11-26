@@ -49,11 +49,7 @@ def seed(session: Session) -> StudyTaskRow:
     )
     set_setting(session, "horizon_days", 6)
     for weekday in range(7):
-        session.add(
-            AvailabilityRow(
-                weekday=weekday, start_minute=8 * 60, end_minute=20 * 60, place_id="home"
-            )
-        )
+        session.add(AvailabilityRow(weekday=weekday, start_minute=8 * 60, end_minute=20 * 60))
     source = get_or_create_source(session, "université")
     for d in (7, 8, 9):
         session.add(
@@ -79,7 +75,7 @@ def seed(session: Session) -> StudyTaskRow:
             duration_minutes=60,
             earliest_start_at=at(8, 0),
             latest_end_at=at(9, 23),
-            preferred_start_at=at(8, 18),
+            preferred_start_at=at(8, 14),
             place_id="club",
         )
     )
@@ -119,7 +115,7 @@ def test_replan_persists_an_active_version_with_blocks_travel_and_training(
     travel = version.summary["travel"]
     assert any(t["destination"] == "campus" and t["status"] == "routed" for t in travel)
     training = session.scalars(select(ActivityRow).where(ActivityRow.kind == "training")).one()
-    assert training.planned_start_at == at(8, 18)
+    assert training.planned_start_at == at(8, 14)
     race_trips = [
         t for t in travel if t["destination"] == "club" and t["end"].startswith("2026-12-12")
     ]
@@ -276,7 +272,8 @@ def test_far_hard_deadline_is_spread_not_declared_impossible(session: Session) -
     assert version.summary["hard_deadline_misses"] == []
     assert not any(n.kind == "deadline" for n in session.scalars(select(NotificationRow)))
     share = version.summary["spread"][str(far.id)]
-    assert share == 285  # 3600 min x 7 horizon days (7-13 Dec) / 91 days -> 276.9, up to 285
+    # C13: the share follows the study capacity (classes known in the horizon reduce it)
+    assert share == 270
     planned = sum(
         (b.end_at - b.start_at).total_seconds() // 60
         for b in session.scalars(

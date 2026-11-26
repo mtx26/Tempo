@@ -9,16 +9,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tempo.const import DOCKER_SECRETS_DIR
+
 MIN_TOKEN_LENGTH = 32
 MIN_DISTINCT_TOKEN_CHARS = 16
-DOCKER_SECRETS_DIR = Path("/run/secrets")
 
 
 class LlmSettings(BaseSettings):
     """Optional LLM, shared by the API (conversation) and the worker (coach e-mails): Gemini on
     Google Cloud Vertex AI, billed by the Google Cloud project. Needs the project id and a
     service-account key file (Docker secret ``tempo_gcp_credentials``) with the Vertex AI
-    User role. Without complete settings, no LLM is used: Tempo works fully without one."""
+    User role. Without complete settings the conversation reports that Gemini is unavailable;
+    planning, synchronisation and every background job work without it."""
 
     llm_model: str = Field(default="gemini-3.5-flash-lite", pattern=r"^[a-z0-9][a-z0-9.-]{2,60}$")
     """Gemini model available in the project. Default chosen on real measurements (2026-11):

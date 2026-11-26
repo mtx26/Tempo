@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.ai.llm import GeminiInterpreter, Interpreter, build_interpreter, selected_model
 from tempo.config import LlmSettings
+from tempo.const import DOCKER_SECRETS_DIR, TICK_SECONDS
 from tempo.sync.training_mail import ImapSource, MailSource
 from tempo.transport.motis import MotisClient
 from tempo.transport.routing import RoutingProvider, RoutingUnavailableError
@@ -37,8 +38,6 @@ from tempo.worker.jobs import (
 )
 
 logger = logging.getLogger("tempo.worker")
-SECRETS_DIR = Path("/run/secrets")
-TICK_SECONDS = 30
 HEARTBEAT = Path("/tmp/tempo-worker.alive")  # noqa: S108 - tmpfs of the read-only container
 """Touched after every round: the container health check fails when it gets old."""
 
@@ -48,7 +47,7 @@ class WorkerSettings(LlmSettings):
         env_prefix="TEMPO_",
         extra="ignore",
         hide_input_in_errors=True,
-        secrets_dir=SECRETS_DIR if SECRETS_DIR.is_dir() else None,
+        secrets_dir=DOCKER_SECRETS_DIR if DOCKER_SECRETS_DIR.is_dir() else None,
     )
 
     database_url: SecretStr

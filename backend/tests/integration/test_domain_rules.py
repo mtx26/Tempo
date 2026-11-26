@@ -56,7 +56,8 @@ def test_strict_task_session_ends_at_local_midnight_and_is_never_extended(
     assert version.summary["status"] == "partial"
 
 
-def test_soft_task_session_may_run_late_and_lateness_is_reported(session: Session) -> None:
+def test_soft_task_session_never_runs_past_its_deadline(session: Session) -> None:
+    """C30: soft or strict, no work after the deadline without the user's approval."""
     seed(session)
     task = ok(
         session,
@@ -69,7 +70,7 @@ def test_soft_task_session_may_run_late_and_lateness_is_reported(session: Sessio
         target_date="2026-12-07",
     )["task"]
     row = _session_of(session, task["id"])
-    assert row.latest_end_at > datetime(2026, 12, 8, tzinfo=TZ)
+    assert row.latest_end_at == datetime(2026, 12, 8, tzinfo=TZ)
 
 
 def test_place_in_use_is_never_deleted_silently(session: Session) -> None:
@@ -160,7 +161,7 @@ def test_block_report_with_impossible_minutes_is_refused(session: Session) -> No
 
 def test_mutations_are_audited_with_their_entity(session: Session) -> None:
     seed(session)
-    task = ok(session, "create_task", title="Chimie", estimated_minutes=60)["task"]
+    task = ok(session, "create_task", title="Chimie", estimated_minutes=60, splittable=True)["task"]
     entry = session.scalars(select(AuditEntry).where(AuditEntry.action == "op:create_task")).one()
     assert (entry.entity, entry.entity_id) == ("task", task["id"])
     assert session.get(StudyTaskRow, uuid.UUID(task["id"])) is not None

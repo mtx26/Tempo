@@ -104,8 +104,8 @@ def test_one_dated_statement_sets_the_weekly_alternation(session: Session) -> No
     assert schedule["periods"][0]["exceptions"][0]["place_id"] == "home"
     # The planner uses the same schedule.
     loaded = build_input(session, NOW, TZ)
-    assert loaded.data.alternation is not None
-    assert loaded.data.alternation.residence_at(NOW + timedelta(days=2)).id == "house_b"
+    residence = loaded.data.alternation.residence_at(NOW + timedelta(days=2))
+    assert residence is not None and residence.id == "house_b"
     assert replan(session, FakeRouting(), NOW, TZ, reason="test").state == "active"
     # Permanent change = a new statement; then removal.
     assert op(
@@ -263,7 +263,8 @@ def test_temporary_access_serves_planned_journeys_and_keeps_the_default(session:
     )["result"] == {"temporary_access": []}
 
 
-def test_blocking_question_keeps_the_valid_plan(session: Session) -> None:
+def test_question_blocks_only_the_affected_item(session: Session) -> None:
+    """C5: the rest is planned and published; only the unknown place waits (asked)."""
     from sqlalchemy import select
 
     from tempo.db.models import FixedEventRow, NotificationRow
@@ -290,9 +291,11 @@ def test_blocking_question_keeps_the_valid_plan(session: Session) -> None:
     )
     session.flush()
     second = replan(session, FakeRouting(), NOW, TZ, reason="test")
-    assert second.state == "rejected" and second.summary["kept_previous_plan"]
+    assert second.state == "active" and second.summary["status"] == "partial"
+    assert second.summary["questions"] and "kept_previous_plan" not in second.summary
     current = active_version(session)
-    assert current is not None and current.id == first.id  # the valid plan stays in force
+    assert current is not None and current.id == second.id
+    assert second.summary["unplanned_minutes"] == {}  # everything else is still planned
     questions = list(
         session.scalars(select(NotificationRow).where(NotificationRow.kind == "question"))
     )

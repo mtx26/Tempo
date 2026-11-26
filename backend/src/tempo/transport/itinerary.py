@@ -23,12 +23,11 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from tempo.const import SEARCH_SPAN
 from tempo.timeutil import utc
 from tempo.transport.places import Coordinates
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
 
-SEARCH_SPAN = timedelta(hours=2)
-"""Default window around a single bound (a conversation search)."""
 MIN_PAGES = 5
 MAX_PAGES = 20
 PAGE_SPAN = timedelta(minutes=30)

@@ -10,10 +10,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from tempo.ai.apply import apply_result, result_from_json
-from tempo.db.models import ActivityRow, ProposalRow, StudyBlockRow
-from tempo.db.store import audit, notify, proposal_revision, set_setting
+from tempo.db.models import ActivityRow, ProposalRow, ScheduleVersion, StudyBlockRow
+from tempo.db.store import active_version, audit, notify, proposal_revision, set_setting
 from tempo.domain.ops import DomainError
-from tempo.planning.service import release_block
+from tempo.planning.service import decline_today, release_block
 
 
 def proposal_out(row: ProposalRow) -> dict[str, Any]:
@@ -92,11 +92,39 @@ def _apply_coach_change(session: Session, row: ProposalRow) -> None:
     activity.locked = False
 
 
+def _apply_move_activity(session: Session, row: ProposalRow) -> None:
+    """Approved move: the activity takes the proposed slot (not locked: C15); without an
+    alternative, it leaves the day."""
+    activity = session.get(ActivityRow, uuid.UUID(row.details["activity_id"]))
+    if activity is None or activity.status != "active":
+        return
+    to = row.details.get("to_start")
+    activity.planned_start_at = None if to is None else datetime.fromisoformat(to)
+
+
+def _apply_move_block(session: Session, row: ProposalRow) -> None:
+    """Approved move: the session is placed at the proposed slot in the active plan."""
+    to, end = row.details.get("to_start"), row.details.get("to_end")
+    version: ScheduleVersion | None = active_version(session)
+    if to is None or end is None or version is None or not row.details.get("task_id"):
+        return
+    session.add(
+        StudyBlockRow(
+            task_id=uuid.UUID(row.details["task_id"]),
+            schedule_version_id=version.id,
+            start_at=datetime.fromisoformat(to),
+            end_at=datetime.fromisoformat(end),
+        )
+    )
+
+
 PROPOSAL_HANDLERS: dict[str, Callable[[Session, ProposalRow], None]] = {
     "unlock_block": _apply_unlock,
     "unlock_activity": _apply_unlock_activity,
     "training_import": _apply_training_import,
     "coach_plan_change": _apply_coach_change,
+    "move_activity": _apply_move_activity,
+    "move_block": _apply_move_block,
 }
 """What approving a proposal does, per kind."""
 
@@ -121,6 +149,18 @@ def decide(
         audit(session, actor, "proposal_obsolete", "proposal", str(row.id), kind=row.kind)
         return proposal_out(row)
     row.status, row.decided_at = ("approved" if approve else "rejected"), now
+    if not approve and row.kind in ("move_activity", "move_block"):
+        # Declined same-day move: the item is not re-placed today (from tomorrow onward).
+        ref = (
+            row.details["ref"] if row.kind == "move_activity" else f"task:{row.details['task_id']}"
+        )
+        tz = ZoneInfo(str(row.details.get("timezone", "Europe/Brussels")))
+        decline_today(session, ref, now, tz)
+        if row.kind == "move_activity":
+            activity = session.get(ActivityRow, uuid.UUID(row.details["activity_id"]))
+            if activity is not None:
+                activity.planned_start_at = None
+        set_setting(session, "replan_requested", now.isoformat())
     if approve:
         handler = PROPOSAL_HANDLERS.get(row.kind)
         if handler is not None:

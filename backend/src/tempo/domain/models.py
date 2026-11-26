@@ -10,14 +10,24 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from tempo.const import EXAM_WORDS
 from tempo.timeutil import utc
 
 
 class TargetKind(StrEnum):
     SOFT = "soft"
-    """Complete before the date if possible; never overrides feasibility."""
+    """Default. Work is never planned after it automatically; Tempo may propose postponing."""
     HARD = "hard"
-    """Explicit deadline stated by the user; violations must be reported, not hidden."""
+    """Explicitly strict: never relaxed silently; violations reported, never hidden."""
+
+
+def is_exam(title: str) -> bool:
+    """An examination, recognised from its title (``EXAM_WORDS``, accents and case ignored)."""
+    import unicodedata
+
+    plain = unicodedata.normalize("NFKD", title.casefold())
+    plain = "".join(c if c.isalnum() else " " for c in plain if not unicodedata.combining(c))
+    return bool(EXAM_WORDS & set(plain.split()))
 
 
 class EventStatus(StrEnum):

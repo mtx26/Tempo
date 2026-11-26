@@ -1,26 +1,30 @@
-"""Mandatory travel: journeys between located commitments and travel-aware study windows.
+"""Mandatory travel: the journeys of one outing (base -> commitments -> base).
 
 Conventions (ARCHITECTURE.md: travel is mandatory, never invented). Journeys are chosen by
 the single itinerary service (``itinerary.find_trips``):
 - Outbound trips must arrive ``buffer`` before the event and leave after the previous
   commitment; objective: latest departure (least waiting). The travel block spans from the
   chosen departure up to the event start (the margin is part of the block).
+- Between two events the trip is direct: never via a residence.
 - Return trips leave after the last event and must arrive before ``return_by`` (the next
-  commitment, or a bounded evening); objective: earliest arrival.
+  outing, or a bounded evening); objective: earliest arrival.
 - Alerts never exclude a journey (MOTIS attaches network-wide notices); cancelled trips are
   already removed by the provider. Alternatives are kept on each block.
 - Live delays and relevant severe notices of chosen journeys are reported as ``warnings``.
-- No feasible journey ⇒ IMPOSSIBLE (reported, gap blocked). Routing outage ⇒ UNKNOWN (reported,
-  gap blocked). No journey is ever fabricated.
+- No feasible journey ⇒ IMPOSSIBLE (reported, gap blocked). Routing outage ⇒ the itinerary of
+  the published plan for the same leg is kept when it still fits (STALE: not revalidated,
+  refreshed as soon as MOTIS answers again); otherwise UNKNOWN, the gap conservatively blocked
+  up to the longest acceptable journey (``max_journey``). No journey is ever fabricated.
 """
 
 import itertools
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from tempo.timeutil import Interval, utc
+from tempo.const import BUFFER, MAX_JOURNEY, MAX_TRAVEL
+from tempo.timeutil import utc
 from tempo.transport.itinerary import (
     Objective,
     TripQuery,
@@ -32,15 +36,21 @@ from tempo.transport.location import LocatedEvent
 from tempo.transport.places import Place
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
 
-DEFAULT_BUFFER = timedelta(minutes=10)
-MAX_TRAVEL = timedelta(hours=6)
-"""Events further than this from a study window are not routed for it."""
+type Previous = Callable[[Place, Place, datetime, bool], Journey | None]
+"""Itinerary of the published plan for a leg: (origin, destination, event start for an outbound
+leg or event end for a return, outbound?)."""
 
 
 class TravelStatus(StrEnum):
     ROUTED = "routed"
+    STALE = "stale"
+    """Routing unavailable: the itinerary of the published plan is kept, not revalidated."""
     IMPOSSIBLE = "impossible"
     UNKNOWN = "unknown"
+
+    @property
+    def feasible(self) -> bool:
+        return self in (TravelStatus.ROUTED, TravelStatus.STALE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +65,11 @@ class TravelBlock:
     """Other acceptable journeys, best first (kept for re-planning and the user)."""
     returning: bool = False
     """Way back to the base after the last commitment of an outing (no deadline to meet)."""
+    serves: tuple[str, ...] = ()
+    """Refs of the events it leaves from / leads to (e.g. ``activity:<id>``)."""
+    event_title: str = ""
+    event_start: datetime | None = None
+    """Official start of the commitment reached (outbound): what the user is shown."""
 
 
 @dataclass(slots=True)
@@ -66,15 +81,15 @@ class TravelPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class StudyWindow:
-    interval: Interval
-    place: Place
+class _Rules:
+    buffer: timedelta
+    max_journey: timedelta
+    previous: Previous | None
 
-
-@dataclass(slots=True)
-class StudyWindows:
-    windows: list[Interval] = field(default_factory=list)
-    issues: list[str] = field(default_factory=list)
+    def kept(
+        self, origin: Place, destination: Place, at: datetime, outbound: bool
+    ) -> Journey | None:
+        return None if self.previous is None else self.previous(origin, destination, at, outbound)
 
 
 def _trip(
@@ -116,53 +131,65 @@ def _outbound(
     plan: TravelPlan,
     origin: Place,
     target: LocatedEvent,
-    not_before: datetime | None,
-    buffer: timedelta,
+    previous: LocatedEvent | None,
+    rules: _Rules,
 ) -> None:
-    deadline = target.start - buffer
-    gap_start = not_before if not_before is not None else target.start - buffer
-    if not_before is not None and not_before >= deadline:
-        plan.issues.append(f"impossible connection {_label(origin, target.place, deadline)}")
+    destination = target.place
+    assert destination is not None  # noqa: S101 - unknown places are never routed
+    not_before = None if previous is None else previous.end
+    deadline = target.start - rules.buffer
+    serves = tuple(r for r in ((previous.ref if previous else ""), target.ref) if r)
+
+    def block(start: datetime, status: TravelStatus, journey: Journey | None = None) -> None:
         plan.blocks.append(
-            TravelBlock(gap_start, target.start, origin, target.place, TravelStatus.IMPOSSIBLE)
+            TravelBlock(
+                start,
+                target.start,
+                origin,
+                destination,
+                status,
+                journey,
+                () if found is None else tuple(found.alternatives),
+                serves=serves,
+                event_title=target.title,
+                event_start=target.official_start or target.start,
+            )
         )
+
+    found: TripResult | None = None
+    label = _label(origin, destination, deadline)
+    # Conservative start when nothing is known: never more than an acceptable journey.
+    worst = deadline - rules.max_journey
+    gap_start = worst if not_before is None else max(not_before, worst, key=utc)
+    if not_before is not None and utc(not_before) >= utc(deadline):
+        plan.issues.append(f"impossible connection {label}")
+        block(not_before, TravelStatus.IMPOSSIBLE)
         return
     try:
         found = _trip(
             routing,
             origin,
-            target.place,
+            destination,
             depart_after=not_before,
             arrive_before=deadline,
             objective=Objective.LATEST_DEPARTURE,
         )
     except RoutingUnavailableError as exc:
-        plan.issues.append(
-            f"routing unavailable for {_label(origin, target.place, deadline)}: {exc}"
-        )
-        plan.blocks.append(
-            TravelBlock(gap_start, target.start, origin, target.place, TravelStatus.UNKNOWN)
-        )
+        kept = rules.kept(origin, destination, target.start, True)
+        if kept is not None and (not_before is None or utc(kept.departure) >= utc(not_before)):
+            plan.issues.append(f"routing unavailable for {label}: previous kept ({exc})")
+            block(kept.departure, TravelStatus.STALE, kept)
+        else:
+            plan.issues.append(f"routing unavailable for {label}: {exc}")
+            block(gap_start, TravelStatus.UNKNOWN)
         return
     journey = found.best
     if journey is None:
-        plan.issues.append(f"impossible connection {_label(origin, target.place, deadline)}")
-        plan.blocks.append(
-            TravelBlock(gap_start, target.start, origin, target.place, TravelStatus.IMPOSSIBLE)
-        )
+        plan.issues.append(f"impossible connection {label}")
+        block(gap_start, TravelStatus.IMPOSSIBLE)
         return
-    plan.blocks.append(
-        TravelBlock(
-            journey.departure,
-            target.start,
-            origin,
-            target.place,
-            TravelStatus.ROUTED,
-            journey,
-            tuple(found.alternatives),
-        )
-    )
-    _journey_warnings(plan, journey, _label(origin, target.place, deadline))
+    block(journey.departure, TravelStatus.ROUTED, journey)
+    _journey_warnings(plan, journey, label)
 
 
 def _return_trip(
@@ -171,16 +198,20 @@ def _return_trip(
     last: LocatedEvent,
     end_place: Place,
     return_by: datetime,
+    rules: _Rules,
 ) -> None:
-    label = _label(last.place, end_place, last.end)
+    origin = last.place
+    assert origin is not None  # noqa: S101 - unknown places are never routed
+    label = _label(origin, end_place, last.end)
+    serves = (last.ref,) if last.ref else ()
     status = TravelStatus.IMPOSSIBLE
     journey: Journey | None = None
     alternatives: tuple[Journey, ...] = ()
-    if return_by > last.end:
+    if utc(return_by) > utc(last.end):
         try:
             found = _trip(
                 routing,
-                last.place,
+                origin,
                 end_place,
                 depart_after=last.end,
                 arrive_before=return_by,
@@ -188,147 +219,70 @@ def _return_trip(
             )
             journey, alternatives = found.best, tuple(found.alternatives)
         except RoutingUnavailableError as exc:
-            plan.issues.append(f"routing unavailable for return {label}: {exc}")
-            status = TravelStatus.UNKNOWN
+            kept = rules.kept(origin, end_place, last.end, False)
+            if kept is not None and utc(kept.arrival) <= utc(return_by):
+                plan.issues.append(f"routing unavailable for return {label}: previous kept")
+                journey, status = kept, TravelStatus.STALE
+            else:
+                plan.issues.append(f"routing unavailable for return {label}: {exc}")
+                status = TravelStatus.UNKNOWN
     if journey is not None:
+        routed = TravelStatus.ROUTED if status is TravelStatus.IMPOSSIBLE else status
         plan.blocks.append(
             TravelBlock(
                 last.end,
                 journey.arrival,
-                last.place,
+                origin,
                 end_place,
-                TravelStatus.ROUTED,
+                routed,
                 journey,
                 alternatives,
                 returning=True,
+                serves=serves,
             )
         )
-        _journey_warnings(plan, journey, label)
+        if routed is TravelStatus.ROUTED:
+            _journey_warnings(plan, journey, label)
         return
     if status is TravelStatus.IMPOSSIBLE:
         plan.issues.append(f"no return journey found {label}")
-    # Conservative block (not a journey, no invented duration): the return time is unknown,
-    # so the time up to the next known bound stays free of planned work.
-    plan.blocks.append(
-        TravelBlock(last.end, return_by, last.place, end_place, status, returning=True)
-    )
+    # Conservative block (no invented duration): bounded by the next known commitment and by
+    # the longest acceptable journey.
+    until = min(return_by, last.end + rules.max_journey, key=utc)
+    if utc(until) > utc(last.end):
+        plan.blocks.append(
+            TravelBlock(last.end, until, origin, end_place, status, returning=True, serves=serves)
+        )
 
 
 def plan_day_travel(
     events: Iterable[LocatedEvent],
     provider: RoutingProvider,
     *,
-    buffer: timedelta = DEFAULT_BUFFER,
+    buffer: timedelta = BUFFER,
     start_place: Place | None = None,
     end_place: Place | None = None,
     return_by: datetime | None = None,
+    max_journey: timedelta = MAX_JOURNEY,
+    previous: Previous | None = None,
 ) -> TravelPlan:
-    """Travel blocks connecting a day's located commitments (and optional start/end places).
-
-    ``start_place`` is the base at the outing start (``location.base_at``); when it is
-    missing the outbound trip to the first event cannot be planned and an issue is reported.
-    The way back to ``end_place`` must arrive before ``return_by`` (default: ``MAX_TRAVEL``
-    after the last event).
-    """
-    routing = provider
-    ordered = sorted(events, key=lambda e: utc(e.start))
+    """Journeys of ONE outing: from ``start_place`` to each located event in turn (directly,
+    never via a residence) and back to ``end_place``, arriving before ``return_by`` (default:
+    ``MAX_TRAVEL`` after the last event). ``start_place`` / ``end_place`` None: that leg is not
+    planned (an unknown origin is reported by the caller)."""
+    rules = _Rules(buffer, max_journey, previous)
+    ordered = sorted((e for e in events if e.place is not None), key=lambda e: utc(e.start))
     plan = TravelPlan()
     if not ordered:
         return plan
-    if start_place is None:
-        plan.issues.append(
-            f"origin unknown before {ordered[0].place.name} ({ordered[0].start.isoformat()}): "
-            "outbound travel not planned"
-        )
-    elif start_place != ordered[0].place:
-        _outbound(routing, plan, start_place, ordered[0], None, buffer)
-    for previous, current in itertools.pairwise(ordered):
-        if previous.place != current.place:
-            _outbound(routing, plan, previous.place, current, previous.end, buffer)
-    last = ordered[-1]
+    first = ordered[0]
+    if start_place is not None and start_place != first.place:
+        _outbound(provider, plan, start_place, first, None, rules)
+    for before, current in itertools.pairwise(ordered):
+        if before.place != current.place:
+            assert before.place is not None  # noqa: S101 - filtered above
+            _outbound(provider, plan, before.place, current, before, rules)
+    last = max(ordered, key=lambda e: utc(e.end))
     if end_place is not None and end_place != last.place:
-        _return_trip(routing, plan, last, end_place, return_by or last.end + MAX_TRAVEL)
+        _return_trip(provider, plan, last, end_place, return_by or last.end + MAX_TRAVEL, rules)
     return plan
-
-
-def subtract(window: Interval, busy: list[tuple[datetime, datetime]]) -> list[Interval]:
-    """Parts of ``window`` outside every busy span."""
-    pieces: list[Interval] = []
-    cursor = utc(window.start)
-    end = utc(window.end)
-    for b_start, b_end in sorted(busy):
-        if b_end <= cursor or b_start >= end:
-            continue
-        if b_start > cursor:
-            pieces.append(Interval(cursor, b_start))
-        cursor = max(cursor, b_end)
-    if cursor < end:
-        pieces.append(Interval(cursor, end))
-    return pieces
-
-
-def travel_aware_study_windows(
-    windows: Iterable[StudyWindow],
-    events: Iterable[LocatedEvent],
-    provider: RoutingProvider,
-    *,
-    buffer: timedelta = DEFAULT_BUFFER,
-    max_travel: timedelta = MAX_TRAVEL,
-) -> StudyWindows:
-    """Shrink study windows so that studying at the window's place leaves time to reach each
-    away commitment (arriving ``buffer`` early) and to come back afterwards.
-
-    Events within ``max_travel`` of a window are considered. When a journey cannot be found
-    (or routing is down), the window is conservatively blocked from its start up to the event
-    (outbound) or from the event to its end (return) and an issue is reported.
-    """
-    routing = provider
-    all_events = sorted(events, key=lambda e: utc(e.start))
-    result = StudyWindows()
-    for window in windows:
-        w_start, w_end = utc(window.interval.start), utc(window.interval.end)
-        busy: list[tuple[datetime, datetime]] = []
-        for event in all_events:
-            e_start, e_end = utc(event.start), utc(event.end)
-            if e_start >= w_end + max_travel or e_end <= w_start - max_travel:
-                continue
-            busy.append((e_start, e_end))
-            if event.place == window.place:
-                continue
-            where = _label(window.place, event.place, event.start)
-            try:
-                there = _trip(
-                    routing,
-                    window.place,
-                    event.place,
-                    depart_after=None,
-                    arrive_before=event.start - buffer,
-                    objective=Objective.LATEST_DEPARTURE,
-                ).best
-            except RoutingUnavailableError as exc:
-                result.issues.append(f"routing unavailable to {where}: {exc}")
-                there = None
-            try:
-                back = _trip(
-                    routing,
-                    event.place,
-                    window.place,
-                    depart_after=event.end,
-                    arrive_before=None,
-                    objective=Objective.EARLIEST_ARRIVAL,
-                ).best
-            except RoutingUnavailableError as exc:
-                result.issues.append(f"routing unavailable back from {where}: {exc}")
-                back = None
-            if there is None:
-                result.issues.append(f"no outbound journey to {where}; time before it withheld")
-                busy.append((min(w_start, e_start), e_start))
-            else:
-                busy.append((utc(there.departure), e_start))
-            if back is None:
-                result.issues.append(f"no return journey from {where}; time after it withheld")
-                busy.append((e_end, max(w_end, e_end)))
-            else:
-                busy.append((e_end, utc(back.arrival)))
-        result.windows.extend(subtract(window.interval, busy))
-    return result

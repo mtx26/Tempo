@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.orm import Session
 
+from tempo.const import CLASS_ATTENDANCE_SETTING
 from tempo.db.models import (
     ActivityRow,
     FixedEventRow,
@@ -16,7 +17,7 @@ from tempo.db.models import (
     StudyBlockRow,
     StudyTaskRow,
 )
-from tempo.db.store import CLASS_ATTENDANCE_SETTING, active_version, get_setting, place_directory
+from tempo.db.store import active_version, get_setting, place_directory
 from tempo.domain.models import EventStatus
 from tempo.domain.ops import remaining_minutes
 from tempo.timeutil import utc
@@ -61,7 +62,7 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
     for block in session.scalars(
         select(StudyBlockRow).where(
             block_filter,
-            StudyBlockRow.state != "done",
+            StudyBlockRow.state.in_(("planned", "missed", "partial")),
             StudyBlockRow.end_at > start,
             StudyBlockRow.start_at < end,
         )
@@ -81,6 +82,15 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
             }
         )
     places = {p.id: p.name for p in session.scalars(select(PlaceRow))}
+    waiting = {
+        p.details.get("ref")
+        for p in session.scalars(
+            select(ProposalRow).where(
+                ProposalRow.status == "pending",
+                ProposalRow.kind.in_(("move_activity", "move_block")),
+            )
+        )
+    }
     # Fixed and flexible activities both lie inside their window: filter on it in SQL.
     for act in session.scalars(
         select(ActivityRow).where(
@@ -112,6 +122,7 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                 "busy": act.busy,
                 "series_id": None if act.series_id is None else str(act.series_id),
                 "task_id": None if act.task_id is None else str(act.task_id),
+                "pending_move": f"activity:{act.id}" in waiting,
             }
         )
     if version is not None:
@@ -135,6 +146,8 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                     "legs": trip.get("legs", []),
                     "origin": trip["origin"],
                     "destination": trip["destination"],
+                    "event_title": trip.get("event_title"),
+                    "event_start": trip.get("event_start"),
                     "fixed": False,
                 }
             )
@@ -205,6 +218,9 @@ def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
         "issues": plan.get("issues", []),
         "warnings": plan.get("warnings", []),
         "unplanned_minutes": sum(plan.get("unplanned_minutes", {}).values()),
+        "questions": plan.get("questions", []),
+        "pending_approval": plan.get("pending_approval", []),
+        "unconfirmed_journeys": plan.get("unconfirmed_journeys", 0),
         "missed_blocks": plan.get("missed_blocks", 0),
         "next_event": next_event,
         "next_departure": next_departure,

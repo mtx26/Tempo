@@ -64,9 +64,7 @@ def test_week_planned_with_real_public_transport(session: Session) -> None:
     )
     set_setting(session, "horizon_days", 2)
     for weekday in range(7):
-        session.add(
-            AvailabilityRow(weekday=weekday, start_minute=480, end_minute=1200, place_id="home")
-        )
+        session.add(AvailabilityRow(weekday=weekday, start_minute=480, end_minute=1200))
     source = get_or_create_source(session, "université")
     start = datetime.combine(day, time(10), tzinfo=TZ)
     session.add(
@@ -95,7 +93,9 @@ def test_week_planned_with_real_public_transport(session: Session) -> None:
     assert outbound and outbound[0]["status"] == "routed", summary["issues"]
     assert back and back[0]["status"] == "routed"
     trip = outbound[0]
-    assert datetime.fromisoformat(trip["arrival"]) <= start - timedelta(minutes=10)
+    # A class: 10 min tolerance + 10 min margin -> arrival at the official start at the latest.
+    assert datetime.fromisoformat(trip["arrival"]) <= start
+    assert datetime.fromisoformat(trip["event_start"]) == start  # official start shown (C18)
     assert trip["legs"] and any(leg["mode"] != "WALK" for leg in trip["legs"])
     blocks = list(
         session.scalars(

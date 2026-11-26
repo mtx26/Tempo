@@ -80,33 +80,34 @@ M -- T
 
 ## 2. Règles métier non négociables
 
-- Les cours universitaires (iCal) sont fixes ; iCal reste l'autorité sur ses événements.
-- L'étude personnelle est déplaçable, y compris les séances acceptées, sauf verrouillage
-  explicite. Les dates cibles sont **souples** par défaut, strictes seulement si l'utilisateur
-  le dit.
-- Les entraînements sont flexibles (jour et heure), leur contenu prescrit est conservé mot pour
-  mot ; sans lieu précisé, ils ont lieu à la résidence en vigueur et seulement quand
-  l'utilisateur y est (trajets obligatoires faisables) ; les compétitions sont fixes.
-- La position réelle vient uniquement du `device_tracker` du téléphone configuré dans Home
-  Assistant ; fraîche et précise, elle prime sur la résidence prévue pour un trajet immédiat,
-  sans modifier l'alternance des résidences ; une intention future ne la remplace jamais.
-- **Clarification** : une information manquante, ambiguë ou contradictoire avec une information
-  confirmée fait l'objet d'une question dans Home Assistant (conversation ou notification) ;
-  rien n'est supposé et le planning valide existant reste en place tant que la question
-  bloque. Avec assez d'informations, Tempo agit sans question inutile. Les informations déjà
-  confirmées sont réutilisées. Consigne **ponctuelle** (lieu prévu, point d'accès pour un seul
-  trajet) et réglage **permanent** (alternance, point d'accès par défaut d'un lieu,
-  préférences) sont distingués ; une portée incertaine se demande.
-- Les trajets nécessaires sont obligatoires (marche, correspondances, marges, retours).
-- Préférences d'étude (blocs de 90 min, alternance des matières, disponibilités) : souples,
-  jamais plus fortes que la faisabilité.
-- Les changements ordinaires d'activités flexibles sont automatiques ; une demande explicite
-  autorise son périmètre ; les effets supplémentaires sur des engagements protégés (verrouillés,
-  compétitions, engagements fixes) exigent un accord naturel.
-- Jamais d'horaire, de durée, de lieu, de coordonnées, de trajet temps réel ou de résultat
-  inventé. Un plan impossible ou partiel est annoncé comme tel.
-- L'IA interprète ; le code déterministe vérifie les règles, OR-Tools planifie, MOTIS calcule
-  les trajets. Le backend fonctionne sans LLM.
+- Les cours et examens universitaires (iCal) sont fixes ; iCal reste l'autorité sur ses
+  événements et ses changements (ajout, annulation, horaire) sont appliqués immédiatement, même
+  le jour même, sans accord.
+- L'étude personnelle, les entraînements, les sorties et les séances de tâches sont flexibles ;
+  les compétitions et les rendez-vous fixes ne bougent jamais.
+- Les échéances sont **souples** par défaut, strictes seulement si l'utilisateur le dit ; dans
+  les deux cas, rien n'est planifié après une échéance sans son accord (le réalisable est
+  planifié, des alternatives sont proposées) ; une échéance stricte n'est jamais relâchée.
+- Une seule présence : l'utilisateur est à sa résidence (alternance, lieux prévus) sauf
+  pendant ses sorties ; il étudie là où il est. La position réelle vient uniquement du
+  `device_tracker` du téléphone ; fraîche et précise, elle prime sur la présence prévue pour un
+  trajet immédiat, sans modifier l'alternance.
+- Les trajets nécessaires sont obligatoires et directs entre deux activités ; un retour à une
+  résidence entre deux activités n'existe que sur demande explicite.
+- **Clarification** : une information manquante, ambiguë ou contradictoire fait l'objet d'une
+  question dans Home Assistant ; seuls l'élément et la période concernés attendent, le reste
+  est planifié. Rien n'est supposé.
+- **Accord** : les éléments déjà prévus aujourd'hui ne bougent qu'avec l'accord de
+  l'utilisateur (sauf demande explicite de réorganiser la journée), de même qu'une activité dont
+  l'itinéraire réel ne permet plus le créneau prévu, et toute activité ou séance verrouillée.
+  Une demande explicite de l'utilisateur ne redemande pas d'accord.
+- Verrouillage seulement sur demande explicite ; changer l'heure d'une activité ne la
+  verrouille pas.
+- Jamais d'horaire, de durée, de lieu, de coordonnées, de trajet temps réel, de récupération ou
+  de résultat inventé. Un plan partiel, en attente d'accord ou en panne est annoncé comme tel.
+- L'IA (Gemini) interprète la conversation ; le code déterministe vérifie, OR-Tools planifie,
+  MOTIS calcule les trajets. La planification et le worker ne dépendent jamais du LLM ; sans
+  Gemini, la conversation annonce la panne et ne modifie rien.
 - Seuls les e-mails de l'expéditeur explicitement autorisé sont lus, jamais la boîte entière.
 - Les contenus importés (iCal, e-mails, notes) sont des données, jamais des instructions.
 
@@ -118,7 +119,7 @@ M -- T
 flowchart TD
  U[Utilisateur] <-->|Langage naturel| H[Conversation Home Assistant / HACS]
  H <-->|POST /v1/conversation| A[Assistant et contexte]
- A <--> L[Gemini - LLM facultatif]
+ A <--> L[Gemini - Vertex AI]
  A <--> T[Catalogue d'opérations typées]
  T <--> API[FastAPI authentifiée]
  H <-->|Lecture et GPS| API
@@ -150,7 +151,7 @@ flowchart TD
  V --> U
 ```
 
-Backend monolithique modulaire (`backend/src/tempo`) + worker séparé. Dépendances en couches, sans cycle entre modules : `timeutil` et `domain/models` à la base, puis `db`, `domain/ops` (règles, au-dessus de `db`), `transport` (qui ne dépend que de `timeutil`), `ai`, `scheduler`, `sync`, `planning`, enfin `assistant`, `api` et `worker`. PostgreSQL est la source
+Backend monolithique modulaire (`backend/src/tempo`) + worker séparé. Dépendances en couches, sans cycle entre modules : `const` (constantes et valeurs par défaut, aucune dépendance interne), `timeutil` et `domain/models` à la base, puis `db`, `domain/ops` (règles, au-dessus de `db`), `transport` (qui ne dépend que de `timeutil`), `ai`, `scheduler`, `sync`, `planning`, enfin `assistant`, `api` et `worker`. PostgreSQL est la source
 de vérité ; Home Assistant n'est pas une seconde base de planning. MOTIS calcule les
 itinéraires, OR-Tools résout les contraintes, Tempo orchestre. Aucune passerelle IA
 supplémentaire.
@@ -158,15 +159,16 @@ supplémentaire.
 | Module | Responsabilité |
 |---|---|
 | `assistant/catalog.py` | Catalogue des opérations (schéma Pydantic strict, résultat typé, `mutates`) : **unique surface métier**, lectures comprises, pour l'IA, Home Assistant et tout client (`/v1/operations`). |
-| `assistant/agent.py` | Boucle d'appels d'outils (`ToolLoopAssistant`) sur Gemini via Google Cloud Vertex AI (`GeminiChat`, SDK `google-genai`, compte de service, modèle `TEMPO_LLM_MODEL`, `gemini-3.5-flash-lite` par défaut, appel automatique de fonctions désactivé : chaque appel passe par `run_operation`) ; client partagé avec l'interprète des e-mails (`ai/llm.py`, sortie JSON contrainte par schéma) ; un blocage de sécurité suit le chemin déterministe ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
-| `assistant/fallback.py` | Conversation sans LLM : phrases reconnues (`assistant/actions.py`, `assistant/questions.py`, `ai/text_parser.py`) exécutées via `run_operation`, comme l'agent. `ai/` ne fait qu'interpréter (analyseur déterministe, LLM facultatif, application validée des imports). |
+| `assistant/agent.py` | Boucle d'appels d'outils (`ToolLoopAssistant`) sur Gemini via Google Cloud Vertex AI (`GeminiChat`, SDK `google-genai`, compte de service, modèle `TEMPO_LLM_MODEL`, `gemini-3.5-flash-lite` par défaut, appel automatique de fonctions désactivé : chaque appel passe par `run_operation`) ; client partagé avec l'interprète des e-mails (`ai/llm.py`, sortie JSON contrainte par schéma) ; une panne ou un blocage de Gemini est annoncé tel quel (rien n'est modifié) ; bornée à 16 étapes et à un budget de 60 s (aucun nouvel appel au-delà, réponse avec ce qui a réellement été fait). |
+| `ai/` | Interprétation des e-mails du coach seulement (analyseur déterministe `text_parser.py`, LLM `llm.py` dont le résultat devient une proposition, application validée `apply.py`). |
 | `api/` | FastAPI : `/health` (public), `/v1/status`, `/v1/conversation`, `/v1/operations` (liste et exécution), `/v1/location` (GPS réel poussé par HA : télémétrie, jamais une opération accessible au LLM), `/v1/llm` (`api/llm.py`, réglage technique : modèles Gemini du projet listés au plus une fois par heure, modèle choisi testé par une mini-requête avant d'être enregistré en base, lu à chaque conversation et à chaque tour du worker, `TEMPO_LLM_MODEL` restant la valeur par défaut ; jamais exposé au LLM), et `/calendar/<jeton>.ics` (`api/calendar_feed.py`) : flux iCalendar **en lecture seule** du plan publié (éléments du calendrier HA sauf les cours, déjà présents via l'agenda de l'université ; de J−14 à J+60 ; un trajet a pour titre ses seules lignes, p. ex. « E110 → 18 », et une ligne courte par tronçon en heure locale : « E110 06:58 arrêt → 07:51 arrêt », « À pied 10 min », « Dépôt 10 min ») pour l'abonnement d'un agenda de téléphone ; `/v1/status` donne `calendar_path` à Home Assistant, qui affiche l'URL d'abonnement dans ses options (jamais comme entité) ; jeton dédié `calendar_token` distinct du jeton d'API, comparé en temps constant, mauvais jeton = 404 et tentative comptée par le limiteur ; absent si non configuré. Aucune modification possible par ce flux. |
-| `domain/ops.py` | Règles partagées : journal de travail, séances de tâches, séries RRULE et exceptions. |
+| `const.py` | **Toutes** les constantes de politique et valeurs par défaut configurables (`SETTING_DEFAULTS`), par domaine : planification et coefficients, étude, transport et présence, synchronisation, worker, assistant. Les constantes purement locales (limites d'un format de fichier, chemins d'API, expressions régulières, consignes) restent dans leur module. |
+| `domain/ops.py` | Règles partagées : journal de travail, clôture d'une tâche, séances de tâches, séries RRULE et exceptions. |
 | `db/` | Modèles et migrations ; `store.py` : services de persistance partagés par tous les paquets (réglages, audit, notifications par une seule fonction, propositions avec leur révision, version active, annuaire des lieux). |
 | `timeutil.py` | Primitives de temps uniques : conversion UTC (refus des dates sans fuseau), bornes de jour locales sûres aux changements d'heure, `Interval`. |
 | `planning/` | Chargement des entrées, moteur (`engine.py`, dont la détection unique des conflits `find_conflicts`), publication versionnée (`service.py`), décisions sur propositions (`proposals.py`), vues. |
-| `scheduler/` | CP-SAT : étude (`solver.py`), activités flexibles (`activities.py`), validateur indépendant (`validate.py`). |
-| `transport/` | `itinerary.py` : **service d'itinéraire unique** (bornes, objectif, critères, pagination MOTIS, alternatives, cache par exécution) utilisé par la recherche, les trajets du planning, l'estimation des activités flexibles et le contrôle de départ ; `location.py` : position réelle et base à un instant ; client MOTIS, trajets obligatoires (`travel.py`), contrôle de départ, relais GTFS-RT, flux belges, mise à jour des données de routage. |
+| `scheduler/` | **Un seul** modèle CP-SAT pour l'étude et toutes les activités flexibles (`solver.py`, types `model.py`), validateur indépendant (`validate.py`) appliqué au plan final. |
+| `transport/` | `itinerary.py` : **service d'itinéraire unique** (bornes, objectif, critères, pagination MOTIS, alternatives, cache par exécution) utilisé par la recherche, les trajets du planning, l'estimation des activités flexibles et le contrôle de départ ; `location.py` : modèle de présence unique (position réelle, alternance des résidences avec changement après le dernier cours, lieux prévus, base à un instant) ; client MOTIS, trajets obligatoires (`travel.py`), contrôle de départ, relais GTFS-RT, flux belges, mise à jour des données de routage. |
 | `sync/` | iCal (`ics.py`, enregistrement `ics_repository.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
 | `worker/` | Boucle de jobs durables (`job_run`) : iCal, séries, replanification, rappels, contrôle de départ, e-mails, rétention. |
 | `../tempo-homeassistant` | Intégration HACS `custom_components/tempo` (dépôt séparé). |
@@ -216,11 +218,11 @@ Contrat (implémenté) :
 - Contexte LLM : prompt système stable, 12 derniers tours de la conversation (6 h), date et
   fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
   shell, Docker ou secret.
-- Sans LLM (non configuré, panne, blocage) : `/v1/conversation` répond via le repli déterministe
-  (`assistant/fallback.py`) qui exécute les mêmes opérations du catalogue et l'indique
-  (`used_llm: false`, `fallback: true`) ; ses tours restent dans l'historique de la conversation.
-  Si le LLM tombe après avoir modifié quelque chose, la demande n'est jamais rejouée par le
-  repli : la réponse liste les opérations réellement effectuées.
+- Sans Gemini (non configuré, panne, blocage) : `/v1/conversation` répond que la demande n'a
+  pas pu être traitée et que rien n'a été modifié (`used_llm: false`, `error:
+  llm_unavailable`) ; il n'existe pas de second chemin conversationnel. Si Gemini tombe après
+  avoir modifié quelque chose, la demande n'est jamais rejouée : la réponse liste les opérations
+  réellement effectuées. La planification et le worker ne dépendent pas de Gemini.
 - Durée : l'assistant ne lance plus d'appel au modèle après 60 s (chaque appel borné par le
   temps restant) ; Home Assistant attend jusqu'à 150 s, de sorte que l'utilisateur entend le
   résultat réel plutôt qu'une expiration côté client pendant qu'un changement s'applique.
@@ -230,7 +232,7 @@ Contrat (implémenté) :
 | Lecture | `get_context`, `get_schedule`, `get_summary`, `list_activities`, `list_tasks`, `list_places`, `get_position`, `get_location`, `get_rules`, `list_proposals`, `list_notifications`, `list_reminders`, `explain_plan`, `get_sources_status`, `get_history` |
 | Événements | `create_event` (fixe/flexible, journée entière occupée/informative, plusieurs jours, RRULE, distanciel), `update_event` (portée occurrence / suivantes / série), `cancel_event`, `set_lock`, `report_activity`, `confirm_activity` |
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
-| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `clear_residence_alternation`, `get_residence_schedule`, `find_address`, `set_temporary_access`, `clear_temporary_access` |
+| Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `set_residence_switch`, `clear_residence_alternation`, `get_residence_schedule`, `find_address`, `set_temporary_access`, `clear_temporary_access` |
 | Rappels et validation | `create_reminder`, `cancel_reminder`, `decide_proposal`, `acknowledge_notification` |
 | Planning et transport | `plan_now` (local / global, simulation `dry_run`), `propose_alternatives`, `search_journey` |
 
@@ -307,6 +309,7 @@ classDiagram
   start
   end
   available
+  kind
  }
  class ScheduleVersion {
   state
@@ -340,14 +343,13 @@ classDiagram
  RecurrenceSeries "1" --> "0..*" Activity : occurrences
  RecurrenceSeries "1" *-- "0..*" RecurrenceException
  PlannedLocation --> Place
- Availability --> Place
- ScheduleVersion "1" *-- "0..*" StudyBlock
+  ScheduleVersion "1" *-- "0..*" StudyBlock
  ScheduleVersion ..> Availability
  ScheduleVersion ..> AvailabilityException
  Reminder ..> Activity
 ```
 
-Correspondance avec PostgreSQL (`db/models.py`, migrations Alembic `0001`–`0006`) :
+Correspondance avec PostgreSQL (`db/models.py`, migrations Alembic `0001`–`0008`) :
 `activity` (catégories `personal`, `training`, `race`, `task` ; `scheduling` fixe/flexible ;
 une compétition est toujours fixe par contrainte de base), `study_task` (tâches d'étude et
 personnelles), `work_log`, `recurrence_series`, `recurrence_exception`, `study_block`,
@@ -364,11 +366,14 @@ Règles du modèle :
   Une activité `remote` n'a pas de trajet.
 - Une tâche n'est pas une séance : le reste dû = estimation − somme du `work_log`
   (`completed_minutes` n'est qu'un cache recalculé). Durée inconnue : tâche conservée, non
-  planifiée. Sans échéance : planifiée comme cible lointaine souple. Une tâche située ou non
-  fractionnable devient une seule activité flexible (`kind = task`) dont la fenêtre finit à la
-  fin locale du jour d'échéance : une échéance stricte n'est jamais repoussée (reliquat et
-  échéance manquée signalés), une cible souple laisse de la place après elle (retard pénalisé
-  et signalé) ; la fenêtre est recalculée avant chaque replanification.
+  planifiée. Sans échéance : aucune échéance artificielle, elle utilise le temps restant.
+  Fractionnable ou non selon sa nature et la demande (demandé au-delà de 90 min), jamais selon
+  son lieu : non fractionnable ⇒ une activité flexible (`kind = task`) ; fractionnable avec un
+  lieu ⇒ plusieurs séances situées de 90 min (au moins 30), chacune avec ses trajets ; sinon
+  des blocs d'étude. La fenêtre finit à la fin locale du jour d'échéance (souple ou stricte) et
+  est recalculée avant chaque replanification. Tâche déclarée terminée (`update_task
+  completed`, ou volume atteint) : toutes ses séances restantes, verrouillées comprises, sont
+  annulées (`cancelled`), jamais signalées manquées ; l'historique est conservé.
 - Rien n'est supprimé en silence : un lieu encore utilisé (résidence de l'alternance, activités, tâches,
   disponibilités, lieux prévus) ne peut pas être supprimé ; ses alias sont conservés quand une
   mise à jour ne les mentionne pas ; verrouiller ou déverrouiller une séance la garde en place.
@@ -398,7 +403,8 @@ stateDiagram-v2
 ```
 
 Statuts stockés : `active` (non placée si `planned_start_at` est nul), `to_confirm` (durée du
-coach inconnue), `done`, `partial`, `missed`, `cancelled`. Un travail réalisé n'est jamais
+coach inconnue), `done`, `partial`, `missed`, `cancelled` ; une séance d'étude peut aussi être
+`cancelled` (tâche terminée). Un travail réalisé n'est jamais
 déduit du passage de l'heure : une séance d'étude passée non déclarée devient `missed`, son
 temps est replanifié, et l'utilisateur peut encore la déclarer faite.
 
@@ -442,16 +448,20 @@ flowchart TD
   typographiques acceptées). Durée totale : celle du thème, sinon la première ligne du contenu
   si elle n'est qu'une durée (`1h15'`) ; `RAC : 10'`, `r 30''`, `3x80m` restent des parties. Jour suggéré (plan ou texte de l'e-mail) = préférence
   souple dans la semaine ; contenu conservé ; durée absente ⇒
-  `to_confirm` (jamais devinée) ; ordre et récupération de la semaine conservés (au plus 2 jours
-  imposés) ; plan renvoyé ⇒ remplacement sans doublon, séances faites/verrouillées/modifiées par
+  `to_confirm` (jamais devinée) ; ordre de la semaine conservé, récupération seulement si elle est
+  explicite (`rest_days`, jamais déduite des jours suggérés) ; plan renvoyé ⇒ remplacement sans doublon, séances faites/verrouillées/modifiées par
   l'utilisateur jamais écrasées (proposition `coach_plan_change`) ; compétitions fixes avec
   approbation.
-- **Études** : volume par tâche, cible souple par défaut ; une cible au-delà de l'horizon ne
-  planifie que sa part proportionnelle ; journal de travail idempotent, corrections négatives.
+- **Études** : volume par tâche, échéance souple par défaut ; une échéance au-delà de
+  l'horizon ne planifie que sa part proportionnelle à la capacité d'étude ; journal de travail
+  idempotent, corrections négatives. Examens reconnus au titre iCal (« examen », « partiel »,
+  « interrogation »… : `const.EXAM_WORDS`) : pas de tolérance de présence.
 - **Personnel** : rendez-vous fixes, sorties/activités flexibles dans une fenêtre ; durée
   inconnue ⇒ question, jamais de durée arbitraire.
-- **Disponibilités** : fenêtres hebdomadaires par lieu + exceptions datées (temps bloqué ou
-  temps libre supplémentaire à un lieu). Elles s'appliquent au travail flexible ; les
+- **Disponibilités** (un seul mécanisme, `planning.service.load_rules`) : fenêtres
+  hebdomadaires d'étude (horaires seulement : l'utilisateur étudie là où il est), fenêtres de
+  catégorie des activités, exceptions datées (un jour ou une plage) générales (toutes les
+  activités flexibles) ou d'une catégorie, temps bloqué ou temps supplémentaire. Les
   engagements fixes restent prioritaires.
 
 ## 7. Localisation et transport
@@ -478,62 +488,63 @@ flowchart TD
  GEO --> REQ
 ```
 
-Résolution centralisée (`transport/location.py`) : position réelle seulement si fraîche et
-précise (`assess_position`, utilisée aussi par `get_position`) ; chaque sortie part de la base
-en vigueur à son début et revient à celle en vigueur à sa fin (`base_at` : lieu prévu couvrant
-l'instant, sinon résidence de l'alternance), la base pouvant donc changer dans la journée (« je pars de chez
-papa et je rentre chez maman après les cours ») ; deux lieux prévus qui se chevauchent ⇒
-origine inconnue signalée, jamais devinée ; entre deux engagements, l'origine est
-le lieu de l'engagement précédent : le trajet est direct, sauf si le retour à la base laisse
-au moins 1 h sur place une fois les deux trajets réels comptés. `get_location` donne à
-l'assistant où l'utilisateur est ou sera à un instant (GPS réel maintenant, sinon trajet ou
-activité située prévus, sinon lieu prévu, sinon résidence de l'alternance),
-avec la source utilisée.
+**Un seul modèle de présence** (`transport/location.py`, `planning/engine.route_outings`),
+partagé par l'étude, le sport, les trajets, les résidences et les séjours :
+- position réelle seulement si fraîche et précise (`assess_position`, aussi pour
+  `get_position`), pour les trajets immédiats ; elle ne modifie jamais la présence prévue ;
+- présence prévue : la base à un instant (`base_at` : lieu prévu couvrant l'instant, sinon
+  résidence de l'alternance) ; chaque journée est **une sortie** : départ de la base au premier
+  engagement situé, trajets **directs** d'un engagement au suivant, retour à la base en fin de
+  journée (la base pouvant changer dans la journée : « je pars de chez papa et je rentre chez
+  maman après les cours »). Aucun retour automatique entre deux activités ; un retour
+  intermédiaire n'existe que si l'utilisateur le demande (lieu prévu sur ce créneau) ;
+- l'utilisateur est **absent de la résidence** de son premier départ à son dernier retour, pendant
+  un séjour hors des résidences et pendant les périodes incertaines : un entraînement sans lieu
+  (« à la résidence ») n'y est jamais placé (donc jamais entre deux cours) ; l'étude, elle, se
+  fait là où il est (résidence, université, séjour) ;
+- deux lieux prévus qui se chevauchent, un lieu iCal inconnu ou un jour de changement de
+  résidence sans heure connue ⇒ question ; seule la période concernée est incertaine.
+`get_location` donne à l'assistant où l'utilisateur est ou sera à un instant (GPS réel
+maintenant, sinon trajet ou activité située prévus, sinon lieu prévu, sinon résidence de
+l'alternance), avec la source utilisée.
 
 Résidences multiples (générique, rien de personnel dans le code) :
 - **Alternance** (`Alternation`, réglage `residence_alternation`) : résidences dans l'ordre de
-  rotation, changement tous les `period_days` jours à la même heure locale `switch_at`
-  (heure d'été comprise) ; une seule déclaration datée l'initialise (« ce vendredi soir je vais
-  chez papa » ⇒ `set_residence_alternation`), la redéclarer est un changement définitif,
+  rotation, changement tous les `period_days` jours ; le jour du changement, l'utilisateur part
+  de la résidence en cours, va à l'université et rejoint la suivante **après la fin officielle
+  du dernier cours** (`db.store.residence_alternation` résout ce moment depuis l'emploi du temps,
+  présence partielle comprise). Sans cours ce jour-là, Tempo demande l'heure
+  (`set_residence_switch`, réglage `residence_switches` par date) ; jamais d'heure fixe
+  arbitraire (`switch_at` seulement si l'utilisateur donne une heure pour tous les
+  changements). Une seule déclaration datée initialise l'alternance
+  (`set_residence_alternation`), la redéclarer est un changement définitif,
   `get_residence_schedule` la montre avec ses exceptions. Les **lieux prévus**
   (`set_planned_location`) sont des exceptions temporaires : ils priment sans décaler la
   récurrence ; une nouvelle exception (ou `clear_planned_location`) ne retire que la période
-  qu'elle recouvre, les parties non concernées des exceptions existantes sont conservées. Chaque déclaration replanifie (plan local, stabilité préservée).
+  qu'elle recouvre. Une seule résidence = alternance d'un lieu (jamais de question).
 - **Point d'accès aux transports** par lieu, un seul par défaut et persistant
   (`access_place_id` + `access_minutes`, les deux ou aucun, contrainte en base ; durée donnée
   par l'utilisateur, jamais devinée). Un point d'accès différent pour **un seul** trajet se
   donne en conversation (`search_journey` : `access_place_id`, `access_minutes`,
   `access_side`) et n'est jamais enregistré ; pour une **période** (« cette semaine on me
   dépose à la gare »), `set_temporary_access` / `clear_temporary_access` (réglage JSON
-  `access_overrides`, pas de table) s'appliquent aussi aux trajets planifiés et aux départs de
-  cette période, prioritaires sur l'accès par défaut qui reste inchangé. Un seul
-  adaptateur de routage (`transport/access.py`, `db.store.access_routing`) interroge MOTIS
-  depuis/vers le point d'accès et ajoute une étape `ACCESS` de durée fixe ; il sert à la
-  planification, aux trajets du jour, au contrôle de départ (GPS à moins de 300 m du lieu
-  compris) et aux recherches en conversation.
-- **Entraînements à la résidence** : les plages « à la résidence » (hors sorties vers les
-  engagements fixes, retours compris) servent au placement ET au validateur indépendant, qui
-  contrôle aussi tout le reste du plan (engagements, trajets de toutes les activités, autres
-  activités) ; un lieu d'entraînement explicitement demandé reste permis.
-- **Questions bloquantes** : un engagement au lieu inconnu (texte iCal sans alias) est une
-  question (« Où a lieu… ? ») notifiée dans Home Assistant ; tant qu'elle n'a pas de réponse,
-  un plan valide déjà publié est conservé (le nouveau, incomplet, est enregistré « rejeté »
-  avec `kept_previous_plan`) ; sans plan antérieur, le plan partiel est publié et le trajet
-  concerné n'est pas planifié.
-- **Résidences** : uniquement l'alternance (`set_residence_alternation` ; une seule résidence
-  = alternance d'un lieu), toutes à égalité ; plus de réglage `home_place_id` ni d'option HA
-  « zone domicile ». Sans résidence, la planification demande où l'utilisateur habite.
-- **Trajets** : automatiques pour les cours ; pour un autre événement avec un lieu,
-  l'assistant demande s'il faut planifier l'aller et le retour (`create_event.remote`) ; le
-  mode sans IA, qui ne peut pas demander, les planifie. Un séjour déclaré hors des résidences
-  (nuit chez un ami) est une absence : aucun entraînement « à la résidence » pendant celui-ci.
-- **Préférences d'entraînement** (réglage `training_preferences`, en conversation via
-  `update_settings`, désactivées par défaut) : jours sans cours, matin (après le début des
-  heures d'activité) puis après-midi, éviter le noir (lever et coucher du soleil à la première résidence,
-  bibliothèque `astral`). Coûts souples par créneau dans le solveur OR-Tools existant
-  (entraînements seulement) : le noir pèse comme une séance hors des heures d'activité, un
-  jour de cours plus qu'un décalage d'un jour, l'après-midi moins ; placer la séance reste
-  toujours prioritaire.
+  `access_overrides`) s'appliquent aussi aux trajets planifiés et aux départs de cette période,
+  prioritaires sur l'accès par défaut qui reste inchangé. Un seul adaptateur de routage
+  (`transport/access.py`, `db.store.access_routing`) interroge MOTIS depuis/vers le point
+  d'accès et ajoute une étape `ACCESS` de durée fixe ; il sert à la planification, aux trajets
+  du jour, au contrôle de départ (GPS à moins de 300 m du lieu compris) et aux recherches.
+- **Résidences** : uniquement l'alternance, toutes à égalité ; plus de réglage
+  `home_place_id` ni d'option HA « zone domicile ». Sans résidence, la planification demande où
+  l'utilisateur habite.
+- **Trajets** : automatiques pour les cours et examens ; pour un autre événement avec un lieu,
+  l'assistant demande s'il faut planifier l'aller et le retour (`create_event.remote`).
+- **Préférences d'entraînement** (réglage `training_preferences`, actives par défaut, permanentes
+  ou temporaires) : jours sans cours, puis matin, puis après-midi, soir en dernier recours ;
+  éviter fortement le noir pour une séance extérieure (`indoor` sinon ; lever et coucher du
+  soleil à la résidence de référence, la première de l'alternance, les résidences étant proches ;
+  bibliothèque `astral`) ; jamais entre deux cours. Préférences, jamais interdictions (§8). Les
+  lieux autorisés, l'ordre du coach, la semaine et la récupération explicite restent des
+  contraintes dures.
 - **Heures transmises au modèle** : les horodatages des résultats d'outils sont convertis
   dans le fuseau configuré avant d'être donnés à Gemini (constaté en production : le modèle
   lisait des heures UTC comme locales, cours de l'après-midi et bus annoncés une heure trop
@@ -624,16 +635,18 @@ selon le contexte) :
 |---|---|---|
 | Aller vers un engagement | départ après l'engagement précédent, arrivée avant le début − marge (10 min) | départ au plus tard |
 | Trajet direct entre deux engagements | départ après le premier, arrivée avant le second − marge | départ au plus tard |
-| Retour à la base | départ après la fin, arrivée avant la sortie suivante du jour (sinon 6 h) | arrivée au plus tôt |
-| Estimation d'une activité flexible | autour de l'heure préférée (6 h) | durée minimale |
+| Retour à la base (fin de journée ou changement de résidence) | départ après la fin, arrivée avant la sortie suivante du jour (sinon 6 h) | arrivée au plus tôt |
+| Estimation d'une activité flexible avant placement | depuis la base autour de l'heure préférée (6 h) ; corrigée ensuite par les trajets réels du plan final | durée minimale |
 | Contrôle de départ | départ maintenant, arrivée avant le début − marge ; sinon au plus tôt | départ au plus tard, puis arrivée au plus tôt |
 | Recherche en conversation | choisies par l'utilisateur (2 h autour d'une borne seule) | choisi par l'utilisateur |
 
 Tolérance de cours (`class_tolerance_minutes`, 10 min par défaut, au plus 30, réglée en
 conversation) : pour les **cours** seulement, l'utilisateur accepte d'arriver ce nombre de
 minutes après le début et de partir autant avant la fin ; le « début » et la « fin » du tableau
-ci-dessus sont alors décalés d'autant (jamais jusqu'à annuler le cours). Les autres engagements
-gardent leurs heures exactes.
+ci-dessus sont alors décalés d'autant (jamais jusqu'à annuler le cours). Les **examens** et les
+autres engagements gardent leurs heures exactes et toute la marge d'arrivée. La tolérance ne
+change jamais l'heure affichée : les trajets publiés portent l'heure officielle de début
+(`event_start`), seule montrée avec l'heure de départ dans les notifications.
 
 Présence à une séance de cours (`set_class_attendance`, réglage `class_attendance` par
 occurrence `event:<id>`) : « absent » (pas de trajet, le créneau est libre), « partiel » (heures
@@ -643,75 +656,142 @@ jamais modifié ; `get_schedule` montre la présence déclarée sur la séance.
 
 Départage : perturbations sévères datées, puis correspondances. Toutes les alternatives
 acceptables explorées sont conservées sur chaque trajet du planning publié. Aucun trajet ⇒
-`impossible` ; panne ⇒ `unknown` ; le créneau reste bloqué et le problème est signalé. Aucune
-durée de trajet n'est inventée : sans trajet connu, rien n'est réservé autour d'une activité
-flexible (signalé), et un retour inconnu bloque le temps jusqu'à la borne connue suivante. Une
-exécution de planification partage un cache : une requête identique n'atteint MOTIS qu'une fois.
+`impossible` ; panne ⇒ l'itinéraire du même trajet dans le plan publié est conservé (`stale`,
+non revalidé, rafraîchi automatiquement), sinon `unknown` : le temps est bloqué prudemment, au
+plus la durée de trajet maximale, et le problème signalé. Aucune durée de trajet n'est
+inventée. Un trajet non confirmé empêche le statut `complete`. Une exécution de planification
+partage un cache : une requête identique n'atteint MOTIS qu'une fois.
 
-## 8. Planification, stabilité et absence de solution
+## 8. Planification
 
 ### D10 — Replanification
 
 ```mermaid
 flowchart TD
- TR[Changement ou demande] --> LOCK[Verrou PostgreSQL de replanification]
- LOCK --> BASE[Données + planning publié]
- BASE --> MODE{Réorganisation globale demandée ?}
- MODE -->|Oui| GLOBAL[Sans pénalité de stabilité]
- MODE -->|Non| LOCAL[Pénalité de déplacement des séances existantes]
- GLOBAL --> ACT[Activités flexibles + trajets MOTIS]
- LOCAL --> ACT
- ACT --> CP[CP-SAT étude]
- CP --> VALID{Validateur indépendant}
- VALID -->|Valide| DIFF[Diff : ajoutées, déplacées, conservées, décalage]
+ TR[Changement, demande ou worker] --> LOCK[Verrou PostgreSQL de replanification]
+ LOCK --> IN[Entrées : engagements, présence, règles, plan publié]
+ IN --> FIX[Sorties des engagements fixes et épinglés : trajets MOTIS]
+ FIX --> DISP{Élément du jour qui ne tient plus ?}
+ DISP -->|Oui| ALT[Alternative calculée, proposée]
+ DISP --> CP[UN modèle CP-SAT : étude + activités flexibles]
+ CP --> ROUTE[Trajets réels du plan final]
+ ROUTE --> CORR{Trajet réel incompatible ?}
+ CORR -->|Oui, au plus 2 fois| CP
+ CORR -->|Créneau prévu devenu infaisable| ALT
+ ROUTE --> VALID{Validateur indépendant}
+ VALID -->|Valide| PUB[Publication atomique + questions + propositions]
  VALID -->|Violations| REJ[Version rejetée, plan précédent conservé]
- DIFF --> PUB[Publication atomique + propositions pour les protégés]
 ```
 
-- Pipeline (`planning/engine.py`) : engagements fixes (cours, compétitions, activités fixes,
-  verrouillées ou en cours) et leurs trajets → activités flexibles placées autour d'eux dans
-  leur fenêtre avec trajets réservés (`scheduler/activities.py`) → trajets obligatoires jour
-  par jour → fenêtres d'étude réduites par les trajets → CP-SAT d'étude → validation
-  indépendante du plan entier.
-- Contraintes dures : pas de chevauchement, horaires imposés, verrouillages, activités en
-  cours, disponibilités, fenêtres de catégorie, durées prescrites, échéances strictes (étude et
-  séances de tâche), ordre et récupération des séances du coach, trajets, bornes de longueur de
-  bloc configurées. Jamais relâchées silencieusement.
-- Préférences souples (jamais plus fortes que la faisabilité) : plafond d'étude quotidien,
-  nombre de blocs par matière et par jour, longueur préférée, alternance, heures d'activité
-  (réglage `activity_hours`, 06:00–22:00 par défaut), jour suggéré du coach, cible souple.
-- Objectif (pondérations bornées, `scheduler/solver.py`) : travail non planifié (poids
-  dominant, multiplié par la priorité 1–3) ≫ dépassement du plafond quotidien > retard sur
-  cible souple > stabilité (déplacer une séance existante coûte 200) > alternance des matières
-  > longueur préférée de 90 min > dépassement de volume. Seconde passe : les tâches encore
-  incomplètes peuvent utiliser autant de blocs par jour que leur temps libre le permet
-  (chaque bloc supplémentaire pénalisé). Une solution équivalente sans déplacement est donc
-  préférée.
-- Validateur indépendant (`scheduler/validate.py`) : séances d'étude, et pour tout le reste
-  activités dans leur fenêtre, leurs fenêtres de catégorie et avant une échéance stricte,
-  ordre et récupération du coach, aucun chevauchement avec engagements et trajets calculés.
-  Deux engagements fixes qui se chevauchent sont un conflit de sources, signalé, pas une
-  violation du plan.
-- Statut : `complete` seulement si tout le travail, toutes les activités et tous les trajets
-  sont placés ; `partial` sinon (détail signalé) ; `no_solution` si un solveur n'a pas répondu
-  dans son temps (inconclusif, l'ancien plan reste) ; `invalid` en cas de violation.
-- Mode `global` uniquement sur demande explicite (`plan_now(mode="global")`) : la stabilité est
-  ignorée ; verrouillé et en cours restent protégés. `dry_run` simule sans publier.
-- Concurrence : `pg_advisory_xact_lock` sérialise API et worker ; une seule version `active`.
-- Performance : borne inférieure prouvée + démarrage glouton ; 8 semaines / 8 matières en
-  ~1 s (prouvé optimal) sur le poste de développement. Limites : 10 s par passe d'étude (deux
-  passes au plus) et 5 s pour les activités.
+Pipeline (`planning/engine.py`, fonction pure) : engagements fixes (cours, examens,
+compétitions, activités fixes, verrouillées, en cours, et éléments du jour épinglés) → sorties
+du jour et présence (`route_outings`) → un seul solveur (`scheduler/solver.py`) pour l'étude
+et toutes les activités flexibles → trajets réels du plan final → corrections bornées →
+validateur indépendant (`scheduler/validate.py`) sur le plan final.
+
+**Contraintes dures** (solveur et validateur, jamais relâchées) :
+- aucun chevauchement entre engagements, trajets, périodes incertaines, séances et activités ;
+- disponibilités d'étude (horaires seulement), fenêtres et plages autorisées des activités
+  (fenêtres de catégorie, indisponibilités générales ou par catégorie, présence à la résidence
+  pour un entraînement sans lieu) ;
+- toutes les échéances (souples et strictes) : aucun travail après sans accord ;
+- éléments verrouillés, en cours et épinglés gardés tels quels ;
+- ordre de la semaine du coach ; récupération explicite (`rest_days` de la séance ou réglage
+  `training_preferences.rest_days`, jamais déduite) ;
+- trajets faisables (MOTIS, ou itinéraire précédent conservé pendant une panne) ;
+- longueur des séances (30 à 90 min), grille de 15 min.
+
+**Préférences souples** (coûts du solveur, jamais plus fortes que placer le travail) : heures
+d'activité ; obscurité pour un entraînement extérieur ; entraînement entre deux cours ; jours
+de cours, puis après-midi, puis soir pour un entraînement ; heure préférée d'une activité ; jour
+suggéré du coach ; stabilité ; répartition régulière jusqu'à l'échéance ; alternance des
+matières (pas la même matière dans l'heure, ni juste après son cours) ; pause de 15 min ;
+séances de 90 min.
+
+**Priorités** : une seule règle pour toutes les activités flexibles. Laisser du travail non
+planifié coûte 5 000 par minute × priorité (1 à 3), quelle que soit la catégorie (étude,
+entraînement, sortie, séance de tâche) ; 1 250 par minute × priorité pour une tâche sans
+échéance (elle utilise le temps restant sans jamais compromettre une échéance réelle). La
+priorité n'agit donc que lorsque le temps manque ; aucune catégorie n'est planifiée avant une
+autre (un seul modèle).
+
+**Coefficients** (`const.py`, équilibre vérifié par `tests/test_scheduler.py`) :
+
+| Coût | Valeur | Rôle |
+|---|---|---|
+| Hors heures d'activité | 40 000 | fortement évité |
+| Noir, entraînement extérieur | 30 000 | fortement évité, jamais interdit |
+| Écart à l'heure préférée d'une activité | 15 000 + 10/min | bat les préférences générales, pas le noir |
+| Entraînement entre deux cours | 10 000 | C1 |
+| Jour de cours (entraînement) | 8 000 | jours sans cours d'abord |
+| Soir / après-midi (entraînement) | 3 000 / 1 000 | matin, puis après-midi, soir en dernier |
+| Jour suggéré du coach | 500 par jour d'écart | |
+| Stabilité | 4 000 / (jours d'avance + 1) + décalage | demain 2 000, dans une semaine ~500 |
+| Au-delà de la part quotidienne régulière | 5 par minute | répartition jusqu'à l'échéance |
+| Même matière rapprochée / pause manquée / séance courte | 400 / 150 / 100 | |
+
+La somme des préférences qu'un élément peut cumuler reste inférieure au coût de le laisser
+non planifié (test). La part quotidienne régulière vaut le travail restant divisé par les jours
+utiles avant l'échéance, au moins une séance de 90 min.
+
+**Valeurs par défaut configurables** (`const.py`, `SETTING_DEFAULTS`, modifiables en
+conversation, la valeur en base prime) : horizon 14 jours, marge d'arrivée 10 min (examens
+compris), tolérance de cours 10 min (jamais pour un examen), rappels de départ 60 et 15 min,
+trajet maximal 180 min, heures d'activité 06:00–22:00, séances 90 min (30 à 90), pause 15 min,
+écart de matière 60 min, préférences d'entraînement actives (jours sans cours, matin, éviter le
+noir), récupération 0 jour.
+
+**Horizon** : plan détaillé glissant de 14 jours ; une échéance plus lointaine ne planifie que
+la part de son travail proportionnelle à la capacité d'étude de l'horizon (disponibilités moins
+cours connus jusqu'à l'échéance) ; si la capacité totale avant l'échéance ne suffit plus, un
+avertissement est notifié.
+
+**Stabilité** : déplacer un élément publié coûte d'autant plus qu'il est proche (nombre
+d'éléments déplacés, amplitude du décalage, temps restant) ; le jour même, il est épinglé.
+Mode `global` uniquement sur demande explicite (stabilité ignorée, verrouillé et en cours
+protégés). `dry_run` simule sans publier.
+
+**Opérations automatiques** : synchronisation iCal (immédiate), réoptimisation à partir du
+lendemain, nouvelles placements dans le temps libre du jour, rafraîchissement des trajets non
+confirmés dès que MOTIS répond, rappels, contrôle de départ.
+
+**Opérations soumises à accord** (`proposal`) : déplacer un élément déjà prévu aujourd'hui
+(`move_activity`, `move_block` : le créneau proposé est réservé jusqu'à la décision ; refus ⇒
+pas de nouveau placement ce jour-là), déplacer une activité dont l'itinéraire réel ne permet
+plus le créneau prévu, déverrouiller (`unlock_block`, `unlock_activity`), changement du coach
+sur une séance protégée, import d'e-mail interprété par LLM, planifier au-delà d'une échéance
+(via les alternatives simulées puis `update_task`).
+
+**Situations et statuts** (`summary.status`) : `complete` (tout est placé, tous les trajets
+confirmés par MOTIS, aucune question ni accord en attente) ; `partial` (travail ou activité non
+placé, trajet non confirmé, question ouverte : détail dans le résumé) ; `pending_approval` (seuls
+des déplacements attendent l'accord) ; `no_solution` (solveur sans réponse dans son temps :
+inconclusif, l'ancien plan reste) ; `invalid` (violation : rien n'est publié). Échéance
+impossible : la partie réalisable est planifiée, `deadline_misses` et `deadline_capacity`
+(minutes nécessaires et libres) l'expliquent, `propose_alternatives` simule reporter (+2, +7,
++14, +28 j) ou réduire le volume.
+
+**Pannes et informations manquantes** : lieu iCal inconnu ⇒ question, temps bloqué autour du
+cours (au plus le trajet maximal), reste du plan publié ; jour de changement de résidence sans
+cours ⇒ question, seule cette journée est incertaine pour les entraînements à la résidence ;
+panne MOTIS ⇒ itinéraire précédent du même trajet conservé (`stale`, non revalidé), sinon temps
+bloqué prudemment (au plus le trajet maximal), plan `partial`, recalcul automatique toutes les
+15 min ; solveur sans réponse ou violation ⇒ l'ancien plan reste actif. Une panne technique ne
+détruit jamais le dernier plan valide.
+
+**Performance** : un solve de 10 s au plus (démarrage glouton, arrêt sur borne prouvée), au plus
+deux corrections de 5 s ; deux semaines, six matières et quatre entraînements : plan complet en
+moins de 15 s sur le poste de développement.
 
 ### D11 — Diagnostic des résultats
 
 ```mermaid
 flowchart TD
  S[Résultat] --> T{Statut}
- T -->|complete / partial| V[Validation finale]
- T -->|no_solution: UNKNOWN| U[Incertitude explicite, plan précédent conservé]
+ T -->|complete / partial / pending_approval| V[Validation finale réussie]
+ T -->|no_solution| U[Inconclusif, plan précédent conservé]
  T -->|invalid| ERR[Violations listées, rien publié]
- T -->|routage indisponible| RU[Panne, pas une impossibilité]
- V --> RES[Placé, reliquat par tâche, échéances strictes manquées, activités non placées, trajets en échec]
+ V --> RES[Placé, reliquat, échéances, activités non placées, trajets non confirmés, questions, accords]
  RES --> AI[Explication fidèle : explain_plan]
  AI -->|Accord explicite| NEW[Modifier seulement ce qui est autorisé puis plan_now]
 ```
@@ -743,19 +823,26 @@ stateDiagram-v2
  Obsolete --> [*]
 ```
 
-- Une proposition (`unlock_block`, `unlock_activity`, `coach_plan_change`, `training_import`)
-  enregistre l'empreinte de son entrée (`input_revision`) ; à l'accord, l'empreinte est
+- **Un seul mécanisme d'accord** : la proposition (`move_activity`, `move_block`,
+  `unlock_block`, `unlock_activity`, `coach_plan_change`, `training_import`) enregistre l'empreinte de son entrée (`input_revision`) ; à l'accord, l'empreinte est
   recalculée : différente ⇒ `obsolete`, rien n'est appliqué, une replanification est demandée.
 - Conflits entre engagements de toutes catégories (cours, compétitions, rendez-vous fixes,
   activités verrouillées), détectés en un seul endroit (`planning/engine.find_conflicts`) et
   repris dans le résumé de chaque version, même rejetée : une activité flexible verrouillée en conflit produit une
   proposition de déverrouillage, une séance d'étude verrouillée aussi ; deux engagements fixes
   produisent une notification de conflit (rien ne bouge). Une activité déjà commencée n'est
-  jamais déplacée ni proposée. Modification iCal nocturne : le cours officiel est enregistré
-  immédiatement ; l'étude flexible est réoptimisée automatiquement (changement ordinaire). Les
+  jamais déplacée ni proposée. Changement iCal (même le jour même) : le cours officiel est
+  enregistré immédiatement ; les éléments du jour qu'il déplace font l'objet d'une proposition
+  `move_*` (créneau proposé réservé jusqu'à la décision, obsolète une fois son heure passée) ;
+  à partir du lendemain, la réoptimisation est automatique. Accepter applique le créneau
+  proposé (sans verrouiller) ; refuser libère l'élément, qui n'est plus replacé ce jour-là. Les
   rappels relatifs suivent le planning publié, jamais une proposition.
-- Accord et refus se font en conversation (`decide_proposal` sur une proposition identifiée ;
-  repli déterministe « accepte » / « refuse » s'il n'y en a qu'une).
+- Accord et refus se font en conversation (`decide_proposal` sur une proposition identifiée,
+  uniquement sur réponse explicite).
+- **Un seul suivi des points ouverts** : questions, problèmes et pannes passent par
+  `db.store.notify` (dédupliqués par clé) ; une question ou un problème que le dernier plan ne
+  soulève plus est clos automatiquement. Questions de la conversation : posées directement par
+  Gemini ; questions du planificateur et des sources : notifications `question`.
 
 ## 10. Worker, rappels et notifications
 
@@ -766,7 +853,7 @@ flowchart TD
  W[Worker, tick 30 s] --> J[job_run : état et erreur de chaque job]
  J --> SYNC[iCal toutes les 30 min, e-mails du coach]
  J --> SER[Expansion des séries]
- J --> RP[Replanification : demandée, nocturne 03:00, périmée]
+ J --> RP[Replanification : demandée, nocturne 03:00, périmée, trajets à confirmer]
  J --> CHECK[Contrôle de départ toutes les 2 min]
  J --> REM[Rappels arrivés à échéance]
  J --> RET[Rétention quotidienne]
@@ -785,7 +872,8 @@ flowchart TD
   déplacement déplace le rappel, une annulation l'annule). Identité = rappel + instant dû :
   pas de doublon après redémarrage ; un rappel manqué pendant une panne part au redémarrage
   (jusqu'à 6 h, marqué « en retard »).
-- Rappels de départ : plusieurs seuils (`update_settings.departure_reminder_minutes`), sur le
+- Rappels de départ : plusieurs seuils (`update_settings.departure_reminder_minutes`) ; le
+  message ne donne que l'heure officielle de début et l'heure de départ ; sur le
   prochain trajet aller (jamais un retour à la base), recalculés avec la position réelle et le
   temps réel ; sans position fiable ou sans routage, l'utilisateur est averti et les rappels
   suivent le départ du planning publié, en le disant.
@@ -850,18 +938,18 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 
 | Besoin | État | Preuve / écart |
 |---|---|---|
-| B01 Conversation | Partiel | Agent Gemini à outils + repli déterministe testés avec un client LLM simulé (`tests/integration/test_assistant.py`) et test de contrat HA ↔ backend ; **recette dans un vrai Home Assistant 2026.11.2** (Docker, `scripts/ha_e2e.py`, 15/15) : flux de configuration, agent de conversation Assist, ajout de tâche et question par la conversation (repli déterministe), refus de deviner, GPS du téléphone transmis et jugé fiable, liste de tâches à jour, aucun service métier ; budget de 60 s, panne du LLM après une modification sans rejeu, délai de 150 s côté HA (`test_assistant.py`). **Jamais exécuté avec un vrai LLM** (aucune clé). |
+| B01 Conversation | Partiel | Agent Gemini à outils testé avec un client simulé (`tests/integration/test_assistant.py`) et **avec le vrai Gemini** le 26/11/2026 (base jetable, données fictives) : questions quand la date est ambiguë (« vendredi prochain », « jeudi qui vient »), question sur le fractionnement d'une tâche de 3 h, indisponibilité générale créée pour « pas disponible samedi », activité déplacée à l'heure demandée sans verrou, « cette semaine le soir » enregistré comme préférence temporaire, aucune tâche inventée ; quota Vertex AI atteint une fois (429, annoncé « quota LLM atteint »). Sans Gemini, la conversation annonce la panne et ne modifie rien (test). Limite : il n'existe pas d'option « préférer le soir » (seulement ne plus préférer le matin). Contrat HA ↔ backend vérifié avec le vrai client HA. |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
-| B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente, séance unique située ; échéance stricte d'une séance située en heure locale, jamais repoussée, manquée signalée (`test_domain_rules.py`). |
+| B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente ; fractionnement demandé au-delà de 90 min, indépendant du lieu ; tâche située fractionnable en plusieurs séances avec trajets ; tâche terminée : toutes les séances restantes annulées, verrouillées comprises, jamais signalées manquées (`test_decisions.py`, `test_domain_rules.py`). |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, repères, invalides) notifiés. **Flux réel de l'université validé localement** le 25/11/2026 (secret `tempo_ics_url`) : téléchargement sécurisé, 36 cours importés dans une base jetable, seconde synchronisation sans changement ; ses congés codés en durée nulle ont révélé un défaut corrigé (`test_ics.py`). Pas encore en service continu (worker non déployé). |
-| B05 Études | Vérifié | 15 h, blocs de 90 min, souple/stricte, correction sans double comptage. |
+| B05 Études | Vérifié | Séances de 90 min (30 à 90), pas de plafond quotidien ni de nombre par matière, alternance (y compris après le cours de la matière), pause de 15 min, répartition régulière jusqu'à l'échéance, tâche sans échéance sur le temps restant, aucune séance après une échéance souple ou stricte (`test_scheduler.py`). |
 | B06 Sport | Partiel | Entraînements (flexibles) et compétitions (fixes) créés en conversation (`create_event` avec `kind`) ; DOCX, mise à jour sans doublon, durée inconnue, protections testés (fixtures + vrai serveur IMAP local) ; authentification par le serveur de réception désigné, en-têtes falsifiés refusés (`test_text_parser.py`, `test_worker_mail.py`). **Adresse réelle du coach, boîte réelle et vrais en-têtes DMARC/DKIM non testés.** |
-| B07 Règles | Vérifié | Fenêtres hebdomadaires d'étude + exceptions datées + préférences ; fenêtres par catégorie d'activité flexible (`set_category_windows` : entraînement, personnel, tâche située), contrainte dure dans CP-SAT et revérifiée par le moteur (`test_activities.py`, `test_operations.py`). |
+| B07 Règles | Vérifié | Disponibilités d'étude sans lieu, fenêtres de catégorie, exceptions générales ou par catégorie (un jour ou une plage), préférences permanentes et temporaires qui expirent seules (`test_decisions.py`, `test_scheduler.py`). |
 | B08 Lieux | Vérifié | GPS frais/périmé/imprécis, lieu prévu sans altérer le GPS, origine inconnue ⇒ question ; base qui change dans la journée (`test_engine.py`) ; lieu utilisé jamais supprimé, alias conservés. |
 | B09 Transport | Vérifié | `search_journey` sur un **vrai MOTIS** (Bruxelles et national) : arrivée avant, départ après, plage, aucun candidat (`test_motis_live.py`) ; exploration paginée (jusqu'à 5 requêtes, panne après la première page signalée sans perdre les candidats) ; critères (correspondances, marche) et retour dans la même recherche, testés avec des fournisseurs simulés et exécutés sur le MOTIS national (aller et retour, 5 pages chacun) ; une borne seule reste dans une fenêtre de 2 h. Résultat : « meilleur parmi les candidats explorés ». |
-| B10 Planning mixte | Vérifié | Cours, étude, entraînements, compétition, activités personnelles, trajets ; validateur indépendant du plan entier (étude, fenêtres, catégories, échéances, ordre du coach, chevauchements) ; préférences d'étude et heures d'activité souples (`test_scheduler_soft.py`)., y compris les trajets choisis pour une activité flexible contre les engagements fixes. |
-| B11 Stabilité | Vérifié | Ajout en créneau libre sans déplacement ; conflit local avec changements minimaux ; mode global sur demande ; activité flexible en cours jamais déplacée. Poids bornés, pas d'optimisation lexicographique stricte. |
-| B12 Conflits | Vérifié | Manque de temps, reliquat, échéance stricte manquée, panne de routage, version invalide rejetée ; diagnostic par échéance stricte manquée (`deadline_capacity` : travail nécessaire vs minutes d'étude libres avant l'échéance, après engagements, trajets et entraînements) ; alternatives toutes simulées (`propose_alternatives`, rien publié) ; statut `partial` dès qu'une activité, un trajet ou du travail reste, `no_solution` si un solveur ne répond pas ; conflits entre toutes catégories. Le diagnostic n'est pas un noyau minimal calculé par le solveur : la capacité libre est partagée entre les tâches (borne supérieure). |
+| B10 Planning mixte | Vérifié | Un seul modèle CP-SAT pour l'étude et toutes les activités (priorités seules quand le temps manque, aucune catégorie prioritaire) ; présence unique (sorties sans retour automatique, retour intermédiaire sur demande, étude là où est l'utilisateur, entraînement à la résidence jamais entre deux cours) ; changement de résidence après le dernier cours, question sans cours ; examens sans tolérance ; trajets réels corrigés (C8) ; validateur indépendant sur le plan final (`test_engine.py`, `test_decisions.py`). |
+| B11 Stabilité | Vérifié | Re-planification identique sans changement ; un engagement nouveau ne déplace que l'élément touché ; coût de déplacement décroissant avec la distance ; éléments du jour épinglés, déplacement proposé, créneau réservé, accord ou refus appliqués ; réorganisation du jour sur demande explicite sans second accord (`test_scheduler.py`, `test_decisions.py`). |
+| B12 Conflits | Vérifié | Manque de temps, reliquat, échéance manquée (souple ou stricte) avec capacité chiffrée et alternatives simulées ; question bloquant seulement l'élément concerné ; panne MOTIS : itinéraires précédents conservés (`stale`), plan `partial`, rafraîchissement automatique ; statut `pending_approval` ; conflits entre toutes catégories. |
 | B13 Validation | Vérifié | Proposition périmée rejetée ; replanifications concurrentes sérialisées (3 fils). |
 | B14 Notifications | Vérifié | Rappel relatif qui suit sa cible, sans doublon, annulé avec la cible, clos après elle ; plusieurs rappels de départ, y compris sans GPS (départ du plan) ; position ou routage inconnus notifiés ; une seule source de notifications (HA ne les duplique plus). |
 | B15 Autonomie | Vérifié | Jobs testés individuellement, sans LLM ; endurance : la vraie fonction `tick` du worker sur 7 jours simulés (1 008 cycles de 10 min, PostgreSQL réel) avec un cours déplacé par l'iCal, une panne de routage de 4 h et du travail déclaré chaque soir : tous les jobs sains à la fin, rappels émis une seule fois par échéance, replanification au moins nocturne, aucune séance sur un cours, croissance bornée, cycle p95 0,03 s / max 0,4 s (`test_soak.py`). Pas encore mesuré en temps réel sur le serveur. |
@@ -875,15 +963,16 @@ conflit ⇒ proposition approuvée en conversation, échéance stricte impossibl
 capacité chiffrée et alternatives simulées, réorganisation globale simulée sans publication,
 trajet direct entre deux activités, localisation future.
 
-Dernière exécution complète (25/11/2026, après la suppression de l'accès anonyme Belgian
-Mobility) : backend **541 tests réussis, 0 ignoré** (PostgreSQL 16 réel, MOTIS Bruxelles et
-MOTIS national réels réimportés, contrat avec le vrai client HA, IMAP GreenMail, passerelle
-Belgian Mobility réelle avec la clé) ; Ruff et mypy strict propres. Pile de développement avec
-la vraie clé : relais sain (6 flux, aucune erreur), MOTIS résout 100 % des TripUpdates TEC ;
-`scripts/live_scenario.py` 15/15 et vrai Home Assistant 2026.11.2 (`scripts/ha_e2e.py`) 15/15.
-Intégration HA inchangée depuis sa dernière exécution (63 tests réussis).
+Dernière exécution complète (26/11/2026, version 0.7.0) : backend **549 tests réussis**
+(534 sur PostgreSQL 16 réel avec le vrai client HA, puis 9 sur un **vrai MOTIS** Bruxelles
+v2.11.4 et 6 avec GreenMail IMAP et la passerelle Belgian Mobility réelle), couverture 93,5 % ;
+seuls les 4 tests du MOTIS national restent non exécutés (graphe national non démarré) ; Ruff et
+mypy strict propres. Intégration HA : 68 tests (WSL), mypy strict et Ruff propres. Essai avec le
+vrai Gemini décrit en B01. Non réexécutés pour cette version : `scripts/live_scenario.py`
+(pile Docker complète) et le vrai Home Assistant (`scripts/ha_e2e.py`), mis à jour pour le
+nouveau contrat.
 
-Bloquants nécessitant l'utilisateur : compte de service Vertex AI et choix du modèle Gemini (tester B01 réellement), installation de
+Bloquants nécessitant l'utilisateur : quota Vertex AI suffisant pour la conversation, installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de
 l'expéditeur du coach + accès IMAP, clé
 Belgian Mobility Standard, création et visibilité des dépôts GitHub, licence de l'intégration,

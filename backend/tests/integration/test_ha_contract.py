@@ -105,12 +105,7 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             assert {p["id"] for p in await client.places()} == {"home", "club"}
             await op(
                 "set_weekly_availability",
-                {
-                    "windows": [
-                        {"weekday": d, "start": "08:00", "end": "20:00", "place_id": "home"}
-                        for d in range(7)
-                    ]
-                },
+                {"windows": [{"weekday": d, "start": "08:00", "end": "20:00"} for d in range(7)]},
             )
             rules = await op("get_rules", {})
             assert len(rules["result"]["weekly_windows"]) == 7
@@ -125,7 +120,13 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             soon = (datetime.now(UTC) + timedelta(days=3)).date().isoformat()
             task = (
                 await op(
-                    "create_task", {"title": "maths", "estimated_minutes": 120, "target_date": soon}
+                    "create_task",
+                    {
+                        "title": "maths",
+                        "estimated_minutes": 120,
+                        "splittable": True,
+                        "target_date": soon,
+                    },
                 )
             )["result"]["task"]
             await op("log_work", {"task_id": task["id"], "minutes": 30})
@@ -159,11 +160,10 @@ def test_every_client_call_matches_the_backend(server: str, engine: Engine) -> N
             assert await client.proposals() == []
             assert isinstance(await client.notifications(), list)
             assert summary["to_confirm"] == []
-            # Conversation without LLM: deterministic fallback, real data, nothing invented.
+            # Conversation without Gemini: the error is reported, nothing changes.
             question = await client.conversation("combien d'heures d'étude il me reste ?", "c1")
-            assert question["used_llm"] is False and "1 h 30" in question["reply"]
-            replan = await client.conversation("replanifie", "c1")
-            assert replan["changed"] is True
+            assert question["used_llm"] is False and question["changed"] is False
+            assert question["error"] == "llm_unavailable"
             with pytest.raises(api_module.TempoNotFoundError):
                 await op("no_such_operation", {})
             with pytest.raises(api_module.TempoApiError):

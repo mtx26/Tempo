@@ -12,7 +12,7 @@ Times: an input datetime without offset is local time in the configured timezone
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
@@ -22,6 +22,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from tempo.const import (
+    ACCESS_OVERRIDES_SETTING,
+    ALTERNATION_SETTING,
+    CLASS_ATTENDANCE_SETTING,
+    MAX_ALTERNATIVE_TASKS,
+    MAX_SCHEDULE_SPAN,
+    POSTPONE_STEPS_DAYS,
+    SESSION_MINUTES,
+    SWITCHES_SETTING,
+    TEMPORARY_SETTING,
+)
 from tempo.db.models import (
     ActivityRow,
     AuditEntry,
@@ -43,23 +54,22 @@ from tempo.db.models import (
     SyncRun,
 )
 from tempo.db.store import (
-    ACCESS_OVERRIDES_SETTING,
-    ALTERNATION_SETTING,
-    CLASS_ATTENDANCE_SETTING,
     access_routing,
     active_version,
     audit,
     declared_stays,
     get_setting,
     place_directory,
+    reference_residence,
     residence_alternation,
-    residence_base,
     set_setting,
+    temporary_preferences,
 )
 from tempo.domain.models import TargetKind
 from tempo.domain.ops import (
     DomainError,
     cancel_series,
+    close_task,
     complete_block,
     create_series,
     edit_occurrence,
@@ -73,7 +83,7 @@ from tempo.domain.ops import (
 from tempo.planning.proposals import decide, proposal_out
 from tempo.planning.service import PlanningNotConfiguredError, lock_block, release_block, replan
 from tempo.planning.views import schedule_items, summary
-from tempo.scheduler.model import Preferences
+from tempo.scheduler.model import STUDY_PREFERENCE_KEYS, Preferences, TrainingPreferences
 from tempo.transport.access import Access
 from tempo.transport.itinerary import Objective, TripQuery, find_trips
 from tempo.transport.location import (
@@ -85,8 +95,6 @@ from tempo.transport.location import (
 )
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
-
-MAX_SPAN = timedelta(days=62)
 
 
 @dataclass(slots=True)
@@ -179,10 +187,10 @@ def get_context(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "weekday": local.strftime("%A"),
         "timezone": str(ctx.tz),
         "tracker_entity_id": get_setting(ctx.session, "tracker_entity_id"),
-        "horizon_days": get_setting(ctx.session, "horizon_days", 14),
-        "buffer_minutes": get_setting(ctx.session, "buffer_minutes", 10),
-        "class_tolerance_minutes": get_setting(ctx.session, "class_tolerance_minutes", 10),
-        "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
+        "horizon_days": get_setting(ctx.session, "horizon_days"),
+        "buffer_minutes": get_setting(ctx.session, "buffer_minutes"),
+        "class_tolerance_minutes": get_setting(ctx.session, "class_tolerance_minutes"),
+        "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes"),
         "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
         "planned_locations": get_setting(ctx.session, "stays", []) or [],
         "residence_alternation": get_setting(ctx.session, ALTERNATION_SETTING),
@@ -197,7 +205,7 @@ class RangeIn(Strict):
 
 def _range(ctx: OpContext, body: RangeIn) -> tuple[datetime, datetime]:
     start, end = _local(body.start, ctx.tz), _local(body.end, ctx.tz)
-    if end <= start or end - start > MAX_SPAN:
+    if end <= start or end - start > MAX_SCHEDULE_SPAN:
         raise OpError("intervalle invalide (au plus 62 jours)")
     return start, end
 
@@ -393,7 +401,8 @@ NOW_TOLERANCE = timedelta(minutes=15)
     "get_location",
     "Where the user is or will be at an instant, from facts only: real phone GPS (now), the "
     "journey or located activity planned then, else the day's base (planned location, else "
-    "home). Says which source was used; ambiguity is reported, never guessed.",
+    "the residence of the alternation). Says which source was used; ambiguity or an unknown "
+    "residence change time is reported, never guessed.",
     LocationIn,
     mutates=False,
 )
@@ -423,8 +432,7 @@ def get_location(ctx: OpContext, body: LocationIn) -> dict[str, Any]:
     if out.get("source") == "gps":
         return out
     directory = place_directory(ctx.session)
-    home = residence_base(ctx.session, directory)
-    alternation = residence_alternation(ctx.session, directory, ctx.tz)
+    alternation = residence_alternation(ctx.session, directory, ctx.tz, ctx.now)
     stays = declared_stays(ctx.session, directory)
     try:
         planned = planned_place(at, stays)
@@ -433,13 +441,15 @@ def get_location(ctx: OpContext, body: LocationIn) -> dict[str, Any]:
         return out
     if planned is not None:
         out.update(source="planned_location", place_id=planned.id, place_name=planned.name)
-    elif alternation is not None:
-        residence = alternation.residence_at(at)
-        out.update(source="residence_alternation", place_id=residence.id, place_name=residence.name)
-    elif home is not None:
-        out.update(source="home", place_id=home.id, place_name=home.name)
+    elif alternation is None:
+        out.update(source="unknown", detail="aucune résidence configurée : demandez")
+    elif (residence := alternation.residence_at(at)) is None:
+        out.update(
+            source="unknown",
+            detail="jour de changement de résidence sans cours ni heure donnée : demandez l'heure",
+        )
     else:
-        out.update(source="unknown", detail="domicile non configuré")
+        out.update(source="residence_alternation", place_id=residence.id, place_name=residence.name)
     return out
 
 
@@ -449,9 +459,9 @@ def _minutes_text(value: int) -> str:
 
 @operation(
     "get_rules",
-    "Availability rules (weekly windows by place), category windows of flexible activities, "
-    "dated exceptions, planned locations "
-    "(where the user will be), study preferences and reminder settings.",
+    "Availability rules (weekly study windows), category windows of flexible activities, "
+    "dated exceptions (general or per category), planned locations (where the user will be), "
+    "residence change times, permanent and temporary preferences, reminder settings.",
     NoInput,
     mutates=False,
 )
@@ -470,7 +480,6 @@ def get_rules(ctx: OpContext, _: NoInput) -> dict[str, Any]:
                 "weekday": w.weekday,
                 "start": _minutes_text(w.start_minute),
                 "end": _minutes_text(w.end_minute),
-                "place_id": w.place_id,
             }
             for w in windows
         ],
@@ -481,7 +490,7 @@ def get_rules(ctx: OpContext, _: NoInput) -> dict[str, Any]:
                 "start": _minutes_text(e.start_minute),
                 "end": _minutes_text(e.end_minute),
                 "available": e.available,
-                "place_id": e.place_id,
+                "applies_to": e.kind or "all",
                 "reason": e.reason,
             }
             for e in exceptions
@@ -489,12 +498,19 @@ def get_rules(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         "category_windows": _category_windows(ctx.session),
         "planned_locations": get_setting(ctx.session, "stays", []) or [],
         "residence_alternation": get_setting(ctx.session, ALTERNATION_SETTING),
+        "residence_change_times": get_setting(ctx.session, SWITCHES_SETTING, {}) or {},
         "temporary_access": get_setting(ctx.session, ACCESS_OVERRIDES_SETTING, []) or [],
-        "study_preferences": get_setting(ctx.session, "study_preferences", {}) or {},
-        "activity_hours": get_setting(ctx.session, "activity_hours")
-        or {"start": "06:00", "end": "22:00"},
-        "training_preferences": get_setting(ctx.session, "training_preferences", {}) or {},
-        "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes", [60, 15]),
+        "study_preferences": {
+            **asdict(Preferences()),
+            **(get_setting(ctx.session, "study_preferences", {}) or {}),
+        },
+        "activity_hours": get_setting(ctx.session, "activity_hours"),
+        "training_preferences": {
+            **asdict(TrainingPreferences()),
+            **(get_setting(ctx.session, "training_preferences", {}) or {}),
+        },
+        "temporary_preferences": temporary_preferences(ctx.session, ctx.now),
+        "departure_reminder_minutes": get_setting(ctx.session, "reminder_minutes"),
     }
 
 
@@ -590,17 +606,14 @@ def explain_plan(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         out["unplanned_minutes"] = {
             subjects.get(k, k): v for k, v in plan.get("unplanned_minutes", {}).items()
         }
-        out["late_minutes"] = {
-            subjects.get(k, k): v for k, v in plan.get("late_minutes", {}).items()
-        }
+        out["deadline_misses"] = [subjects.get(k, k) for k in plan.get("deadline_misses", [])]
         out["hard_deadline_misses"] = [
             subjects.get(k, k) for k in plan.get("hard_deadline_misses", [])
         ]
         out["deadline_capacity"] = {
             subjects.get(k, k): v for k, v in (plan.get("deadline_capacity") or {}).items()
         }
-        out["unplaced_activities"] = [titles.get(k, k) for k in plan.get("unplaced_trainings", [])]
-        out.pop("unplaced_trainings", None)
+        out["unplaced_activities"] = [titles.get(k, k) for k in plan.get("unplaced_activities", [])]
         out["journeys_with_problems"] = [
             t for t in plan.get("travel", []) if t.get("status") != "routed"
         ]
@@ -705,8 +718,25 @@ class EventIn(Strict):
         "want one). Journeys are automatic only for classes: for an event with a place, ask the "
         "user whether Tempo should plan the round trip, then set it",
     )
-    locked: bool = False
-    priority: int = Field(default=2, ge=1, le=3)
+    locked: bool = Field(
+        default=False,
+        description="Only when the user explicitly asks to lock it. Flexible: needs "
+        "preferred_start (the locked time). A fixed event never moves anyway.",
+    )
+    priority: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description="1 low, 2 normal, 3 high: matters only when time runs out",
+    )
+    indoor: bool = Field(default=False, description="Training indoors (darkness then irrelevant)")
+    rest_days: int = Field(
+        default=0,
+        ge=0,
+        le=7,
+        description="Training: recovery days required after the previous training, only when "
+        "stated by the coach or the user (never invented)",
+    )
     notes: str = Field(default="", max_length=5000)
     rrule: str | None = Field(
         default=None,
@@ -779,6 +809,9 @@ def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
         preferred = _local(body.preferred_start, ctx.tz)
         if not begin <= preferred <= finish - timedelta(minutes=duration):
             raise OpError("heure préférée hors de la fenêtre")
+    if body.locked and scheduling == "flexible" and preferred is None:
+        raise OpError("verrouiller une activité flexible : à quelle heure ? (preferred_start)")
+    locked = body.locked and scheduling == "flexible"
     template = {
         "title": body.title,
         "kind": body.kind,
@@ -812,7 +845,7 @@ def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
             )
         )
         for row in rows:
-            row.locked = body.locked and scheduling == "fixed"
+            row.indoor, row.rest_days = body.indoor, body.rest_days
         return {
             "series_id": str(series.id),
             "occurrences_created": len(rows),
@@ -832,7 +865,10 @@ def create_event(ctx: OpContext, body: EventIn) -> dict[str, Any]:
         busy=body.busy,
         remote=remote,
         priority=body.priority,
-        locked=body.locked and scheduling == "fixed",
+        locked=locked,
+        planned_start_at=preferred if locked else None,
+        indoor=body.indoor,
+        rest_days=body.rest_days,
         source="assistant",
     )
     ctx.session.add(row)
@@ -846,7 +882,14 @@ class EventUpdateIn(Strict):
         default="occurrence", description="For recurring events: this one, this and following, all"
     )
     title: str | None = Field(default=None, max_length=300)
-    start: datetime | None = Field(default=None, description="New fixed start (keeps duration)")
+    start: datetime | None = Field(
+        default=None,
+        description="Fixed: new start. Flexible: the time the user asks for (planned there "
+        "and kept as preferred time; NOT locked: set_lock only on explicit request)",
+    )
+    preferred_start: datetime | None = Field(
+        default=None, description="Flexible: a preferred time only (soft)"
+    )
     duration_minutes: int | None = Field(default=None, gt=0, le=24 * 60)
     window_start: datetime | None = None
     window_end: datetime | None = None
@@ -855,6 +898,8 @@ class EventUpdateIn(Strict):
     remote: bool | None = None
     busy: bool | None = None
     priority: int | None = Field(default=None, ge=1, le=3)
+    indoor: bool | None = None
+    rest_days: int | None = Field(default=None, ge=0, le=7)
     notes: str | None = Field(default=None, max_length=5000)
 
 
@@ -881,7 +926,7 @@ def _apply_event_changes(ctx: OpContext, row: ActivityRow, body: EventUpdateIn) 
         _place_exists(ctx, body.place_id or None)
         row.place_id = body.place_id or None
         changed.append("place_id")
-    for name in ("remote", "busy", "priority"):
+    for name in ("remote", "busy", "priority", "indoor", "rest_days"):
         value = getattr(body, name)
         if value is not None:
             setattr(row, name, value)
@@ -908,9 +953,16 @@ def _apply_event_changes(ctx: OpContext, row: ActivityRow, body: EventUpdateIn) 
         if row.scheduling == "fixed":
             row.earliest_start_at, row.latest_end_at = begin, begin + duration
         else:
-            row.planned_start_at = begin
-            row.locked = True  # an explicit time for a flexible activity pins it
+            # A requested time: planned there and preferred there, never implicitly locked.
+            if not (row.earliest_start_at <= begin and begin + duration <= row.latest_end_at):
+                raise OpError("heure hors de la fenêtre de l'activité : élargissez la fenêtre")
+            row.planned_start_at = row.preferred_start_at = begin
         changed.append("start")
+    if body.preferred_start is not None:
+        if row.scheduling != "flexible":
+            raise OpError("heure préférée seulement pour une activité flexible")
+        row.preferred_start_at = _local(body.preferred_start, ctx.tz)
+        changed.append("preferred_start")
     elif "duration_minutes" in changed and row.scheduling == "fixed":
         row.latest_end_at = row.earliest_start_at + duration
     if body.window_start is not None or body.window_end is not None:
@@ -1061,7 +1113,8 @@ class LockIn(Strict):
 
 @operation(
     "set_lock",
-    "Lock (protect from automatic moves) or unlock an activity or a study block.",
+    "Lock (protect from automatic moves) or unlock a flexible activity or a study block. "
+    "Only on the user's explicit request: changing a time never locks.",
     LockIn,
     mutates=True,
     replan=True,
@@ -1083,7 +1136,9 @@ def set_lock(ctx: OpContext, body: LockIn) -> dict[str, Any]:
             release_block(ctx.session, block)
         return {"block_id": str(block_id), "locked": body.locked}
     row = _activity(ctx, body.target_id)
-    if body.locked and row.scheduling == "flexible" and row.planned_start_at is None:
+    if row.scheduling == "fixed":
+        raise OpError("activité fixe : elle ne bouge jamais, rien à verrouiller")
+    if body.locked and row.planned_start_at is None:
         raise OpError("activité pas encore placée : rien à verrouiller")
     row.locked = body.locked
     row.user_modified = True
@@ -1170,23 +1225,41 @@ class TaskIn(Strict):
     )
     target_date: date | None = None
     hard_deadline: bool = Field(default=False, description="True only if explicitly strict")
-    priority: int = Field(default=2, ge=1, le=3)
-    splittable: bool = True
+    priority: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description="1 low, 2 normal, 3 high: matters only when time runs out",
+    )
+    splittable: bool | None = Field(
+        default=None,
+        description="Can the work be done in several sessions? From the task's nature and the "
+        "user's words, independent of its place; ask when unclear. Required above 90 minutes "
+        "(a shorter task is one session anyway)",
+    )
     place_id: str | None = None
     notes: str = Field(default="", max_length=5000)
 
 
 @operation(
     "create_task",
-    "Create a task or a study volume (e.g. 15 h of physics before Friday). Target dates are "
-    "soft unless the user explicitly says strict. Without an estimated duration the task is "
-    "kept but not planned. A located or non-splittable task is planned as one session.",
+    "Create a task or a study volume (e.g. 15 h of physics before Friday). Deadlines are soft "
+    "unless the user explicitly says strict; no work is planned after either without the "
+    "user's approval. Without an estimated duration the task is kept but not planned. A "
+    "non-splittable task is one session; a splittable task with a place gets several "
+    "sessions, each with its journeys.",
     TaskIn,
     mutates=True,
     replan=True,
 )
 def create_task(ctx: OpContext, body: TaskIn) -> dict[str, Any]:
     _place_exists(ctx, body.place_id)
+    long = body.estimated_minutes is not None and body.estimated_minutes > SESSION_MINUTES
+    if body.splittable is None and long:
+        raise OpError(
+            "fractionnable ? demandez à l'utilisateur si ce travail peut se faire en plusieurs "
+            "séances (splittable)"
+        )
     if body.target_date is not None and body.target_date < ctx.now.astimezone(ctx.tz).date():
         raise OpError("échéance déjà passée")
     row = StudyTaskRow(
@@ -1196,7 +1269,7 @@ def create_task(ctx: OpContext, body: TaskIn) -> dict[str, Any]:
         target_date=body.target_date,
         target_kind=TargetKind.HARD if body.hard_deadline else TargetKind.SOFT,
         priority=body.priority,
-        splittable=body.splittable,
+        splittable=body.splittable is not False,
         place_id=body.place_id,
         notes=body.notes,
     )
@@ -1217,7 +1290,11 @@ class TaskUpdateIn(Strict):
     splittable: bool | None = None
     place_id: str | None = None
     notes: str | None = Field(default=None, max_length=5000)
-    archived: bool | None = Field(default=None, description="True = abandon / delete the task")
+    completed: bool | None = Field(
+        default=None,
+        description="True = the user says the task is fully done (or abandoned): every "
+        "remaining session is removed, locked ones included; history is kept",
+    )
 
 
 def _task(ctx: OpContext, task_id: str) -> StudyTaskRow:
@@ -1230,7 +1307,7 @@ def _task(ctx: OpContext, task_id: str) -> StudyTaskRow:
 @operation(
     "update_task",
     "Change a task: estimate, target date (soft/strict), priority, splitting, place, notes, or "
-    "archive it. Use log_work for progress.",
+    "declare it completed. Use log_work for progress.",
     TaskUpdateIn,
     mutates=True,
     replan=True,
@@ -1247,13 +1324,18 @@ def update_task(ctx: OpContext, body: TaskUpdateIn) -> dict[str, Any]:
         row.target_date = body.target_date
     if body.hard_deadline is not None:
         row.target_kind = TargetKind.HARD if body.hard_deadline else TargetKind.SOFT
-    for name in ("priority", "splittable", "notes", "archived"):
+    for name in ("priority", "splittable", "notes"):
         value = getattr(body, name)
         if value is not None:
             setattr(row, name, value)
     if body.place_id is not None:
         _place_exists(ctx, body.place_id or None)
         row.place_id = body.place_id or None
+    if body.completed:
+        cancelled = close_task(ctx.session, row, ctx.now, ctx.tz)
+        return {"task": task_out(row), "cancelled_sessions": cancelled}
+    if body.completed is False:
+        row.archived = False
     sync_task_session(ctx.session, row, ctx.now, ctx.tz)
     return {"task": task_out(row)}
 
@@ -1400,7 +1482,7 @@ def find_address(ctx: OpContext, body: AddressIn) -> dict[str, Any]:
         return {"status": "unavailable", "detail": "recherche d'adresse indisponible"}
     directory = place_directory(ctx.session)
     near = directory.get(body.near_place_id) if body.near_place_id else None
-    near = near or residence_base(ctx.session, directory)
+    near = near or reference_residence(ctx.session, directory)
     try:
         matches = geocode(body.text, near=None if near is None else near.coordinates)
     except RoutingUnavailableError as exc:
@@ -1476,21 +1558,6 @@ def place_uses(session: Session, place_id: str, now: datetime, tz: ZoneInfo) -> 
     )
     if tasks:
         uses.append("tâches : " + ", ".join(tasks[:5]))
-    windows = list(
-        session.scalars(select(AvailabilityRow.id).where(AvailabilityRow.place_id == place_id))
-    )
-    if windows:
-        uses.append(f"{len(windows)} disponibilité(s) hebdomadaire(s)")
-    exceptions = list(
-        session.scalars(
-            select(AvailabilityExceptionRow.id).where(
-                AvailabilityExceptionRow.place_id == place_id,
-                AvailabilityExceptionRow.day >= now.astimezone(tz).date(),
-            )
-        )
-    )
-    if exceptions:
-        uses.append(f"{len(exceptions)} exception(s) de disponibilité")
     if any(
         s["place_id"] == place_id and datetime.fromisoformat(s["end"]) > now
         for s in get_setting(session, "stays", []) or []
@@ -1507,10 +1574,15 @@ class ActivityHoursIn(Strict):
 class TrainingPreferencesIn(Strict):
     free_days: bool | None = Field(default=None, description="Prefer days without classes")
     mornings: bool | None = Field(
-        default=None,
-        description="Prefer the morning (after the activity hours start), then the afternoon",
+        default=None, description="Prefer mornings, then afternoons, evenings as a fallback"
     )
-    daylight: bool | None = Field(default=None, description="Avoid the dark (soft)")
+    daylight: bool | None = Field(default=None, description="Avoid the dark outdoors (soft)")
+    rest_days: int | None = Field(
+        default=None,
+        ge=0,
+        le=7,
+        description="Recovery days between two trainings, only when the user or coach states it",
+    )
 
 
 class SettingsChangeIn(Strict):
@@ -1538,9 +1610,9 @@ class SettingsChangeIn(Strict):
     )
     study_preferences: dict[str, int] | None = Field(
         default=None,
-        description="preferred_block_minutes, min_block_minutes, max_block_minutes, "
-        "min_gap_same_subject_minutes, max_daily_study_minutes, max_blocks_per_subject_per_day "
-        "(all soft except the min/max block length)",
+        description="preferred_block_minutes (90), min_block_minutes (30), max_block_minutes "
+        "(90), break_minutes (15), min_gap_same_subject_minutes (60, subject alternation); "
+        "all soft except the min/max block length",
     )
     activity_hours: ActivityHoursIn | None = Field(
         default=None,
@@ -1550,11 +1622,22 @@ class SettingsChangeIn(Strict):
         default=None,
         description="Soft preferences of training sessions only; omitted keys are unchanged",
     )
+    period_start: datetime | None = Field(
+        default=None,
+        description="With period_end: the training_preferences / activity_hours given here "
+        "hold ONLY for this period, then expire (the permanent ones are unchanged). Omit both "
+        "for a permanent change; ask when the intended duration is unclear",
+    )
+    period_end: datetime | None = None
+
+
+TEMPORARY_KEYS = ("training_preferences", "activity_hours")
 
 
 @operation(
     "update_settings",
-    "Permanent preferences: phone tracker, planning horizon, safety margin before "
+    "Preferences, permanent or for a period (period_start/period_end: training preferences "
+    "and activity hours only): phone tracker, planning horizon, safety margin before "
     "appointments, tolerance to arrive late / leave early at classes, departure reminders "
     "(minutes before leaving, several allowed), study "
     "preferences (90-minute blocks...), preferred hours of flexible activities, "
@@ -1565,6 +1648,9 @@ class SettingsChangeIn(Strict):
 )
 def update_settings(ctx: OpContext, body: SettingsChangeIn) -> dict[str, Any]:
     values = body.model_dump(exclude_none=True)
+    period = values.pop("period_start", None), values.pop("period_end", None)
+    if (period[0] is None) != (period[1] is None):
+        raise OpError("période : donnez le début et la fin, ou aucun des deux (permanent)")
     if "departure_reminder_minutes" in values:
         values["reminder_minutes"] = values.pop("departure_reminder_minutes")
     if "activity_hours" in values:
@@ -1575,16 +1661,33 @@ def update_settings(ctx: OpContext, body: SettingsChangeIn) -> dict[str, Any]:
             raise OpError(f"heures d'activité invalides : {exc}") from exc
         if closes <= opens:
             raise OpError("heures d'activité : la fin doit suivre le début")
+    if period[0] is not None and period[1] is not None:
+        start, end = _local(period[0], ctx.tz), _local(period[1], ctx.tz)
+        if end <= start or end <= ctx.now or end - start > timedelta(days=90):
+            raise OpError("période invalide (future, au plus 90 jours)")
+        if not values or set(values) - set(TEMPORARY_KEYS):
+            raise OpError("temporaire : seulement training_preferences et activity_hours")
+        items = temporary_preferences(ctx.session, ctx.now)
+        for key, value in values.items():
+            items.append(
+                {"key": key, "value": value, "start": start.isoformat(), "end": end.isoformat()}
+            )
+        set_setting(ctx.session, TEMPORARY_SETTING, items)
+        return {"temporary": sorted(values), "start": start.isoformat(), "end": end.isoformat()}
     if "training_preferences" in values:
         current = get_setting(ctx.session, "training_preferences", {}) or {}
         values["training_preferences"] = {**current, **values["training_preferences"]}
     if "study_preferences" in values:
         current = get_setting(ctx.session, "study_preferences", {}) or {}
-        values["study_preferences"] = {**current, **values["study_preferences"]}
+        merged = {**current, **values["study_preferences"]}
+        unknown = set(merged) - STUDY_PREFERENCE_KEYS
+        if unknown:
+            raise OpError(f"préférences d'étude inconnues : {', '.join(sorted(unknown))}")
         try:
-            Preferences(**values["study_preferences"])
+            Preferences(**merged)
         except (TypeError, ValueError) as exc:
             raise OpError(f"préférences d'étude invalides : {exc}") from exc
+        values["study_preferences"] = merged
     for key, value in values.items():
         set_setting(ctx.session, key, value)
     return {"updated": sorted(values)}
@@ -1594,7 +1697,6 @@ class WindowIn(Strict):
     weekday: int = Field(ge=0, le=6, description="0 = Monday")
     start: str = Field(pattern=r"^\d{2}:\d{2}$")
     end: str = Field(pattern=r"^(\d{2}:\d{2}|24:00)$")
-    place_id: str
 
 
 class WeeklyIn(Strict):
@@ -1603,8 +1705,8 @@ class WeeklyIn(Strict):
 
 @operation(
     "set_weekly_availability",
-    "Replace the permanent weekly windows in which flexible work may be planned (with the "
-    "place where the user is then). Read get_rules first and resend the full list.",
+    "Replace the permanent weekly study availability (times only: the user studies wherever "
+    "they are). Read get_rules first and resend the full list.",
     WeeklyIn,
     mutates=True,
     replan=True,
@@ -1615,12 +1717,7 @@ def set_weekly_availability(ctx: OpContext, body: WeeklyIn) -> dict[str, Any]:
         start, end = _minute(window.start), _minute(window.end)
         if end <= start:
             raise OpError("fin avant début")
-        _place_exists(ctx, window.place_id)
-        rows.append(
-            AvailabilityRow(
-                weekday=window.weekday, start_minute=start, end_minute=end, place_id=window.place_id
-            )
-        )
+        rows.append(AvailabilityRow(weekday=window.weekday, start_minute=start, end_minute=end))
     ctx.session.execute(delete(AvailabilityRow))
     ctx.session.add_all(rows)
     return {"windows": len(rows)}
@@ -1698,17 +1795,25 @@ def _minute(text: str) -> int:
 
 class ExceptionIn(Strict):
     day: date
+    last_day: date | None = Field(
+        default=None, description="Same hours every day from day to last_day (at most 31 days)"
+    )
     start: str = Field(default="00:00", pattern=r"^\d{2}:\d{2}$")
     end: str = Field(default="24:00", pattern=r"^(\d{2}:\d{2}|24:00)$")
-    available: bool = Field(description="True = extra free time; False = blocked time")
-    place_id: str | None = Field(default=None, description="Required when available")
+    available: bool = Field(description="True = extra free time; False = unavailable")
+    applies_to: Literal["all", "study", "training", "personal", "task"] = Field(
+        default="all",
+        description="all = general unavailability (every flexible activity); otherwise only "
+        "that category",
+    )
     reason: str = Field(default="", max_length=300)
 
 
 @operation(
     "add_availability_exception",
-    "Dated exception to the weekly rules: block time (not available) or open extra time "
-    "(available, at a place). Does not override fixed commitments.",
+    "Dated exception, for every flexible activity or one category: unavailable time, or "
+    "extra time (study, or a category that has windows). One day or a range of days. Does not "
+    "override fixed commitments.",
     ExceptionIn,
     mutates=True,
     replan=True,
@@ -1717,20 +1822,23 @@ def add_availability_exception(ctx: OpContext, body: ExceptionIn) -> dict[str, A
     start, end = _minute(body.start), _minute(body.end)
     if end <= start:
         raise OpError("fin avant début")
-    if body.available and body.place_id is None:
-        raise OpError("indiquez où l'utilisateur sera pendant ce temps libre")
-    _place_exists(ctx, body.place_id)
-    row = AvailabilityExceptionRow(
-        day=body.day,
-        start_minute=start,
-        end_minute=end,
-        available=body.available,
-        place_id=body.place_id,
-        reason=body.reason,
-    )
-    ctx.session.add(row)
+    last = body.last_day or body.day
+    if last < body.day or (last - body.day).days > 31:
+        raise OpError("plage de jours invalide (au plus 31 jours)")
+    rows = [
+        AvailabilityExceptionRow(
+            day=body.day + timedelta(days=offset),
+            start_minute=start,
+            end_minute=end,
+            available=body.available,
+            kind=None if body.applies_to == "all" else body.applies_to,
+            reason=body.reason,
+        )
+        for offset in range((last - body.day).days + 1)
+    ]
+    ctx.session.add_all(rows)
     ctx.session.flush()
-    return {"exception_id": str(row.id)}
+    return {"exception_ids": [str(r.id) for r in rows]}
 
 
 class IdIn(Strict):
@@ -1953,41 +2061,49 @@ class ResidenceAlternationIn(Strict):
         description="Local date of ONE change the user stated (e.g. 'this Friday evening I go "
         "to dad's' -> that Friday, residences=[dad, mum])"
     )
-    switch_at: str = Field(
-        default="12:00",
+    switch_at: str | None = Field(
+        default=None,
         pattern=r"^\d{2}:\d{2}$",
-        description="Local time of every change: before it the previous residence (morning), "
-        "from it the next one (evening). Omit unless the user gave an explicit clock time "
-        "('Friday evening' = the default)",
+        description="Omit (default): the change happens after the last class of the change day; "
+        "a change day without classes is asked. Only an explicit time the user gives for EVERY "
+        "change",
     )
     period_days: int = Field(default=7, ge=1, le=28, description="7 = one week each")
 
 
 def _alternation_out(ctx: OpContext, periods: int) -> dict[str, Any]:
     directory = place_directory(ctx.session)
-    alternation = residence_alternation(ctx.session, directory, ctx.tz)
+    alternation = residence_alternation(ctx.session, directory, ctx.tz, ctx.now)
     if alternation is None:
         return {"residence_alternation": None}
     stays = declared_stays(ctx.session, directory)
-    first = alternation.index_at(ctx.now)
+    today = ctx.now.astimezone(ctx.tz).date()
+    first = (today - alternation.first_day).days // alternation.period_days
     upcoming = []
     for index in range(first, first + periods):
-        start, end = alternation.switch_moment(index), alternation.switch_moment(index + 1)
         place = alternation.residences[index % len(alternation.residences)]
+        start, end = alternation.switch_moment(index), alternation.switch_moment(index + 1)
+        low = start or datetime.combine(alternation.change_day(index), time(0), tzinfo=ctx.tz)
+        high = end or datetime.combine(
+            alternation.change_day(index + 1) + timedelta(days=1), time(0), tzinfo=ctx.tz
+        )
         exceptions = [
             {"place_id": x.place.id, "start": x.start.isoformat(), "end": x.end.isoformat()}
             for x in stays
-            if x.start < end and start < x.end
+            if x.start < high and low < x.end
         ]
         upcoming.append(
             {
-                "start": max(start, ctx.now).isoformat(),
-                "end": end.isoformat(),
+                "start": None if start is None else max(start, ctx.now).isoformat(),
+                "start_day": alternation.change_day(index).isoformat(),
+                "end": None if end is None else end.isoformat(),
+                "end_day": alternation.change_day(index + 1).isoformat(),
                 "place_id": place.id,
                 "place_name": place.name,
                 "exceptions": exceptions,
             }
         )
+        # start/end None: change time unknown (no class that day): to ask the user.
     return {
         "residence_alternation": get_setting(ctx.session, ALTERNATION_SETTING),
         "periods": upcoming,
@@ -1997,9 +2113,10 @@ def _alternation_out(ctx: OpContext, periods: int) -> dict[str, Any]:
 @operation(
     "set_residence_alternation",
     "Recurring residence schedule from ONE dated statement: residences rotate every period_days "
-    "at switch_at (e.g. weekly on Friday: morning at the previous residence, evening at the "
-    "next). Replaces the current schedule (permanent change). One-off changes are planned "
-    "locations (set_planned_location) and never shift this recurrence.",
+    "(e.g. weekly on Friday: the user leaves from the current residence, attends university "
+    "and goes to the next one after the last class). Replaces the current schedule (permanent "
+    "change). One-off changes are planned locations (set_planned_location) and never shift "
+    "this recurrence.",
     ResidenceAlternationIn,
     mutates=True,
     replan=True,
@@ -2009,10 +2126,11 @@ def set_residence_alternation(ctx: OpContext, body: ResidenceAlternationIn) -> d
         raise OpError("une résidence est citée deux fois")
     for place_id in body.residences:
         _place_exists(ctx, place_id)
-    try:
-        time.fromisoformat(body.switch_at)
-    except ValueError as exc:
-        raise OpError(f"heure de changement invalide : {body.switch_at}") from exc
+    if body.switch_at is not None:
+        try:
+            time.fromisoformat(body.switch_at)
+        except ValueError as exc:
+            raise OpError(f"heure de changement invalide : {body.switch_at}") from exc
     set_setting(
         ctx.session,
         ALTERNATION_SETTING,
@@ -2024,6 +2142,44 @@ def set_residence_alternation(ctx: OpContext, body: ResidenceAlternationIn) -> d
         },
     )
     return _alternation_out(ctx, 4)
+
+
+class ResidenceSwitchIn(Strict):
+    day: date = Field(description="A change day (get_residence_schedule)")
+    at: str | None = Field(
+        default=None,
+        pattern=r"^\d{2}:\d{2}$",
+        description="Local time of the change that day; omit to remove a stated time",
+    )
+
+
+@operation(
+    "set_residence_switch",
+    "Time of the residence change on ONE change day, as the user states it (typically a "
+    "change day without classes, which Tempo asks about).",
+    ResidenceSwitchIn,
+    mutates=True,
+    replan=True,
+)
+def set_residence_switch(ctx: OpContext, body: ResidenceSwitchIn) -> dict[str, Any]:
+    alternation = residence_alternation(ctx.session, place_directory(ctx.session), ctx.tz, ctx.now)
+    if alternation is None:
+        raise OpError("aucune alternance de résidences : rien à régler")
+    if (body.day - alternation.first_day).days % alternation.period_days:
+        raise OpError("ce jour n'est pas un jour de changement de résidence")
+    switches = dict(get_setting(ctx.session, SWITCHES_SETTING, {}) or {})
+    if body.at is None:
+        switches.pop(body.day.isoformat(), None)
+    else:
+        try:
+            time.fromisoformat(body.at)
+        except ValueError as exc:
+            raise OpError(f"heure invalide : {body.at}") from exc
+        switches[body.day.isoformat()] = body.at
+    today = ctx.now.astimezone(ctx.tz).date()
+    switches = {d: t for d, t in switches.items() if date.fromisoformat(d) >= today}
+    set_setting(ctx.session, SWITCHES_SETTING, switches)
+    return {"residence_change_times": switches}
 
 
 @operation(
@@ -2155,6 +2311,12 @@ class PlanIn(Strict):
         default="local",
         description="global ONLY when the user explicitly asks to reorganise everything",
     )
+    allow_today: bool = Field(
+        default=False,
+        description="True ONLY when the user explicitly asks to rearrange today: today's "
+        "existing items may then move without a proposal (otherwise moves of today's items "
+        "are proposed for approval)",
+    )
     dry_run: bool = Field(
         default=False, description="Simulate: compute and report, publish nothing"
     )
@@ -2178,7 +2340,13 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
     savepoint = ctx.session.begin_nested()
     try:
         version = replan(
-            ctx.session, ctx.routing, ctx.now, ctx.tz, reason="assistant", mode=body.mode
+            ctx.session,
+            ctx.routing,
+            ctx.now,
+            ctx.tz,
+            reason="assistant",
+            mode=body.mode,
+            allow_today=body.allow_today,
         )
         plan = dict(version.summary)
         result = {
@@ -2188,8 +2356,12 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
             "status": plan.get("status"),
             "diff": plan.get("diff"),
             "unplanned_minutes": plan.get("unplanned_minutes"),
+            "deadline_misses": plan.get("deadline_misses"),
             "hard_deadline_misses": plan.get("hard_deadline_misses"),
-            "unplaced_activities": plan.get("unplaced_trainings"),
+            "unplaced_activities": plan.get("unplaced_activities"),
+            "pending_approval": plan.get("pending_approval"),
+            "questions": plan.get("questions"),
+            "unconfirmed_journeys": plan.get("unconfirmed_journeys"),
             "issues": plan.get("issues"),
             "violations": plan.get("violations"),
         }
@@ -2209,13 +2381,9 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
     explain = explain_plan(ctx, NoInput())["active_plan"] if not body.dry_run else None
     if explain is not None:
         result["explanation"] = {
-            k: explain.get(k) for k in ("unplanned_minutes", "late_minutes", "unplaced_activities")
+            k: explain.get(k) for k in ("unplanned_minutes", "unplaced_activities")
         }
     return result
-
-
-POSTPONE_STEPS_DAYS = (2, 7, 14, 28)
-MAX_ALTERNATIVE_TASKS = 3
 
 
 def _simulate(ctx: OpContext, change: Callable[[StudyTaskRow], None], task_id: str) -> Any:
@@ -2235,20 +2403,20 @@ def _simulate(ctx: OpContext, change: Callable[[StudyTaskRow], None], task_id: s
     return {
         "valid": version.state == "active",
         "unplanned_minutes": unplanned,
-        "late_minutes": int(plan.get("late_minutes", {}).get(task_id, 0)),
-        "strict_miss": task_id in plan.get("hard_deadline_misses", []),
+        "deadline_miss": task_id in plan.get("deadline_misses", []),
         "resolves": version.state == "active"
         and unplanned == 0
-        and task_id not in plan.get("hard_deadline_misses", []),
+        and task_id not in plan.get("deadline_misses", []),
     }
 
 
 @operation(
     "propose_alternatives",
-    "When the active plan is partial (remainder or missed strict deadline), SIMULATE "
+    "When the active plan is partial (work that does not fit before its deadline), SIMULATE "
     "deterministic alternatives per affected task: postpone the deadline (smallest tried "
-    "postponement that resolves), make a strict deadline soft, or reduce the volume to what "
-    "fits. Nothing is published or changed; apply one only after the user agrees.",
+    "postponement that resolves) or reduce the volume to what fits. Nothing is published or "
+    "changed; apply one only after the user agrees (a strict deadline is never relaxed "
+    "without it).",
     NoInput,
     mutates=False,
 )
@@ -2258,7 +2426,7 @@ def propose_alternatives(ctx: OpContext, _: NoInput) -> dict[str, Any]:
         return {"status": "no_plan", "detail": "aucun planning publié : lancez plan_now"}
     plan = dict(version.summary)
     unplanned: dict[str, int] = plan.get("unplanned_minutes", {}) or {}
-    misses: list[str] = plan.get("hard_deadline_misses", []) or []
+    misses: list[str] = plan.get("deadline_misses", []) or []
     affected = [t for t in dict.fromkeys([*misses, *unplanned]) if misses.count(t) or unplanned[t]]
     if not affected:
         return {"status": "nothing_to_resolve", "detail": "tout le travail est planifié"}
@@ -2304,14 +2472,6 @@ def propose_alternatives(ctx: OpContext, _: NoInput) -> dict[str, Any]:
                             }
                         )
                         break
-            if row.target_kind == TargetKind.HARD:
-
-                def soften(task: StudyTaskRow) -> None:
-                    task.target_kind = TargetKind.SOFT
-
-                alternatives.append(
-                    {"kind": "make_deadline_soft", **_simulate(ctx, soften, task_id)}
-                )
         except RoutingUnavailableError as exc:
             return {"status": "error", "detail": f"routage indisponible : {exc}"}
         except PlanningNotConfiguredError as exc:
@@ -2321,7 +2481,8 @@ def propose_alternatives(ctx: OpContext, _: NoInput) -> dict[str, Any]:
                 "task_id": task_id,
                 "title": row.subject,
                 "unplanned_minutes": missing,
-                "strict_miss": task_id in misses,
+                "strict": row.target_kind == TargetKind.HARD,
+                "deadline_miss": task_id in misses,
                 "alternatives": alternatives,
             }
         )

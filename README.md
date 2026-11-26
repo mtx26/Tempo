@@ -31,9 +31,12 @@ normalement. Exemples :
 - « Solfège tous les mardis à 19 h jusqu'à fin janvier » ; « Annule celui de la semaine
   prochaine » ; « À partir de février, c'est à 20 h ».
 - « J'ai fait 45 minutes de physique » ; « En fait c'était 30 » ; « Session terminée ».
-- « Demain je dors chez papa » ; « Je ne suis pas disponible samedi matin ».
-- « J'alterne entre chez maman et chez papa chaque vendredi : ce vendredi soir je vais chez
-  papa » ; « Cette semaine je reste chez maman » (exception) ; « Où je dors la semaine
+- « Demain je dors chez papa » ; « Je ne suis pas disponible samedi matin » (toutes les
+  activités) ; « Pas d'entraînement jeudi » (cette catégorie seulement) ; « Cette semaine,
+  plutôt le soir pour le sport » (préférence temporaire, elle expire seule).
+- « J'alterne entre chez maman et chez papa chaque vendredi : ce vendredi je vais chez
+  papa après les cours » (changement après le dernier cours ; sans cours ce jour-là, Tempo
+  demande l'heure) ; « Cette semaine je reste chez maman » (exception) ; « Où je dors la semaine
   prochaine ? ».
 - « Ajoute le lieu Chez papa : rue de l'Exemple 12, 7000 Mons » (adresse cherchée dans le géocodeur
   local, à confirmer) ; « Depuis chez maman, on me dépose à l'arrêt de bus du village en
@@ -41,15 +44,17 @@ normalement. Exemples :
 - « Comment j'arrive au campus pour 8 h ? » ; « Rappelle-moi 30 min avant le médecin » ;
   « Préviens-moi 60 et 15 minutes avant chaque départ ».
 - « Qu'est-ce qui a changé cette nuit ? » ; « Pourquoi la chimie n'est pas planifiée ? » ;
-  « Accepte la proposition » ; « Réorganise toute ma semaine ».
+  « Accepte la proposition » ; « Réorganise ma journée » ; « Réorganise toute ma semaine » ;
+  « J'ai fini mon rapport » (séances restantes retirées) ; « Verrouille mon entraînement ».
 
 Home Assistant affiche passivement : calendrier `calendar.tempo`, travail restant
 `todo.tempo_tasks`, capteurs (prochain événement, prochain départ, état du plan, propositions,
 …) et notifications. Il n'y a ni bouton ni formulaire métier.
 
-Sans clé LLM, la conversation fonctionne en mode réduit (analyseur déterministe : ajout de
-volumes d'étude, d'entraînements, de courses, questions courantes, « replanifie », « accepte »,
-« c'est fait ») ; synchronisations, planification, trajets et rappels restent automatiques.
+La conversation passe par Gemini : s'il est indisponible, Tempo le dit et ne modifie rien.
+Synchronisations, planification, trajets, rappels et contrôle de départ ne dépendent jamais du
+LLM et restent automatiques. Les éléments déjà prévus aujourd'hui ne bougent qu'avec votre
+accord (propositions visibles dans le capteur « Approbations en attente »).
 
 ## Développement local
 

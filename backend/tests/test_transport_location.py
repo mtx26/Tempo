@@ -5,11 +5,13 @@ freshness and accuracy; future days start from the planned location, else home; 
 ambiguous, ask instead of guessing.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from tempo.transport.location import (
+    Alternation,
     DeclaredStay,
     PhonePosition,
     PositionStatus,
@@ -90,18 +92,21 @@ def test_position_from_the_future_is_not_trusted() -> None:
 # --- base at an instant ---------------------------------------------------------------------
 
 
-def test_base_is_the_planned_location_covering_the_instant_else_home() -> None:
+ALT = Alternation((HOME,), date(2026, 11, 27), 7, ZoneInfo("Europe/Brussels"))
+
+
+def test_base_is_the_planned_location_covering_the_instant_else_the_residence() -> None:
     weekend = DeclaredStay(
         POOL, datetime(2026, 12, 2, 18, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)
     )
-    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), [weekend], HOME) == POOL
-    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), [], HOME) == HOME
+    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), [weekend], ALT) == POOL
+    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), [], ALT) == HOME
     # The base changes during a day: home in the morning, the pool from the evening on.
     evening = DeclaredStay(
         POOL, datetime(2026, 12, 3, 18, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)
     )
-    assert base_at(datetime(2026, 12, 3, 8, tzinfo=UTC), [evening], HOME) == HOME
-    assert base_at(datetime(2026, 12, 3, 19, tzinfo=UTC), [evening], HOME) == POOL
+    assert base_at(datetime(2026, 12, 3, 8, tzinfo=UTC), [evening], ALT) == HOME
+    assert base_at(datetime(2026, 12, 3, 19, tzinfo=UTC), [evening], ALT) == POOL
 
 
 def test_overlapping_planned_locations_are_ambiguous_not_guessed() -> None:
@@ -109,4 +114,4 @@ def test_overlapping_planned_locations_are_ambiguous_not_guessed() -> None:
         DeclaredStay(HOME, datetime(2026, 12, 2, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)),
         DeclaredStay(POOL, datetime(2026, 12, 3, 6, tzinfo=UTC), datetime(2026, 12, 4, tzinfo=UTC)),
     ]
-    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), stays, HOME) is None
+    assert base_at(datetime(2026, 12, 3, 12, tzinfo=UTC), stays, ALT) is None

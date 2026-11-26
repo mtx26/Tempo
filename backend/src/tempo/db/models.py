@@ -159,6 +159,7 @@ class StudyBlockRow(Base):
     end_at: Mapped[datetime]
     locked: Mapped[bool] = mapped_column(default=False, server_default="false")
     state: Mapped[str] = mapped_column(String(20), default="planned", server_default="planned")
+    """planned, done, partial, missed, or cancelled (its task was completed: never notified)."""
 
 
 class ScheduleVersion(Base):
@@ -235,7 +236,8 @@ class PlaceAliasRow(Base):
 
 
 class AvailabilityRow(Base):
-    """Weekly window in which study is allowed, at a place (local wall-clock time)."""
+    """Weekly window in which study is allowed (local wall-clock time). Time only: the user
+    studies wherever they are (residence, university, a stay elsewhere)."""
 
     __tablename__ = "availability_window"
     __table_args__ = (
@@ -248,7 +250,6 @@ class AvailabilityRow(Base):
     """0 = Monday."""
     start_minute: Mapped[int]
     end_minute: Mapped[int]
-    place_id: Mapped[str] = mapped_column(ForeignKey("place.id", ondelete="CASCADE"))
 
 
 class CategoryWindowRow(Base):
@@ -299,6 +300,7 @@ class ActivityRow(Base):
         ),
         CheckConstraint("latest_end_at > earliest_start_at", name="window"),
         UniqueConstraint("source", "source_ref", name="source_ref"),
+        CheckConstraint("rest_days BETWEEN 0 AND 7", name="rest_days_range"),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     kind: Mapped[str] = mapped_column(String(10))
@@ -343,6 +345,10 @@ class ActivityRow(Base):
     task_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("study_task.id", ondelete="CASCADE")
     )
+    indoor: Mapped[bool] = mapped_column(default=False, server_default="false")
+    """Trainings: darkness only matters outdoors (default)."""
+    rest_days: Mapped[int] = mapped_column(default=0, server_default="0")
+    """Explicit recovery (coach or user): calendar days after the previous training."""
 
 
 class RecurrenceSeriesRow(Base):
@@ -374,19 +380,26 @@ class RecurrenceExceptionRow(Base):
 
 
 class AvailabilityExceptionRow(Base):
-    """Dated exception to the weekly availability: extra time (``available``) or blocked time."""
+    """Dated availability exception: blocked time (``available`` false) or extra time.
+
+    ``kind`` NULL applies to every flexible activity (general unavailability); otherwise only
+    to one category (``study``, ``training``, ``personal``, ``task``). Extra time opens study
+    time, or widens the windows of a category that has some."""
 
     __tablename__ = "availability_exception"
     __table_args__ = (
         CheckConstraint("end_minute > start_minute", name="positive_duration"),
         CheckConstraint("start_minute >= 0 AND end_minute <= 1440", name="minute_range"),
+        CheckConstraint(
+            "kind IS NULL OR kind IN ('study', 'training', 'personal', 'task')", name="kind"
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     day: Mapped[date] = mapped_column(Date)
     start_minute: Mapped[int]
     end_minute: Mapped[int]
     available: Mapped[bool]
-    place_id: Mapped[str | None] = mapped_column(ForeignKey("place.id", ondelete="CASCADE"))
+    kind: Mapped[str | None] = mapped_column(String(10))
     reason: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 

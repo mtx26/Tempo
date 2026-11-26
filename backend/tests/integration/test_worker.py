@@ -10,6 +10,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from tempo.const import MAX_ICS_BYTES
 from tempo.db.models import (
     Base,
     FixedEventRow,
@@ -21,15 +22,7 @@ from tempo.db.models import (
     ScheduleVersion,
 )
 from tempo.db.store import active_version, get_setting, set_setting
-from tempo.worker.jobs import (
-    MAX_ICS_BYTES,
-    JobError,
-    departure_job,
-    fetch_ics,
-    ics_sync,
-    replan_job,
-    run_job,
-)
+from tempo.worker.jobs import JobError, departure_job, fetch_ics, ics_sync, replan_job, run_job
 from tests.test_engine import FakeRouting
 
 pytestmark = pytest.mark.integration
@@ -219,13 +212,16 @@ def test_departure_check_from_fresh_phone_position(sessions: sessionmaker[Sessio
     assert status == "at_risk"  # 30 min trip, arrives 09:51 < 10:00 but inside the 10 min margin
     with sessions() as s:
         state = get_setting(s, "departure_check")
-        assert state["status"] == "at_risk" and state["event_title"] == "Campus"
+        assert state["status"] == "at_risk" and state["event_title"] == "Analyse"
+        official = datetime.fromisoformat(state["event_start"])
+        assert official == datetime(2026, 12, 7, 10, 0, tzinfo=TZ)  # official start (C18)
         alerts = [
             n
             for n in s.scalars(select(NotificationRow))
             if n.kind == "departure" and "Arrivée juste" in n.title
         ]
-        assert len(alerts) == 1 and "Campus" in alerts[0].title
+        assert len(alerts) == 1 and "Analyse" in alerts[0].title
+        assert "Début : 10:00" in alerts[0].message
     departure_job(sessions, FakeRouting(), now + timedelta(seconds=30), TZ)
     with sessions() as s:
         assert len([n for n in s.scalars(select(NotificationRow)) if n.kind == "departure"]) == 2
@@ -245,7 +241,7 @@ def test_departure_reminder_follows_the_plan_without_gps(
             n for n in s.scalars(select(NotificationRow)) if n.kind == "departure_reminder"
         ]
         assert len(reminders) == 1
-        assert "prévu au planning à 09:20" in reminders[0].message
+        assert "début 10:00, départ prévu 09:20" in reminders[0].message
         version = active_version(s)
         assert version is not None
         assert any(t["returning"] for t in version.summary["travel"])

@@ -14,8 +14,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from tempo.ai.llm import LLM_MODEL_SETTING, list_models, selected_model
+from tempo.ai.llm import list_models, selected_model
 from tempo.api.location import SessionDep
+from tempo.const import LLM_MODEL_SETTING
 from tempo.db.store import audit, set_setting
 
 logger = logging.getLogger(__name__)

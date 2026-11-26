@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 
+from tempo.const import ARRIVED_RADIUS_M, BUFFER, LEAVE_NOW_WINDOW
 from tempo.timeutil import utc
 from tempo.transport.itinerary import Objective, TripQuery, find_trips, journey_notes
 from tempo.transport.location import (
@@ -25,10 +26,6 @@ from tempo.transport.location import (
     assess_position,
 )
 from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
-
-DEFAULT_BUFFER = timedelta(minutes=10)
-LEAVE_NOW_WINDOW = timedelta(minutes=5)
-ARRIVED_RADIUS_M = 150.0
 
 
 class DepartureStatus(StrEnum):
@@ -61,17 +58,20 @@ def check_departure(
     provider: RoutingProvider,
     *,
     now: datetime,
-    buffer: timedelta = DEFAULT_BUFFER,
+    buffer: timedelta = BUFFER,
     planned_departure: datetime | None = None,
 ) -> DepartureAdvice:
     now_u, start = utc(now), utc(target.start)
+    if target.place is None:
+        raise ValueError("departure check needs a known place")
+    destination = target.place.coordinates
     status = assess_position(position, now)
     if status is not PositionStatus.FRESH or position is None:
         return DepartureAdvice(
             DepartureStatus.UNKNOWN_POSITION, reason=f"phone position is {status.value}"
         )
     here = position.coordinates
-    if here.distance_m(target.place.coordinates) <= ARRIVED_RADIUS_M:
+    if here.distance_m(destination) <= ARRIVED_RADIUS_M:
         return DepartureAdvice(DepartureStatus.ALREADY_THERE)
     if start <= now_u:
         return DepartureAdvice(
@@ -87,7 +87,7 @@ def check_departure(
                 provider,
                 TripQuery(
                     here,
-                    target.place.coordinates,
+                    destination,
                     depart_after=now_u,
                     arrive_before=deadline,
                     objective=Objective.LATEST_DEPARTURE,
@@ -110,7 +110,7 @@ def check_departure(
             provider,
             TripQuery(
                 here,
-                target.place.coordinates,
+                destination,
                 depart_after=now_u,
                 objective=Objective.EARLIEST_ARRIVAL,
             ),

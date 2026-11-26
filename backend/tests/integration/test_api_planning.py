@@ -69,9 +69,7 @@ def configure(api: TestClient) -> None:
             longitude=lon,
             aliases=aliases,
         )
-    windows = [
-        {"weekday": d, "start": "08:00", "end": "20:00", "place_id": "home"} for d in range(7)
-    ]
+    windows = [{"weekday": d, "start": "08:00", "end": "20:00"} for d in range(7)]
     done(api, "set_weekly_availability", windows=windows)
     done(api, "set_residence_alternation", residences=["home"], from_date="2026-01-02")
     patch = {
@@ -82,7 +80,14 @@ def configure(api: TestClient) -> None:
 
 
 def add_maths(api: TestClient, minutes: int) -> None:
-    done(api, "create_task", title="maths", estimated_minutes=minutes, target_date="2026-12-11")
+    done(
+        api,
+        "create_task",
+        title="maths",
+        estimated_minutes=minutes,
+        splittable=True,
+        target_date="2026-12-11",
+    )
 
 
 def seed_events(engine: Engine) -> None:
@@ -161,7 +166,7 @@ def test_configuration_round_trip_and_validation(api: TestClient) -> None:
     assert "résidence" in op(api, "delete_place", place_id="home").json()["detail"]
     prefs = {"preferred_block_minutes": 7}
     assert op(api, "update_settings", study_preferences=prefs).status_code == 422
-    window = [{"weekday": 0, "start": "08:00", "end": "07:00", "place_id": "home"}]
+    window = [{"weekday": 0, "start": "08:00", "end": "07:00"}]
     assert op(api, "set_weekly_availability", windows=window).status_code == 422
 
 
@@ -326,25 +331,3 @@ def test_locking_the_same_block_twice_creates_one_lock(api: TestClient, engine: 
     for _ in range(2):
         done(api, "set_lock", target_id=f"block:{block.id}", locked=True)
     assert len(locked_blocks(engine)) == 1
-
-
-def test_conversational_questions_are_answered_from_stored_data(
-    api: TestClient, engine: Engine
-) -> None:
-    configure(api)
-    seed_events(engine)
-    add_maths(api, 150)
-    run_replan(engine)
-
-    def ask(text: str) -> str:
-        response = api.post("/v1/conversation", json={"text": text}, headers=AUTH)
-        assert response.status_code == 200
-        result: dict[str, Any] = response.json()
-        assert result["fallback"] is True and result["changed"] is False
-        return str(result["reply"])
-
-    agenda = ask("Qu'est-ce que j'ai le 07/12/2026 ?")
-    assert agenda.startswith("Le 07/12 :") and "cours : Analyse" in agenda and "trajet" in agenda
-    assert "Rien de prévu" in ask("programme du 25/12/2026")
-    assert "2 h 30" in ask("combien d'heures d'étude il me reste ?")
-    assert ask("prochain départ ?")

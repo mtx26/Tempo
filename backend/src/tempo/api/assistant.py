@@ -1,8 +1,9 @@
 """Conversation and operation routes (bearer token required, mounted in ``api.app``).
 
 - ``POST /v1/conversation``: the natural-language interface used by Home Assistant (text or
-  voice). The LLM assistant runs catalogue operations; without LLM (no key, outage, refusal)
-  the deterministic fallback (``assistant.fallback``) answers through the same operations.
+  voice). The Gemini assistant runs catalogue operations; when Gemini is unavailable (not
+  configured, outage, refusal) the error is reported to the user as is: there is no second
+  conversational path. Planning and background jobs never depend on it.
 - ``GET /v1/operations`` / ``POST /v1/operations/{name}``: the typed operation catalogue for
   authenticated clients (same validation and rules as the assistant). An ``Idempotency-Key``
   header makes a mutation safe to retry.
@@ -10,7 +11,7 @@
 
 import hashlib
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -18,17 +19,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 
 from tempo.api.location import SessionDep
-from tempo.assistant import fallback
 from tempo.assistant.agent import Assistant, LLMUnavailableError
 from tempo.assistant.catalog import CATALOG, OpContext, run_operation
+from tempo.const import HISTORY_TURNS, HISTORY_WINDOW
 from tempo.db.models import ConversationTurnRow
 from tempo.db.store import get_setting, set_setting
 from tempo.transport.routing import RoutingProvider
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
-HISTORY_TURNS = 12
-HISTORY_WINDOW = timedelta(hours=6)
 
 
 def _context(request: Request, session: Any, actor: str) -> OpContext:
@@ -129,30 +128,32 @@ def _remember(session: Any, conversation_id: str, role: str, content: str) -> No
 @router.post("/conversation")
 def conversation(body: ConversationIn, request: Request, session: SessionDep) -> dict[str, Any]:
     assistant: Assistant | None = getattr(request.app.state, "assistant", None)
-    if assistant is not None:
-        ctx = _context(request, session, "assistant")
-        history = _history(session, body.conversation_id, ctx.now)
-        try:
-            reply = assistant.reply(ctx, body.text, history)
-        except LLMUnavailableError as exc:
-            logger.warning("assistant unavailable (%s): deterministic fallback", exc)
-        else:
-            _remember(session, body.conversation_id, "user", body.text)
-            _remember(session, body.conversation_id, "assistant", reply.text)
-            return {
-                "reply": reply.text,
-                "used_llm": True,
-                "operations": reply.operations,
-                "changed": bool(ctx.changed),
-            }
+    if assistant is None:
+        return _unavailable("assistant Gemini non configuré (compte de service Vertex AI)")
     ctx = _context(request, session, "assistant")
-    result = fallback.reply(ctx, body.text[:2000])
+    history = _history(session, body.conversation_id, ctx.now)
+    try:
+        reply = assistant.reply(ctx, body.text, history)
+    except LLMUnavailableError as exc:
+        logger.warning("assistant unavailable: %s", exc)
+        return _unavailable(str(exc))
     _remember(session, body.conversation_id, "user", body.text)
-    _remember(session, body.conversation_id, "assistant", result["reply"])
+    _remember(session, body.conversation_id, "assistant", reply.text)
     return {
-        "reply": result["reply"],
+        "reply": reply.text,
+        "used_llm": True,
+        "operations": reply.operations,
+        "changed": bool(ctx.changed),
+    }
+
+
+def _unavailable(reason: str) -> dict[str, Any]:
+    """Gemini could not answer: nothing was changed, the user is told so."""
+    return {
+        "reply": f"Je ne peux pas traiter la demande pour l'instant : {reason}. Rien n'a été "
+        "modifié ; réessayez dans un moment.",
         "used_llm": False,
-        "operations": ctx.changed,
-        "changed": result["changed"],
-        "fallback": True,
+        "operations": [],
+        "changed": False,
+        "error": "llm_unavailable",
     }

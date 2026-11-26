@@ -104,44 +104,63 @@ def test_unrealistic_journeys_are_rejected_and_motis_limit_is_used() -> None:
 # --- residence alternation ------------------------------------------------------------------
 
 
-def friday_noon_alternation() -> Alternation:
-    """'Friday 27/11 in the evening I go to B', then weekly: morning A/B, evening B/A."""
-    return Alternation((OTHER, HOUSE), date(2026, 11, 27), time(12, 0), 7, TZ)
+def friday_alternation(**kw: object) -> Alternation:
+    """'Friday 27/11 I go to B after class', then weekly."""
+    return Alternation((OTHER, HOUSE), date(2026, 11, 27), 7, TZ, **kw)  # type: ignore[arg-type]
 
 
 def local(day: int, hour: int, month: int = 11) -> datetime:
     return datetime(2026, month, day, hour, 0, tzinfo=TZ)
 
 
-def test_residences_switch_every_friday_at_noon() -> None:
-    alt = friday_noon_alternation()
-    assert alt.residence_at(local(27, 9)) == HOUSE  # Friday morning: previous residence
-    assert alt.residence_at(local(27, 18)) == OTHER  # Friday evening: the declared one
+def test_residence_changes_after_the_last_class_of_the_change_day() -> None:
+    """C12: the change moment comes from the timetable (resolved by the caller)."""
+    alt = friday_alternation(
+        switches={date(2026, 11, 27): local(27, 16), date(2026, 12, 4): local(4, 12, 12)}
+    )
+    assert alt.residence_at(local(27, 9)) == HOUSE  # Friday before the last class
+    assert alt.residence_at(local(27, 17)) == OTHER  # after it: the next residence
     assert alt.residence_at(local(30, 8)) == OTHER
     assert alt.residence_at(local(4, 11, 12)) == OTHER
-    assert alt.residence_at(local(4, 13, 12)) == HOUSE  # next Friday evening
-    assert alt.residence_at(local(20, 10)) == OTHER  # before the statement: same rhythm back
+    assert alt.residence_at(local(4, 13, 12)) == HOUSE
+    assert alt.residence_at(local(19, 10)) == OTHER  # before the statement: same rhythm back
 
 
-def test_alternation_keeps_local_time_across_daylight_saving() -> None:
-    alt = Alternation((OTHER, HOUSE), date(2026, 3, 20), time(12, 0), 7, TZ)  # DST on 29/03
-    assert alt.switch_moment(1).astimezone(TZ).hour == 12
-    assert alt.residence_at(datetime(2026, 3, 27, 11, 59, tzinfo=TZ)) == OTHER
-    assert alt.residence_at(datetime(2026, 3, 27, 12, 0, tzinfo=TZ)) == HOUSE
+def test_change_day_without_known_moment_is_unknown_and_asked() -> None:
+    """C12: no class and no stated time: never an arbitrary fixed time."""
+    alt = friday_alternation()
+    assert alt.residence_at(local(27, 9)) is None
+    assert alt.residence_at(local(28, 9)) == OTHER and alt.residence_at(local(26, 9)) == HOUSE
+    assert alt.unknown_days(local(26, 0), local(5, 0, 12)) == [
+        date(2026, 11, 27),
+        date(2026, 12, 4),
+    ]
+    single = Alternation((HOUSE,), date(2026, 11, 27), 7, TZ)
+    assert (
+        single.residence_at(local(27, 9)) == HOUSE
+        and single.unknown_days(local(26, 0), local(5, 0, 12)) == []
+    )
+
+
+def test_a_stated_time_for_every_change_keeps_local_time_across_daylight_saving() -> None:
+    alt = Alternation((OTHER, HOUSE), date(2026, 3, 20), 7, TZ, switch_at=time(18, 0))
+    moment = alt.switch_moment(1)
+    assert moment is not None and moment.astimezone(TZ).hour == 18
+    assert alt.residence_at(datetime(2026, 3, 27, 17, 59, tzinfo=TZ)) == OTHER
+    assert alt.residence_at(datetime(2026, 3, 27, 18, 0, tzinfo=TZ)) == HOUSE
 
 
 def test_exceptions_win_without_shifting_the_recurrence() -> None:
-    alt = friday_noon_alternation()
+    alt = friday_alternation(switch_at=time(18, 0))
     stay = DeclaredStay(CAMPUS, local(1, 0, 12), local(2, 0, 12))  # one-off night elsewhere
-    assert base_at(local(1, 20, 12), [stay], HOUSE, alt) == CAMPUS
-    assert base_at(local(2, 20, 12), [stay], HOUSE, alt) == OTHER  # recurrence unchanged
-    assert base_at(local(5, 20, 12), [stay], HOUSE, alt) == HOUSE
-    assert base_at(local(5, 20, 12), [], HOUSE, None) == HOUSE  # no schedule: home
+    assert base_at(local(1, 20, 12), [stay], alt) == CAMPUS
+    assert base_at(local(2, 20, 12), [stay], alt) == OTHER  # recurrence unchanged
+    assert base_at(local(5, 20, 12), [stay], alt) == HOUSE
 
 
 def test_alternation_needs_residences() -> None:
     with pytest.raises(ValueError, match="residences"):
-        Alternation((), date(2026, 11, 27), time(12, 0), 7, TZ)
+        Alternation((), date(2026, 11, 27), 7, TZ)
 
 
 def test_temporary_access_applies_in_its_period_and_wins_over_the_default() -> None:

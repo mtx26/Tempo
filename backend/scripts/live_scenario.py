@@ -68,19 +68,19 @@ for place in (
     {"place_id": "club", "name": "Club", "latitude": 50.7167, "longitude": 4.6111},
 ):
     op("upsert_place", **place)
-op("update_settings", home_place_id="home", horizon_days=7)
+op("set_residence_alternation", residences=["home"], from_date="2026-01-02")
+op("update_settings", horizon_days=7)
 op(
     "set_weekly_availability",
-    windows=[
-        {"weekday": w, "start": "08:00", "end": "20:00", "place_id": "home"} for w in range(7)
-    ],
+    windows=[{"weekday": w, "start": "08:00", "end": "20:00"} for w in range(7)],
 )
 for t in op("list_tasks")["tasks"]:
-    op("update_task", task_id=t["id"], archived=True)  # clean slate for this scenario
+    op("update_task", task_id=t["id"], completed=True)  # clean slate for this scenario
 task = op(
     "create_task",
     title="Scénario maths",
     estimated_minutes=600,
+    splittable=True,
     target_date=(day + timedelta(days=3)).isoformat(),
 )["task"]
 first = op("plan_now")
@@ -178,6 +178,7 @@ op(
     "create_task",
     title="Chimie impossible",
     estimated_minutes=3000,
+    splittable=True,
     target_date=(day).isoformat(),
     hard_deadline=True,
 )
@@ -241,7 +242,7 @@ check("assistant knows where the user will be", where.get("place_id") == "campus
 # cleanup scenario data
 for t in op("list_tasks")["tasks"]:
     if t["title"] in ("Scénario maths", "Chimie impossible"):
-        op("update_task", task_id=t["id"], archived=True)
+        op("update_task", task_id=t["id"], completed=True)
 for a in op("list_activities")["activities"]:
     if a["title"] in ("Dentiste", "Médecin", "TP", "Examen imposé", "Match"):
         op("cancel_event", activity_id=a["id"])

@@ -5,7 +5,7 @@ user-given duration ("from this house I am driven to that bus stop in 10 minutes
 routes such journeys through MOTIS from/to the access point and adds one ``ACCESS`` leg of that
 exact duration, so every caller (planning, day journeys, departure checks, conversation
 searches) gets complete door-to-door journeys without knowing about access points. A query
-point within ``SNAP_RADIUS_M`` of such a place (e.g. the phone's GPS at home) uses it too.
+point within ``ACCESS_SNAP_RADIUS_M`` of such a place (e.g. the phone's GPS at home) uses it too.
 
 Unrealistic itineraries (e.g. leaving the previous evening) are excluded with MOTIS's own
 ``maxTravelTime`` when the provider supports it, and filtered again here on the door-to-door
@@ -16,14 +16,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from tempo.const import ACCESS_SNAP_RADIUS_M, MAX_JOURNEY
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, Leg, RoutingProvider
 
 ACCESS_MODE = "ACCESS"
-SNAP_RADIUS_M = 300.0
-"""A point this close to a place with an access point is treated as that place."""
-DEFAULT_MAX_JOURNEY = timedelta(hours=3)
-"""Longest acceptable door-to-door journey unless the user sets another limit."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +55,7 @@ class AccessRouting:
         inner: RoutingProvider,
         accesses: list[Access],
         *,
-        max_journey: timedelta = DEFAULT_MAX_JOURNEY,
+        max_journey: timedelta = MAX_JOURNEY,
     ) -> None:
         self._inner = inner
         self._accesses = accesses
@@ -69,7 +66,7 @@ class AccessRouting:
         near = [
             a
             for a in self._accesses
-            if a.applies(at) and a.place.coordinates.distance_m(point) <= SNAP_RADIUS_M
+            if a.applies(at) and a.place.coordinates.distance_m(point) <= ACCESS_SNAP_RADIUS_M
         ]
         return min(
             near,

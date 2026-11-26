@@ -8,15 +8,13 @@ the runtime role (README.md). Concurrent runs are serialised by an advisory lock
 
 import re
 import sys
-from pathlib import Path
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine, text
 
+from tempo.const import DOCKER_SECRETS_DIR
 from tempo.db.migrations import upgrade_to_head
-
-SECRETS_DIR = Path("/run/secrets")
 
 
 class MigrationSettings(BaseSettings):
@@ -24,7 +22,7 @@ class MigrationSettings(BaseSettings):
         env_prefix="TEMPO_",
         extra="ignore",
         hide_input_in_errors=True,
-        secrets_dir=SECRETS_DIR if SECRETS_DIR.is_dir() else None,
+        secrets_dir=DOCKER_SECRETS_DIR if DOCKER_SECRETS_DIR.is_dir() else None,
     )
 
     database_url: SecretStr

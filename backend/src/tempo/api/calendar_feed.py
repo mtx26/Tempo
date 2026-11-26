@@ -19,10 +19,9 @@ from icalendar import Calendar, Event
 
 from tempo.api.auth import FailureLimiter, token_matches
 from tempo.api.location import SessionDep
+from tempo.const import CALENDAR_FUTURE, CALENDAR_PAST
 from tempo.planning.views import schedule_items
 
-PAST = timedelta(days=14)
-FUTURE = timedelta(days=60)
 REFRESH = "PT15M"
 
 
@@ -47,7 +46,7 @@ def calendar_router(token: bytes, limiter: FailureLimiter, tz: ZoneInfo) -> APIR
         now = clock()
         items = [
             item
-            for item in schedule_items(session, now - PAST, now + FUTURE)
+            for item in schedule_items(session, now - CALENDAR_PAST, now + CALENDAR_FUTURE)
             if item["type"] != "class"  # already on the phone through the university calendar
         ]
         return Response(

@@ -37,6 +37,7 @@ from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tempo import __version__
+from tempo.const import DOCKER_SECRETS_DIR
 from tempo.transport.feeds import (
     FEEDS,
     KEY_HEADER,
@@ -53,7 +54,6 @@ from tempo.transport.gtfsrt import FeedSummary, InvalidFeedError, check_fresh, p
 
 logger = logging.getLogger(__name__)
 
-DOCKER_SECRETS_DIR = Path("/run/secrets")
 USER_AGENT = f"tempo-rt-relay/{__version__}"
 DEFAULT_BACKOFF = timedelta(minutes=5)
 MAX_BACKOFF = timedelta(hours=1)

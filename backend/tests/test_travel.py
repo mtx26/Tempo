@@ -1,4 +1,4 @@
-"""Mandatory travel between located commitments and travel-aware study availability."""
+"""Mandatory travel of an outing (base -> commitments -> base)."""
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -8,12 +8,7 @@ from tempo.transport.itinerary import CachedRouting
 from tempo.transport.location import LocatedEvent
 from tempo.transport.places import Coordinates, Place
 from tempo.transport.routing import Journey, Leg, RoutingUnavailableError
-from tempo.transport.travel import (
-    StudyWindow,
-    TravelStatus,
-    plan_day_travel,
-    travel_aware_study_windows,
-)
+from tempo.transport.travel import TravelStatus, plan_day_travel
 
 HOME = Place("home", "Kot", Coordinates(50.668, 4.612))
 CAMPUS = Place("campus", "Campus", Coordinates(50.669, 4.615))
@@ -142,90 +137,50 @@ def test_events_are_processed_in_chronological_order() -> None:
     assert [b.destination for b in plan.blocks] == [POOL]
 
 
-# --- travel-aware study availability ---------------------------------------------------------
-
-
-def test_study_window_shrinks_by_travel_to_and_from_away_event() -> None:
-    windows = [StudyWindow(Interval(at(8), at(18)), HOME)]
-    events = [located(CAMPUS, at(10), at(12))]
-    result = travel_aware_study_windows(windows, events, FakeRouting(TIMES), buffer=BUFFER)
-    spans = [(w.start, w.end) for w in result.windows]
-    # must arrive by 09:50 (10 min margin) -> fake arrival 09:45, departure 09:25;
-    # return departs 12:00, home 12:20 (no margin needed after a return: no deadline)
-    assert spans == [(at(8), at(9, 25)), (at(12, 20), at(18))]
-    assert result.issues == []
-
-
-def test_short_gap_between_away_events_is_not_studyable_at_home() -> None:
-    windows = [StudyWindow(Interval(at(8), at(18)), HOME)]
-    events = [located(CAMPUS, at(10), at(11)), located(CAMPUS, at(11, 45), at(13))]
-    result = travel_aware_study_windows(windows, events, FakeRouting(TIMES), buffer=BUFFER)
-    assert all(not (w.start < at(11, 45) and w.end > at(11)) for w in result.windows)
-
-
-def test_study_at_event_place_needs_no_travel() -> None:
-    windows = [StudyWindow(Interval(at(8), at(18)), CAMPUS)]
-    events = [located(CAMPUS, at(10), at(12))]
-    result = travel_aware_study_windows(windows, events, FakeRouting(TIMES), buffer=BUFFER)
-    assert [(w.start, w.end) for w in result.windows] == [(at(8), at(10)), (at(12), at(18))]
-
-
-def test_routing_outage_removes_affected_window_and_reports() -> None:
-    windows = [StudyWindow(Interval(at(8), at(18)), HOME)]
-    events = [located(CAMPUS, at(10), at(12))]
-    result = travel_aware_study_windows(
-        windows, events, FakeRouting(TIMES, fail=True), buffer=BUFFER
-    )
-    assert result.windows == []
-    assert any("unavailable" in issue for issue in result.issues)
-
-
 def test_identical_routing_queries_are_cached() -> None:
-    windows = [
-        StudyWindow(Interval(at(8), at(10)), HOME),
-        StudyWindow(Interval(at(13), at(18)), HOME),
-    ]
-    events = [located(CAMPUS, at(10, 30), at(12))]
+    events = [located(CAMPUS, at(10, 30), at(12)), located(POOL, at(15), at(16))]
     routing = FakeRouting(TIMES)
     # One planning run shares one cache (the engine wraps its provider in CachedRouting).
-    travel_aware_study_windows(windows, events, CachedRouting(routing), buffer=BUFFER)
+    cached = CachedRouting(routing)
+    for _ in range(3):
+        plan_day_travel(events, cached, buffer=BUFFER, start_place=HOME, end_place=HOME)
     assert len(routing.calls) == len(set(routing.calls))
 
 
-# --- end to end with the planner ---------------------------------------------------------------
+def test_outage_keeps_the_previous_itinerary_not_revalidated() -> None:
+    """C6: during a MOTIS outage the published itinerary of the same leg is kept (stale)."""
+    events = [located(CAMPUS, at(8), at(10))]
+    fresh = plan_day_travel(events, FakeRouting(TIMES), buffer=BUFFER, start_place=HOME)
+    kept = fresh.blocks[0].journey
+    assert kept is not None
 
+    def previous(
+        origin: Place, destination: Place, when: datetime, outbound: bool
+    ) -> Journey | None:
+        return (
+            kept if (origin, destination, when, outbound) == (HOME, CAMPUS, at(8), True) else None
+        )
 
-def test_planner_never_places_study_on_travel_or_away_time() -> None:
-    from zoneinfo import ZoneInfo
-
-    from tempo.domain.models import TargetKind
-    from tempo.scheduler.model import PlanningProblem, PlanStatus, StudyDemand
-    from tempo.scheduler.solver import solve
-    from tempo.scheduler.validate import validate_plan
-
-    events = [located(CAMPUS, at(9), at(11)), located(POOL, at(15), at(16))]
-    routing = FakeRouting(TIMES)
-    travel = plan_day_travel(events, routing, buffer=BUFFER, start_place=HOME, end_place=HOME)
-    study = travel_aware_study_windows(
-        [StudyWindow(Interval(at(7), at(21)), HOME)], events, routing, buffer=BUFFER
+    down = plan_day_travel(
+        events, FakeRouting(TIMES, fail=True), buffer=BUFFER, start_place=HOME, previous=previous
     )
-    busy = [Interval(e.start, e.end) for e in events] + [
-        Interval(b.start, b.end) for b in travel.blocks
-    ]
-    problem = PlanningProblem(
-        horizon=Interval(at(0), at(23, 59)),
-        timezone=ZoneInfo("UTC"),
-        availability=study.windows,
-        busy=busy,
-        demands=[StudyDemand("analyse", "analyse", 180, at(23), TargetKind.SOFT)],
-        locked_blocks=[],
+    (block,) = down.blocks
+    assert block.status is TravelStatus.STALE and block.status.feasible
+    assert block.journey == kept and (block.start, block.end) == (kept.departure, at(8))
+
+
+def test_outage_without_previous_itinerary_blocks_up_to_the_longest_journey() -> None:
+    events = [located(CAMPUS, at(12), at(13))]
+    plan = plan_day_travel(
+        events,
+        FakeRouting(TIMES, fail=True),
+        buffer=BUFFER,
+        start_place=HOME,
+        max_journey=timedelta(minutes=60),
     )
-    result = solve(problem, time_limit_seconds=10)
-    assert validate_plan(problem, result) == []
-    assert result.status is PlanStatus.COMPLETE
-    for block in result.blocks:
-        assert not any(b.overlaps(block.interval) for b in busy)
-        assert any(w.contains(block.interval) for w in study.windows)
+    (block,) = plan.blocks
+    assert block.status is TravelStatus.UNKNOWN and not block.status.feasible
+    assert (block.start, block.end) == (at(10, 50), at(12))
 
 
 def test_way_back_has_a_deadline_and_is_reported_when_it_cannot_be_kept() -> None:

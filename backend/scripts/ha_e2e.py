@@ -98,7 +98,9 @@ def main() -> None:
             r = http.post(f"{BACKEND}/v1/operations/upsert_place", json=place, headers=BACK)
             r.raise_for_status()
         http.post(
-            f"{BACKEND}/v1/operations/update_settings", json={"home_place_id": "home"}, headers=BACK
+            f"{BACKEND}/v1/operations/set_residence_alternation",
+            json={"residences": ["home"], "from_date": "2026-01-02"},
+            headers=BACK,
         ).raise_for_status()
 
         # Config flow exactly as the HA screens drive it.
@@ -169,19 +171,11 @@ def main() -> None:
 
         today = datetime.now(ZoneInfo("Europe/Brussels")).date()
         target = (today + timedelta(days=10)).strftime("%d/%m/%Y")
-        added = say(f"ajoute 2h de maths pour le {target}")
-        check("task added through HA conversation", "Ajouté" in added and "maths" in added, added)
+        # Without Gemini credentials the conversation says so and changes nothing.
+        answer = say(f"ajoute 2h de maths pour le {target}")
+        check("Gemini outage reported to the user", "Rien n'a été modifié" in answer, answer)
         tasks = op(http, "list_tasks")["tasks"]
-        check("task stored in the backend", "maths" in [t["title"] for t in tasks], str(tasks))
-        total = sum(t["remaining_minutes"] or 0 for t in tasks)
-        hours, minutes = divmod(total, 60)
-        expected = f"{hours} h" + (f" {minutes:02d}" if minutes else "")
-        left = say("combien d'heures d'étude il me reste ?")
-        check(
-            "question answered from stored data", expected in left, f"{left} (attendu {expected})"
-        )
-        unknown = say("organise ma vie")
-        check("unknown request is not invented", "pas compris" in unknown, unknown)
+        check("nothing changed without Gemini", "maths" not in [t["title"] for t in tasks])
 
         # Real GPS path: the phone tracker state changes in HA -> pushed to the backend.
         http.post(

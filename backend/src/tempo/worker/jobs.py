@@ -17,7 +17,7 @@ import socket
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
@@ -28,6 +28,28 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.ai.llm import Interpreter
+from tempo.const import (
+    ACTIVITY_RETENTION,
+    CONVERSATION_RETENTION,
+    DEPARTURE_LOOKAHEAD,
+    ICS_FUTURE,
+    ICS_MARGIN,
+    ICS_PAST,
+    IDEMPOTENCY_RETENTION,
+    MAIL_LOOKBACK,
+    MAX_ICS_BYTES,
+    MAX_REDIRECTS,
+    NEAR_TERM_CHANGE,
+    NIGHTLY_REPLAN,
+    NOTIFICATION_RETENTION,
+    PROPOSAL_RETENTION,
+    REDIRECTS,
+    REMINDER_GRACE,
+    REPLAN_RETRY_AFTER,
+    RETENTION_HOUR,
+    STALE_PLAN_AFTER,
+    VERSION_RETENTION,
+)
 from tempo.db.models import (
     ActivityRow,
     ConversationTurnRow,
@@ -52,13 +74,6 @@ from tempo.transport.routing import RoutingProvider
 
 logger = logging.getLogger(__name__)
 
-ICS_PAST = timedelta(days=1)
-ICS_FUTURE = timedelta(days=60)
-ICS_MARGIN = timedelta(days=7)
-"""Parsed beyond the reconciled window so events moving out of it are seen as changed."""
-MAX_ICS_BYTES = 10 * 1024 * 1024
-NEAR_TERM_CHANGE = timedelta(days=7)
-DEPARTURE_LOOKAHEAD = timedelta(hours=2)
 ALERT_STATUSES = frozenset(
     {
         DepartureStatus.LEAVE_NOW,
@@ -112,10 +127,6 @@ def run_job(sessions: Sessions, name: str, job: Callable[[], Any]) -> bool:
 
 
 # --- iCal ---
-
-
-MAX_REDIRECTS = 5
-REDIRECTS = frozenset({301, 302, 303, 307, 308})
 
 
 def is_public_host(host: str) -> bool:
@@ -233,11 +244,6 @@ def ics_sync(
 
 # --- re-planning ---
 
-NIGHTLY = time(3, 0)
-STALE_AFTER = timedelta(hours=6)
-RETRY_AFTER = timedelta(minutes=15)
-"""Minimum delay between automatic attempts (a rejected plan must not loop every minute)."""
-
 
 def replan_due(session: Session, now: datetime, tz: ZoneInfo) -> str | None:
     """Why a re-plan is due now, or None."""
@@ -247,15 +253,17 @@ def replan_due(session: Session, now: datetime, tz: ZoneInfo) -> str | None:
     if requested is not None and (last is None or datetime.fromisoformat(requested) > last):
         return "requested"
     attempt = get_setting(session, "last_replan_attempt")
-    if attempt is not None and now - datetime.fromisoformat(attempt) < RETRY_AFTER:
+    if attempt is not None and now - datetime.fromisoformat(attempt) < REPLAN_RETRY_AFTER:
         return None
     if last is None:
         return "first plan"
-    nightly = datetime.combine(now.astimezone(tz).date(), NIGHTLY, tzinfo=tz)
+    nightly = datetime.combine(now.astimezone(tz).date(), NIGHTLY_REPLAN, tzinfo=tz)
     if last < nightly <= now:
         return "nightly"
-    if now - last >= STALE_AFTER:
+    if now - last >= STALE_PLAN_AFTER:
         return "stale"
+    if version is not None and version.summary.get("journeys_to_refresh"):
+        return "journeys to confirm"  # refreshed as soon as MOTIS answers again (C6)
     return None
 
 
@@ -277,8 +285,8 @@ def replan_job(
                 session,
                 "setup",
                 "Tempo n'est pas encore configuré",
-                f"{exc}. Donnez à Tempo les coordonnées de votre domicile dans la conversation, "
-                "ou reprenez la zone « Maison » dans les options de l'intégration.",
+                f"{exc}. Dites à Tempo dans la conversation où vous habitez (vos résidences "
+                "et leur alternance).",
                 "setup:home",
             )
         session.commit()
@@ -295,6 +303,8 @@ class _Trip:
     departure: datetime | None
     destination: Place
     title: str
+    event_start: datetime
+    """Official start of the commitment (never shifted by the class tolerance)."""
 
 
 def _next_outbound(session: Session, now: datetime) -> _Trip | None:
@@ -317,7 +327,8 @@ def _next_outbound(session: Session, now: datetime) -> _Trip | None:
                 trip["destination_name"],
                 Coordinates(*_coordinates(session, trip["destination"])),
             ),
-            trip["destination_name"],
+            trip.get("event_title") or trip["destination_name"],
+            datetime.fromisoformat(trip.get("event_start") or trip["end"]),
         )
     return None
 
@@ -380,7 +391,7 @@ def departure_job(
             "warnings": advice.warnings,
             "checked_at": now.isoformat(),
             "event_title": trip.title,
-            "event_start": trip.end.isoformat(),
+            "event_start": trip.event_start.isoformat(),
         }
         set_setting(session, "departure_check", state)
         if advice.status in ALERT_STATUSES:
@@ -402,7 +413,6 @@ def departure_job(
         return advice.status.value
 
 
-DEFAULT_REMINDERS = (60, 15)
 REMINDER_STATUSES = frozenset(
     {
         DepartureStatus.ON_TIME,
@@ -430,19 +440,19 @@ def _reminder(
     if leave_at is None or status not in REMINDER_STATUSES:
         return
     left = (leave_at - now).total_seconds() / 60
-    thresholds = sorted(get_setting(session, "reminder_minutes", list(DEFAULT_REMINDERS)) or [])
+    thresholds = sorted(get_setting(session, "reminder_minutes") or [])
     reached = [m for m in thresholds if 0 <= left <= m]
     if not reached:
         return
     minutes = reached[0]
     local = leave_at.astimezone(tz).strftime("%H:%M")
+    starts = trip.event_start.astimezone(tz).strftime("%H:%M")
     notify(
         session,
         "departure_reminder",
-        f"Départ dans {max(0, round(left))} min pour {trip.title}",
-        f"Départ {'prévu au planning' if planned else 'conseillé'} à {local} "
-        f"(rappel {minutes} min)"
-        + (" — position ou itinéraire en temps réel indisponible." if planned else "."),
+        f"Départ à {local} pour {trip.title}",
+        f"{trip.title} : début {starts}, départ {'prévu' if planned else 'conseillé'} {local}"
+        + (" (position ou itinéraire en temps réel indisponible)." if planned else "."),
         f"reminder:{trip.end.isoformat()}:{minutes}",
     )
 
@@ -460,7 +470,9 @@ def _departure_title(status: DepartureStatus, destination: str) -> str:
 
 
 def _departure_message(state: dict[str, Any], tz: ZoneInfo) -> str:
-    parts = []
+    """Official start and departure time only (the tolerance never changes the start shown)."""
+    starts = datetime.fromisoformat(state["event_start"]).astimezone(tz)
+    parts = [f"Début : {starts.strftime('%H:%M')}"]
     if state["leave_at"]:
         leave = datetime.fromisoformat(state["leave_at"]).astimezone(tz)
         parts.append(f"Départ : {leave.strftime('%H:%M')}")
@@ -473,8 +485,6 @@ def _departure_message(state: dict[str, Any], tz: ZoneInfo) -> str:
 
 
 # --- training e-mails ---
-
-MAIL_LOOKBACK = timedelta(days=14)
 
 
 def training_mail_job(
@@ -494,19 +504,10 @@ def training_mail_job(
 
 # --- retention ---
 
-NOTIFICATION_RETENTION = timedelta(days=90)
-PROPOSAL_RETENTION = timedelta(days=180)
-VERSION_RETENTION = timedelta(days=30)
-ACTIVITY_RETENTION = timedelta(days=180)
-
 
 def _deleted(session: Session, statement: Any) -> int:
     result = session.execute(statement)
     return int(getattr(result, "rowcount", 0) or 0)
-
-
-RETENTION_HOUR = 4
-"""Local hour from which the daily purge runs (quiet time, after the nightly re-plan)."""
 
 
 def retention_due(sessions: Sessions, now: datetime, tz: ZoneInfo) -> bool:
@@ -562,9 +563,6 @@ def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
 
 
 # --- user reminders, recurring events, conversation retention ---
-
-REMINDER_GRACE = timedelta(hours=6)
-"""A reminder missed during an outage still fires after a restart, up to this late."""
 
 
 def _reminder_due(session: Session, row: Any, now: datetime, tz: ZoneInfo) -> list[datetime]:
@@ -646,11 +644,6 @@ def series_job(sessions: Sessions, now: datetime) -> int:
             set_setting(session, "replan_requested", now.isoformat())
         session.commit()
         return created
-
-
-CONVERSATION_RETENTION = timedelta(days=7)
-IDEMPOTENCY_RETENTION = timedelta(days=2)
-"""An ``Idempotency-Key`` replays its stored response for this long, then it is purged."""
 
 
 def conversation_retention_job(sessions: Sessions, now: datetime) -> int:

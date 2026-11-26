@@ -12,9 +12,10 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from tempo.ai.llm import LLM_MODEL_SETTING, selectable_models
+from tempo.ai.llm import selectable_models
 from tempo.api.app import create_app
 from tempo.config import Settings
+from tempo.const import LLM_MODEL_SETTING
 from tempo.db.models import Base
 from tempo.db.store import get_setting
 

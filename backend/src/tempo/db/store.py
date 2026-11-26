@@ -19,9 +19,19 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from tempo.const import (
+    ACCESS_OVERRIDES_SETTING,
+    ALTERNATION_SETTING,
+    CLASS_ATTENDANCE_SETTING,
+    MAX_JOURNEY_SETTING,
+    SETTING_DEFAULTS,
+    SWITCHES_SETTING,
+    TEMPORARY_SETTING,
+)
 from tempo.db.models import (
     ActivityRow,
     AuditEntry,
+    FixedEventRow,
     NotificationRow,
     PlaceAliasRow,
     PlaceRow,
@@ -30,15 +40,19 @@ from tempo.db.models import (
     SettingRow,
     StudyBlockRow,
 )
-from tempo.transport.access import DEFAULT_MAX_JOURNEY, Access, AccessRouting
+from tempo.domain.models import EventStatus
+from tempo.transport.access import Access, AccessRouting
 from tempo.transport.location import Alternation, DeclaredStay
 from tempo.transport.places import Coordinates, Place, PlaceDirectory
 from tempo.transport.routing import RoutingProvider
 
 
 def get_setting(session: Session, key: str, default: Any = None) -> Any:
+    """A setting, else ``default``, else its documented default (``SETTING_DEFAULTS``)."""
+    fallback = SETTING_DEFAULTS.get(key) if default is None else default
     row = session.get(SettingRow, key)
-    return default if row is None else row.value.get("value", default)
+    value = None if row is None else row.value.get("value")
+    return fallback if value is None else value
 
 
 def set_setting(session: Session, key: str, value: Any) -> None:
@@ -135,15 +149,6 @@ def place_directory(session: Session) -> PlaceDirectory:
     return PlaceDirectory(places, aliases)
 
 
-ALTERNATION_SETTING = "residence_alternation"
-ACCESS_OVERRIDES_SETTING = "access_overrides"
-CLASS_ATTENDANCE_SETTING = "class_attendance"
-"""Per class occurrence (``event:<id>``): ``{"absent": true}`` or the stated
-``arrive_at`` / ``leave_at`` (ISO); absent key = the whole class is attended."""
-"""Temporary transport access points for a period (never the persistent default)."""
-MAX_JOURNEY_SETTING = "max_journey_minutes"
-
-
 def declared_stays(session: Session, directory: PlaceDirectory) -> list[DeclaredStay]:
     """Planned locations stated in the conversation (temporary exceptions), known places only."""
     return [
@@ -153,32 +158,94 @@ def declared_stays(session: Session, directory: PlaceDirectory) -> list[Declared
     ]
 
 
+def attended_classes(
+    session: Session, start: datetime, end: datetime
+) -> list[tuple[str, str, datetime, datetime, str | None]]:
+    """University events in ``[start, end)`` as the user attends them: ``(ref, title, start,
+    end, location)`` with partial attendance applied and skipped occurrences left out."""
+    attendance = get_setting(session, CLASS_ATTENDANCE_SETTING, {}) or {}
+    found = []
+    for event in session.scalars(
+        select(FixedEventRow).where(
+            FixedEventRow.deleted_at.is_(None),
+            FixedEventRow.status != EventStatus.CANCELLED,
+            FixedEventRow.end_at > start,
+            FixedEventRow.start_at < end,
+        )
+    ):
+        ref = f"event:{event.id}"
+        stated = attendance.get(ref, {})
+        if stated.get("absent"):
+            continue
+        arrive, leave = stated.get("arrive_at"), stated.get("leave_at")
+        found.append(
+            (
+                ref,
+                event.summary,
+                datetime.fromisoformat(arrive) if arrive else event.start_at,
+                datetime.fromisoformat(leave) if leave else event.end_at,
+                event.location,
+            )
+        )
+    return found
+
+
 def residence_alternation(
-    session: Session, directory: PlaceDirectory, tz: ZoneInfo
+    session: Session, directory: PlaceDirectory, tz: ZoneInfo, now: datetime | None = None
 ) -> Alternation | None:
-    """The recurring residence schedule stated in the conversation, if any."""
+    """The recurring residence schedule stated in the conversation, with the change moment of
+    each change day resolved: a time the user stated for that date, the time stated for every
+    change, else the end of the last attended class that day (unknown otherwise)."""
     raw = get_setting(session, ALTERNATION_SETTING)
     if not raw:
         return None
     places = [directory.get(pid) for pid in raw["residences"]]
     if any(p is None for p in places):
         return None  # a residence was deleted: no schedule rather than a wrong one
-    return Alternation(
+    alternation = Alternation(
         tuple(p for p in places if p is not None),
         date.fromisoformat(raw["first_day"]),
-        time.fromisoformat(raw["switch_at"]),
         int(raw["period_days"]),
         tz,
+        None if not raw.get("switch_at") else time.fromisoformat(raw["switch_at"]),
+    )
+    moment = now or datetime.now(UTC)
+    switches: dict[date, datetime] = {}
+    if alternation.switch_at is None:  # after the last attended class of each change day
+        for _ref, _title, _start, end, _location in attended_classes(
+            session, moment - timedelta(days=alternation.period_days), moment + timedelta(days=62)
+        ):
+            day = end.astimezone(tz).date()
+            if (day - alternation.first_day).days % alternation.period_days == 0:
+                switches[day] = max(switches.get(day, end), end, key=lambda x: x.timestamp())
+    for day_text, clock in (get_setting(session, SWITCHES_SETTING, {}) or {}).items():
+        day = date.fromisoformat(day_text)
+        switches[day] = datetime.combine(day, time.fromisoformat(clock), tzinfo=tz)
+    return Alternation(
+        alternation.residences,
+        alternation.first_day,
+        alternation.period_days,
+        tz,
+        alternation.switch_at,
+        switches,
     )
 
 
-def residence_base(session: Session, directory: PlaceDirectory | None = None) -> Place | None:
-    """Fallback base: the first residence of the alternation (one residence is an alternation
-    of one place); None when no residence is configured."""
+def reference_residence(session: Session, directory: PlaceDirectory | None = None) -> Place | None:
+    """The first residence of the alternation (daylight reference, geocoding focus)."""
     directory = directory or place_directory(session)
     raw = get_setting(session, ALTERNATION_SETTING) or {}
     first = (raw.get("residences") or [None])[0]
     return directory.get(first) if first else None
+
+
+def temporary_preferences(session: Session, now: datetime) -> list[dict[str, Any]]:
+    """Temporary preferences still in force or to come (expired ones are ignored)."""
+    return [
+        item
+        for item in get_setting(session, TEMPORARY_SETTING, []) or []
+        if datetime.fromisoformat(item["end"]) > now
+    ]
 
 
 def access_routing(
@@ -204,6 +271,5 @@ def access_routing(
         place, point = directory.get(row.id), directory.get(row.access_place_id or "")
         if place is not None and point is not None and row.access_minutes:
             accesses.append(Access(place, point, timedelta(minutes=row.access_minutes)))
-    minutes = get_setting(session, MAX_JOURNEY_SETTING)
-    limit = DEFAULT_MAX_JOURNEY if not minutes else timedelta(minutes=int(minutes))
+    limit = timedelta(minutes=int(get_setting(session, MAX_JOURNEY_SETTING)))
     return AccessRouting(routing, accesses, max_journey=limit)

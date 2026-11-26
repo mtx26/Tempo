@@ -6,6 +6,7 @@ which is wrong across DST changes. Day boundaries are LOCAL wall-clock midnights
 timezone (DST-safe: built with ``datetime.combine``, never midnight + offset).
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -42,3 +43,19 @@ class Interval:
 
     def contains(self, other: "Interval") -> bool:
         return utc(self.start) <= utc(other.start) and utc(other.end) <= utc(self.end)
+
+
+def subtract(window: Interval, removed: Iterable[Interval]) -> list[Interval]:
+    """Parts of ``window`` outside every removed interval."""
+    pieces: list[Interval] = []
+    cursor, end = utc(window.start), utc(window.end)
+    for item in sorted(removed, key=lambda i: utc(i.start)):
+        r_start, r_end = utc(item.start), utc(item.end)
+        if r_end <= cursor or r_start >= end:
+            continue
+        if r_start > cursor:
+            pieces.append(Interval(cursor, r_start))
+        cursor = max(cursor, r_end)
+    if cursor < end:
+        pieces.append(Interval(cursor, end))
+    return pieces

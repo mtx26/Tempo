@@ -7,9 +7,8 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 
-MAX_FAILURES = 10
-FAILURE_WINDOW = timedelta(minutes=1)
-LOCKOUT = timedelta(minutes=5)
+from tempo.const import AUTH_FAILURE_WINDOW, AUTH_LOCKOUT, AUTH_MAX_FAILURES
+
 MAX_TRACKED_CLIENTS = 10_000
 
 
@@ -29,9 +28,9 @@ class FailureLimiter:
     def __init__(
         self,
         *,
-        max_failures: int = MAX_FAILURES,
-        window: timedelta = FAILURE_WINDOW,
-        lockout: timedelta = LOCKOUT,
+        max_failures: int = AUTH_MAX_FAILURES,
+        window: timedelta = AUTH_FAILURE_WINDOW,
+        lockout: timedelta = AUTH_LOCKOUT,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._max, self._window, self._lockout, self._clock = max_failures, window, lockout, clock
