@@ -2,14 +2,17 @@
 name: debug
 description: Reproduce the failure, isolate root cause, create regression test, apply minimal fix, run relevant tests/lint and report evidence.
 ---
+
 # debug
 
-**Always respond to the user in French.**
+Applique les [règles de Tempo](../../../AGENTS.md) et limite le changement au défaut établi.
 
-## Workflow
-1. Read `CLAUDE.md` and the relevant sections of `ARCHITECTURE.md` (and `README.md` for operations).
-2. Reproduce the failure, isolate root cause, create regression test, apply minimal fix, run relevant tests/lint and report evidence.
-3. Identify hard constraints, security boundaries and testable acceptance criteria.
-4. Perform safe local changes only; request approval for production/destructive operations.
-5. Run and report relevant tests, lint, type checks and integration checks (or explicitly say why unavailable).
-6. Update `ARCHITECTURE.md` (status and gaps) and `README.md` when behaviour or operations change; report limitations truthfully. No progress/handoff/roadmap files.
+1. Reproduis le symptôme avec le cas le plus ciblé qui le montre. Compare l'attendu et
+   l'observé puis isole la cause racine. Vérifie les mécanismes analogues dans les modules
+   concernés pour savoir s'ils partagent la même cause.
+2. Réutilise un test existant s'il détecte la régression. Sinon, ajoute un cas qui échoue
+   pour la cause identifiée, lorsque la régression est reproductible en test.
+3. Corrige le mécanisme en place et retire les anciens contournements devenus inutiles.
+   Évite d'ajouter un contournement ou d'élargir la correction sans preuve du même défaut.
+4. Rejoue le cas, les contrôles des chemins voisins et les vérifications pertinentes.
+   Relie les résultats à la cause et indique les cas qui restent à vérifier.

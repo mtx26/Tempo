@@ -47,15 +47,21 @@ Turn any folder of files into a navigable knowledge graph with community detecti
 
 Drop any folder of code, docs, papers, images, or video into graphify and get a queryable knowledge graph. Persistent across sessions, honest audit trail (EXTRACTED/INFERRED/AMBIGUOUS), community detection surfaces cross-document connections you wouldn't think to ask about.
 
-**When a graph is worth building:** this applies when you are choosing a tool yourself; if the user invoked `/graphify`, follow that request as asked. AST extraction of code is fast and free, but semantic extraction of docs, papers and images runs the model over every file, which can cost minutes and tens of thousands of tokens.
-
-If a graph already exists, query it. With no graph, one targeted lookup ("where is X defined", "what calls Y" in an ordinary-sized codebase) is faster and free with a plain text search such as `grep` and `Read`: search directly instead of running the steps below, and mention that a graph can be built if the user wants one. Build one when you expect many questions against this corpus, the corpus is large or unfamiliar, the question needs links text search cannot see (doc to code, across documents), or it is structural (communities, bridges, import cycles).
+Use Graphify for an explicit request or when tracing calls, dependencies, or cross-file
+relationships benefits from a graph. Follow the [Tempo project guidance](../../../AGENTS.md).
+Use a targeted search for a local lookup. When the graph adds value, query an existing
+graph first. Build a graph for a structural analysis or a corpus you expect to query
+repeatedly. AST extraction is local. Semantic extraction of documents and images can
+take minutes and consume significant context.
 
 ## What You Must Do When Invoked
 
 If the user invoked `/graphify --help` or `/graphify -h` (with no other arguments), print the contents of the `## Usage` section above verbatim and stop. Do not run any commands, do not detect files, do not default the path to `.`. Just print the Usage block and return.
 
-**Fast path — existing graph:** Before doing anything else, check whether `graphify-out/graph.json` exists. The expected location is `graphify-out/graph.json` relative to the **current working directory** (i.e. the project root where you are running commands). If it exists AND the user's request is a natural-language question about the codebase (e.g. "How does X work?", "What calls Y?", "Trace the data flow through Z") and NOT an explicit rebuild command (`--update`, `--cluster-only`, or a bare path/URL that implies fresh extraction): **skip Steps 1–5 entirely and jump straight to `## For /graphify query`.** Run `graphify query "<question>"` immediately. Do not run detect. Do not check corpus size. Do not ask the user to narrow. The graph is already built — use it.
+**Fast path — existing graph:** If you selected Graphify for a question and
+`graphify-out/graph.json` exists in the project root, jump to [For /graphify query](#for-graphify-query).
+If a graph is missing, use the relevant sources for an ordinary question. Run
+detection or extraction when a graph build or update is part of the task.
 
 If no path was given, use `.` (current directory). Do not ask the user for a path.
 
@@ -164,7 +170,7 @@ Skip this step entirely if `detect` returned zero `video` files. When the corpus
 
 ### Step 3 - Extract entities and relationships
 
-**Before starting:** note whether `--mode deep` was given. You must pass `DEEP_MODE=true` to every subagent in Step B2 if it was. Track this from the original invocation - do not lose it.
+Set `DEEP_MODE=true` in the extraction prompt when the user requested `--mode deep`.
 
 This step has two parts: **structural extraction** (deterministic, free) and **semantic extraction** (LLM, costs tokens).
 
@@ -175,11 +181,9 @@ This step has two parts: **structural extraction** (deterministic, free) and **s
 
 Print it once, then continue — do not wait for the user to supply a key. If `GEMINI_API_KEY` or `GOOGLE_API_KEY` IS set, use `graphify.llm.extract_corpus_parallel(files, backend="gemini")` for semantic extraction instead of dispatching subagents. The default Gemini model is `gemini-3-flash-preview`; set `GRAPHIFY_GEMINI_MODEL` or pass `--model` in headless CLI flows to override it.
 
-> **No other API keys are read.** When `GEMINI_API_KEY`/`GOOGLE_API_KEY` are unset, semantic extraction falls to the host agent itself — the running session is the LLM. On a host that dispatches subagents (e.g. Claude Code), dispatch them as written in Part B. On a host that runs the CLI directly in a terminal and cannot dispatch subagents, do not stall: a code-only corpus has no semantic work, so write the empty semantic file (Part B "Fast path") and continue to Part C; for a corpus with docs/papers/images, either set a Gemini key or extract those inline yourself, but in no case prompt for `ANTHROPIC_API_KEY` — that prompt is a misread of this skill.
-
-**Run Part A (AST) and Part B (semantic) in parallel. Dispatch all semantic subagents AND start AST extraction in the same message. Both can run simultaneously since they operate on different file types. Merge results in Part C as before.**
-
-Note: Parallelizing AST + semantic saves 5-15s on large corpora. AST is deterministic and fast; start it while subagents are processing docs/papers.
+Without a configured Gemini key, the active agent handles semantic extraction.
+Run the structural and semantic passes concurrently when practical. Part C merges their
+results after both finish.
 
 #### Part A - Structural extraction for code files
 
@@ -211,7 +215,7 @@ else:
 "
 ```
 
-#### Part B - Semantic extraction (parallel subagents)
+#### Part B - Semantic extraction
 
 **Fast path:** If detection found zero docs, papers, and images (code-only corpus), skip Part B entirely and go straight to Part C. AST handles code - there is nothing for semantic subagents to do. **First write an empty semantic file** so Part C's merge has its input (it reads `.graphify_semantic.json` unconditionally; without this a code-only run hits `FileNotFoundError`):
 
@@ -223,13 +227,9 @@ Path('graphify-out/.graphify_semantic.json').write_text(json.dumps({'nodes':[],'
 "
 ```
 
-**MANDATORY: You MUST use the Agent tool here. Reading files yourself one-by-one is forbidden - it is 5-10x slower. If you do not use the Agent tool you are doing this wrong.**
-
-Before dispatching subagents, print a timing estimate:
-- Load `total_words` and file counts from `graphify-out/.graphify_detect.json`
-- Estimate agents needed: `ceil(uncached_non_code_files / 22)` (chunk size is 20-25 files, capped at ~6000 total lines)
-- Estimate time: ~45s per agent batch (they run in parallel, so total ≈ 45s × ceil(agents/parallel_limit))
-- Print: "Semantic extraction: ~N files → X agents, estimated ~Ys"
+Check the cache before estimating the semantic work. For a large uncached corpus,
+report the approximate size. Delegate independent chunks in parallel when the host
+supports authorized delegation. Work through the chunks directly when delegation is unavailable.
 
 **Step B0 - Check extraction cache first**
 
@@ -267,7 +267,9 @@ print(f'Cache: {len(all_files)-len(uncached)} files hit, {len(uncached)} files n
 "
 ```
 
-Only dispatch subagents for files listed in `graphify-out/.graphify_uncached.txt`. If all files are cached, skip Steps B1 and B2 but still run Step B3's commands: its merge is the only Part B step that writes `graphify-out/.graphify_semantic.json`, and Part C reads that file unconditionally. Do not write an empty `.graphify_semantic.json` instead, because that drops every cached node.
+Extract only the files listed in `graphify-out/.graphify_uncached.txt`. If they are
+all cached, skip B1 and B2 and run B3 to merge the cached entries into
+`graphify-out/.graphify_semantic.json` for Part C.
 
 **Step B1 - Split into chunks**
 
@@ -275,41 +277,25 @@ Load files from `graphify-out/.graphify_uncached.txt`. Split into chunks bounded
 
 Both bounds matter. The line bound is not only about the 2000-line Read cap: a subagent holding 25 files splits its attention across all of them and skims the dense ones, and a 590-line plan can come back with zero nodes that way. Bounding content as well as file count is what keeps a chunk's coverage honest (#2225).
 
-**Step B2 - Dispatch ALL subagents in a single message**
+**Step B2 - Extract each chunk**
 
-Call the Agent tool multiple times IN THE SAME RESPONSE - one call per chunk. This is the only way they run in parallel. If you make one Agent call, wait, then make another, you are doing it sequentially and defeating the purpose.
+Use `references/extraction-spec.md` for the exact prompt and schema. Substitute
+FILE_LIST, CHUNK_NUM, TOTAL_CHUNKS, DEEP_MODE, and CHUNK_PATH. Set CHUNK_PATH to the
+absolute path of `graphify-out/.graphify_chunk_NN.json`, resolved from the working
+directory where the pipeline runs. Keep the chunk number associated with its input files.
 
-**IMPORTANT - subagent type:** Always use `subagent_type="general-purpose"`. Do NOT use `Explore` - it is read-only and cannot write chunk files to disk, which silently drops extraction results. General-purpose has Write and Bash access which the subagent needs.
-
-Concrete example for 3 chunks:
-```
-[Agent tool call 1: files 1-15, subagent_type="general-purpose"]
-[Agent tool call 2: files 16-30, subagent_type="general-purpose"]
-[Agent tool call 3: files 31-45, subagent_type="general-purpose"]
-```
-All three in one message. Not three separate messages.
-
-Each subagent receives this exact prompt (substitute FILE_LIST, CHUNK_NUM, TOTAL_CHUNKS, DEEP_MODE, and CHUNK_PATH).
-
-CHUNK_PATH must be an **absolute** path — derive it before dispatching:
-```bash
-PROJECT_ROOT=$(pwd)  # cwd — where Part C globs graphify-out/ (NOT .graphify_root/scan dir, #1392)
-# Then for chunk N: CHUNK_PATH="${PROJECT_ROOT}/graphify-out/.graphify_chunk_0N.json"
-```
-
-Subagent prompt template:
-
-See `references/extraction-spec.md` for the exact subagent prompt (JSON schema, node-ID rules, confidence rubric, frontmatter, hyperedge, and vision rules). Load it only here, only when at least one chunk holds a doc, paper, or image; a pure-code corpus has skipped Part B and never reads it. Pass each subagent that prompt verbatim with FILE_LIST, CHUNK_NUM, TOTAL_CHUNKS, DEEP_MODE, and CHUNK_PATH substituted, and have it write the result to CHUNK_PATH.
+In Claude Code, a delegated agent with write access can save the result to CHUNK_PATH.
+In Codex or a host where the worker returns structured JSON, validate the returned
+object and serialize it at CHUNK_PATH. When running inline, use the same schema and
+output path. Preserve coverage and token counts along with nodes, edges, and hyperedges.
 
 **Step B3 - Collect, cache, and merge**
 
-Wait for all subagents. For each result:
-- Check that `graphify-out/.graphify_chunk_NN.json` exists on disk — this is the success signal
-- If the file exists and contains valid JSON with `nodes` and `edges`, include it and save to cache
-- If the file is missing, the subagent was likely dispatched as read-only (Explore type) — print a warning: "chunk N missing from disk — subagent may have been read-only. Re-run with general-purpose agent." Do not silently skip.
-- If a subagent failed or returned invalid JSON, print a warning and skip that chunk - do not abort
-
-If more than half the chunks failed or are missing, stop and tell the user to re-run and ensure `subagent_type="general-purpose"` is used.
+Before updating the cache or merging, check that every expected chunk file is readable
+JSON with list-valued `nodes` and `edges` and, when supplied, list-valued `hyperedges`.
+Retry failed chunks. If any result is still missing or invalid, report the affected
+chunks and stop before updating the cache or the existing graph. The next step checks
+coverage within valid chunks and marks partially read files for a later retry.
 
 **Step B3.5 - Verify each reported file was actually read to its end**
 
@@ -780,13 +766,13 @@ Both are non-default subcommands. `--update` re-extracts only new or changed fil
 
 ## For /graphify query
 
-When `graphify-out/graph.json` already exists and the user asks a question about the corpus, answer from the graph rather than rebuilding it:
+For a question selected for graph analysis, reuse the existing `graphify-out/graph.json`:
 
 ```bash
 graphify query "<question>"
 ```
 
-Before traversal, expand the question against the graph's own vocabulary so a wording mismatch does not collapse the answer to noise. If the `graphify query` CLI is unavailable, fall back to an inline NetworkX traversal of `graphify-out/graph.json`. Answer using only what the graph output contains, and quote `source_location` when citing a specific fact. For that vocab-expansion step, the BFS/DFS traversal modes, the `--budget` cap, the NetworkX fallback, `save-result` feedback, and the `/graphify path` and `/graphify explain` flows, see `references/query.md`.
+Before traversal, expand the question against the graph's own vocabulary so a wording mismatch does not collapse the answer to noise. If the `graphify query` CLI is unavailable, fall back to an inline NetworkX traversal of `graphify-out/graph.json`. Use `source_location` to cite graph findings and verify relevant source passages if the graph is incomplete or stale. For that vocab-expansion step, the BFS/DFS traversal modes, the `--budget` cap, the NetworkX fallback, `save-result` feedback, and the `/graphify path` and `/graphify explain` flows, see `references/query.md`.
 
 ---
 

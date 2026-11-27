@@ -2,14 +2,20 @@
 name: implement-feature
 description: Implement one approved Tempo feature end-to-end. Inspect context, define acceptance criteria, write tests first when practical, implement, run checks, update ARCHITECTURE.md / README.md.
 ---
+
 # implement-feature
 
-**Always respond to the user in French.**
+Applique les [règles de Tempo](../../../AGENTS.md) pour livrer la fonctionnalité approuvée.
 
-## Workflow
-1. Read `CLAUDE.md` and the relevant sections of `ARCHITECTURE.md` (and `README.md` for operations).
-2. Implement one approved Tempo feature end-to-end. Inspect context, define acceptance criteria, write tests first when practical, implement, run checks, update ARCHITECTURE.md / README.md.
-3. Identify hard constraints, security boundaries and testable acceptance criteria.
-4. Perform safe local changes only; request approval for production/destructive operations.
-5. Run and report relevant tests, lint, type checks and integration checks (or explicitly say why unavailable).
-6. Update `ARCHITECTURE.md` (status and gaps) and `README.md` when behaviour or operations change; report limitations truthfully. No progress/handoff/roadmap files.
+1. Établis les critères d'acceptation à partir du comportement observable et des contrats.
+   Repère les points d'entrée existants et la couverture qui protège leurs appelants.
+2. Avant d'écrire du code, inventorie les mécanismes réutilisables et les dépendances
+   installées. Vérifie leurs capacités natives et cherche une bibliothèque spécialisée
+   adaptée. Compare la réutilisation, l'extension et le remplacement. Estime le bilan
+   de code et de complexité, migration et exploitation comprises.
+3. Utilise la bibliothèque adaptée pour tout comportement qu'elle couvre. Implémente le
+   strict nécessaire pour le besoin restant. Lorsque le remplacement est vérifié, retire
+   l'ancien chemin devenu inutile et ses appels. Maintiens les contrats et la compatibilité
+   avec les données existantes.
+4. Vérifie les critères d'acceptation via les points d'entrée habituels et applique les
+   contrôles et mises à jour documentaires pertinents prévus dans les règles de Tempo.

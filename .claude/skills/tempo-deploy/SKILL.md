@@ -2,14 +2,13 @@
 name: tempo-deploy
 description: Prepare reversible Swarm deployment, health checks, backups, least privilege, secret management and rollback. Do not deploy without explicit approval.
 ---
+
 # tempo-deploy
 
-**Always respond to the user in French.**
+Applique les [règles de Tempo](../../../AGENTS.md). Consulte les sections utiles du
+README et d'ARCHITECTURE.md pour préparer un déploiement Swarm réversible.
 
-## Workflow
-1. Read `CLAUDE.md` and the relevant sections of `ARCHITECTURE.md` (and `README.md` for operations).
-2. Prepare reversible Swarm deployment, health checks, backups, least privilege, secret management and rollback. Do not deploy without explicit approval.
-3. Identify hard constraints, security boundaries and testable acceptance criteria.
-4. Perform safe local changes only; request approval for production/destructive operations.
-5. Run and report relevant tests, lint, type checks and integration checks (or explicitly say why unavailable).
-6. Update `ARCHITECTURE.md` (status and gaps) and `README.md` when behaviour or operations change; report limitations truthfully. No progress/handoff/roadmap files.
+Vérifie les contrôles de santé, la sauvegarde et la restauration, le moindre privilège,
+la gestion des secrets et la procédure de retour arrière. Valide localement ce que
+le changement touche et rapporte les contrôles qui requièrent l'environnement cible.
+Attends l'accord explicite de l'utilisateur avant tout déploiement ou accès à la production.
