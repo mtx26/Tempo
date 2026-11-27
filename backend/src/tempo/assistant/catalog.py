@@ -27,8 +27,10 @@ from tempo.const import (
     ACCESS_OVERRIDES_SETTING,
     ALTERNATION_SETTING,
     CLASS_ATTENDANCE_SETTING,
+    CONVERSATION_DRAFT_KIND,
     EXAM_SETTING,
     MAX_ALTERNATIVE_TASKS,
+    MAX_PLAN_CHANGES,
     MAX_SCHEDULE_SPAN,
     PLAN_PROPOSAL_VALIDITY,
     POSTPONE_STEPS_DAYS,
@@ -64,6 +66,7 @@ from tempo.db.store import (
     open_questions,
     pending_proposals,
     place_directory,
+    proposal_revision,
     propose,
     reference_residence,
     request_replan,
@@ -126,6 +129,7 @@ class OpContext:
     routing: RoutingProvider | None = None
     changed: list[str] = field(default_factory=list)
     user_id: str | None = None
+    conversation_id: str = "default"
     """Mutating operations run in this context (for the re-plan request and the audit)."""
 
 
@@ -555,14 +559,29 @@ def list_proposals(ctx: OpContext, body: ProposalsIn) -> dict[str, Any]:
         if body.status == "pending"
         else ProposalRow.status == body.status
     )
-    query = select(ProposalRow).where(scope).order_by(ProposalRow.created_at)
+    query = (
+        select(ProposalRow)
+        .where(scope, ProposalRow.kind != CONVERSATION_DRAFT_KIND)
+        .order_by(ProposalRow.created_at)
+    )
     if ctx.user_id is not None:
         query = query.where(
             (ProposalRow.kind != "plan_changes")
-            | (ProposalRow.details["user_id"].astext == ctx.user_id)
+            | (
+                (ProposalRow.details["user_id"].astext == ctx.user_id)
+                & (
+                    ProposalRow.details["conversation_id"].astext.is_(None)
+                    | (ProposalRow.details["conversation_id"].astext == ctx.conversation_id)
+                )
+            )
         )
-    rows = ctx.session.scalars(query)
-    return {"proposals": [proposal_out(r) for r in rows]}
+    proposals = []
+    for row in ctx.session.scalars(query):
+        item = proposal_out(row)
+        if ctx.user_id is None and row.kind == "plan_changes":
+            item["details"] = {}
+        proposals.append(item)
+    return {"proposals": proposals}
 
 
 class NotificationsIn(Strict):
@@ -2349,7 +2368,16 @@ def decide_proposal(ctx: OpContext, body: DecideIn) -> dict[str, Any]:
     applied: list[str] = []
 
     def apply(details: dict[str, Any]) -> None:
-        batch = PreviewIn.model_validate({"changes": details["plan_changes"]})
+        batch = PreviewIn.model_validate(
+            {
+                "changes": details["plan_changes"],
+                "keep_activities": details.get("keep_activities", []),
+            }
+        )
+        if "kept_activities" in details and details["kept_activities"] != kept_activities(
+            ctx, batch.keep_activities
+        ):
+            raise OpError("une activité à conserver a changé depuis l'aperçu")
         _run_plan_changes(ctx, batch, simulate=False)
         applied.extend(change.name for change in batch.changes)
 
@@ -2361,6 +2389,7 @@ def decide_proposal(ctx: OpContext, body: DecideIn) -> dict[str, Any]:
             actor=ctx.actor,
             now=ctx.now,
             user_id=ctx.user_id,
+            conversation_id=ctx.conversation_id,
             apply_plan_changes=apply if ctx.user_id is not None else None,
         ),
         "applied_operations": applied,
@@ -2398,7 +2427,6 @@ def pending_question(session: Session) -> dict[str, Any] | None:
     first = rows[0]
     return {
         "id": str(first.id),
-        "conversation": first.dedupe_key.startswith("ask:"),
         "question": first.message,
         "needed_by": _iso(first.due_at),
         "others": len(rows) - 1,
@@ -2479,6 +2507,7 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
             "unconfirmed_journeys": plan.get("unconfirmed_journeys"),
             "issues": plan.get("issues"),
             "violations": plan.get("violations"),
+            "conflicts": plan.get("conflicts"),
         }
     except PlanningNotConfiguredError as exc:
         savepoint.rollback()
@@ -2534,10 +2563,20 @@ class PreviewChange(Strict):
         "plan_now",
     ]
     arguments: dict[str, Any]
+    ref: str | None = Field(
+        default=None,
+        pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,39}$",
+        description='Name this result for later steps, e.g. {"$ref": "work.activity.id"}.',
+    )
 
 
 class PreviewIn(Strict):
-    changes: list[PreviewChange] = Field(min_length=1, max_length=5)
+    changes: list[PreviewChange] = Field(min_length=1, max_length=MAX_PLAN_CHANGES)
+    keep_activities: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Activity ids that must keep their time, duration and place.",
+    )
 
 
 PREVIEWABLE_OPERATIONS = frozenset(get_args(PreviewChange.model_fields["name"].annotation))
@@ -2561,8 +2600,13 @@ def preview_plan_changes(ctx: OpContext, body: PreviewIn) -> dict[str, Any]:
 
 def _run_plan_changes(ctx: OpContext, body: PreviewIn, *, simulate: bool) -> dict[str, Any]:
     execution = replace(ctx, changed=[])
+    kept = kept_activities(ctx, body.keep_activities)
+    references: dict[str, Any] = {}
+    applied: set[tuple[str, str]] = set()
     results = []
-    options = PlanIn(dry_run=simulate)
+    # The enclosing preview savepoint also rolls back the recalculation. Seeing its writes
+    # here lets the same check detect a move during both preview and confirmation.
+    options = PlanIn()
     for index, change in enumerate(body.changes, start=1):
         if change.name == "plan_now":
             if index != len(body.changes):
@@ -2572,35 +2616,97 @@ def _run_plan_changes(ctx: OpContext, body: PreviewIn, *, simulate: bool) -> dic
                 raise OpError(
                     "un recalcul simulé ne peut pas faire partie des changements à appliquer"
                 )
-            options = options.model_copy(update={"dry_run": simulate})
             break
-        outcome = run_operation(execution, change.name, change.arguments)
+        arguments = resolve_references(change.arguments, references)
+        model = CATALOG[change.name].model.model_validate(arguments)
+        identity = (change.name, model.model_dump_json())
+        if identity in applied:
+            raise OpError(f"opération répétée à l'étape {index}")
+        applied.add(identity)
+        outcome = run_operation(execution, change.name, arguments)
         if not outcome["ok"]:
             raise OpError(f"lot interrompu à l'étape {index} : {outcome['error']}")
+        if change.ref is not None:
+            if change.ref in references:
+                raise OpError(f"référence d'opération répétée : {change.ref}")
+            references[change.ref] = outcome["result"]
         results.append({"name": change.name, "preview_result": outcome["result"]})
     result = plan_now(execution, options)
     if not simulate and result.get("state") != "active":
         raise OpError("le recalcul n'a pas abouti, le lot est annulé")
+    if kept != kept_activities(ctx, body.keep_activities):
+        raise OpError("le lot déplacerait ou modifierait une activité à conserver")
+    if simulate:
+        result["published"] = False
     if not simulate:
         ctx.changed.extend(execution.changed)
-    return {**result, "simulated_operations": results}
+    return {**result, "simulated_operations": results, "kept_activities": kept}
 
 
-def stage_plan_changes(ctx: OpContext, body: PreviewIn, preview: dict[str, Any]) -> uuid.UUID:
+def resolve_references(value: Any, references: dict[str, Any]) -> Any:
+    """Use values returned by an earlier operation in this same execution."""
+    if isinstance(value, dict):
+        if "$ref" in value:
+            if value.keys() - {"$ref", "prefix"} or not isinstance(value["$ref"], str):
+                raise OpError("référence d'opération invalide")
+            result: Any = references
+            for key in value["$ref"].split("."):
+                if not isinstance(result, dict) or key not in result:
+                    raise OpError(f"référence à un résultat indisponible : {value['$ref']}")
+                result = result[key]
+            prefix = value.get("prefix", "")
+            if not isinstance(prefix, str) or not isinstance(result, str):
+                raise OpError("la référence d'opération doit désigner un identifiant")
+            return prefix + result
+        return {key: resolve_references(item, references) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_references(item, references) for item in value]
+    return value
+
+
+def kept_activities(ctx: OpContext, ids: list[str]) -> list[dict[str, Any]]:
+    kept = []
+    for activity_id in ids:
+        row = _activity(ctx, activity_id)
+        if row.status != "active" or _begins(row) is None:
+            raise OpError(f"activité à conserver indisponible : « {row.title} »")
+        activity = activity_out(row)
+        kept.append(
+            {
+                key: activity[key]
+                for key in ("id", "title", "planned_start", "duration_minutes", "place_id")
+            }
+        )
+    return kept
+
+
+def stage_plan_changes(
+    ctx: OpContext, body: PreviewIn, preview: dict[str, Any], draft: ProposalRow | None = None
+) -> uuid.UUID:
     if preview.get("state") != "active":
         raise OpError("le calcul n'a pas produit de planning valide à confirmer")
-    key = uuid.uuid4()
+    details = {
+        "plan_changes": body.model_dump(mode="json", exclude_defaults=True)["changes"],
+        "keep_activities": body.keep_activities,
+        "kept_activities": preview["kept_activities"],
+        "user_id": ctx.user_id,
+        "conversation_id": ctx.conversation_id,
+        "expires_at": (ctx.now + PLAN_PROPOSAL_VALIDITY).astimezone(UTC).isoformat(),
+        "diff": preview.get("diff"),
+    }
+    title = "Changements de planning à confirmer"
+    if draft is not None:
+        draft.kind = "plan_changes"
+        draft.title = title
+        draft.details = details
+        draft.input_revision = proposal_revision(ctx.session, details)
+        return draft.id
     proposal_id = propose(
         ctx.session,
         "plan_changes",
-        "Changements de planning à confirmer",
-        {
-            "plan_changes": body.model_dump(mode="json")["changes"],
-            "user_id": ctx.user_id,
-            "expires_at": (ctx.now + PLAN_PROPOSAL_VALIDITY).astimezone(UTC).isoformat(),
-            "diff": preview.get("diff"),
-        },
-        f"plan_changes:{key}",
+        title,
+        details,
+        f"plan_changes:{uuid.uuid4()}",
     )
     if proposal_id is None:
         raise OpError("la proposition n'a pas pu être enregistrée")

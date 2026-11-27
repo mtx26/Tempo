@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from tempo.ai.llm import Interpreter
 from tempo.const import (
     ACTIVITY_RETENTION,
+    CONVERSATION_DRAFT_KIND,
     CONVERSATION_RETENTION,
     DEPARTURE_LOOKAHEAD,
     ICS_FUTURE,
@@ -42,7 +43,6 @@ from tempo.const import (
     NEAR_TERM_CHANGE,
     NIGHTLY_REPLAN,
     NOTIFICATION_RETENTION,
-    PLAN_PROPOSAL_VALIDITY,
     PROPOSAL_RETENTION,
     REDIRECTS,
     REMINDER_GRACE,
@@ -604,8 +604,8 @@ def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
                         (ProposalRow.status == "pending")
                         & (ProposalRow.kind == "plan_changes")
                         & (
-                            ProposalRow.created_at
-                            < now - PLAN_PROPOSAL_VALIDITY - PROPOSAL_RETENTION
+                            ProposalRow.details["expires_at"].astext
+                            < (now - PROPOSAL_RETENTION).astimezone(UTC).isoformat()
                         )
                     ),
                 ),
@@ -707,7 +707,7 @@ def series_job(sessions: Sessions, now: datetime) -> int:
 
 
 def conversation_retention_job(sessions: Sessions, now: datetime) -> int:
-    """Delete conversation turns older than 7 days and expired idempotency records."""
+    """Delete old conversation turns, old expired drafts and expired idempotency records."""
     with sessions() as session:
         turns = _deleted(
             session,
@@ -723,6 +723,14 @@ def conversation_retention_job(sessions: Sessions, now: datetime) -> int:
                 < (now - IDEMPOTENCY_RETENTION).astimezone(UTC).isoformat(),
             ),
         )
+        drafts = _deleted(
+            session,
+            delete(ProposalRow).where(
+                ProposalRow.kind == CONVERSATION_DRAFT_KIND,
+                ProposalRow.details["expires_at"].astext
+                < (now - CONVERSATION_RETENTION).astimezone(UTC).isoformat(),
+            ),
+        )
         set_setting(session, "conversation_retention_success_at", now.isoformat())
         session.commit()
-        return turns + keys
+        return turns + keys + drafts

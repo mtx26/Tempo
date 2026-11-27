@@ -30,13 +30,12 @@ from tempo.db.models import (
     ActivityRow,
     Base,
     ConversationTurnRow,
-    FixedEventRow,
     NotificationRow,
     ProposalRow,
     SettingRow,
     StudyTaskRow,
 )
-from tempo.db.store import replan_request
+from tempo.db.store import active_version, replan_request
 from tests.integration.test_planning_service import NOW, TZ, seed
 from tests.test_engine import FakeRouting
 
@@ -96,6 +95,153 @@ def tool_results(request: dict[str, Any]) -> list[dict[str, Any]]:
 
 def outage() -> httpx.ConnectError:
     return httpx.ConnectError("Vertex AI unreachable")
+
+
+def test_solre_workday_survives_clarification(
+    sessions: sessionmaker[Session], database_url: str
+) -> None:
+    from tempo.db.models import PlaceRow
+
+    now = datetime(2026, 11, 27, 21, 23, tzinfo=TZ)
+    work = {
+        "title": "Travail avec mon père à Solre-sur-Sambre",
+        "scheduling": "fixed",
+        "start": "2026-11-28T00:00",
+        "all_day": True,
+        "place_id": "florne",
+        "remote": True,
+    }
+    with sessions.begin() as session:
+        seed(session)
+        session.add(PlaceRow(id="florne", name="Maison de Florne", latitude=50.3, longitude=4.2))
+        ctx = OpContext(session, now, TZ, "assistant", FakeRouting())
+        dinner = run_operation(
+            ctx,
+            "create_event",
+            {
+                "title": "Souper chez ma copine",
+                "scheduling": "fixed",
+                "remote": True,
+                "start": "2026-11-28T18:00",
+                "duration_minutes": 360,
+            },
+        )["result"]["activity"]["id"]
+        training = run_operation(
+            ctx,
+            "create_event",
+            {
+                "title": "Endurance Fondamentale",
+                "kind": "training",
+                "scheduling": "flexible",
+                "window_start": "2026-11-28T11:15",
+                "window_end": "2026-11-28T12:15",
+                "duration_minutes": 60,
+            },
+        )["result"]["activity"]["id"]
+        run_operation(ctx, "plan_now", {})
+        training_row = session.get(ActivityRow, uuid.UUID(training))
+        assert training_row is not None
+        assert training_row.planned_start_at == datetime(2026, 11, 28, 11, 15, tzinfo=TZ)
+    llm = ScriptedModels(
+        response(tool_use("create_event", work)),
+        response(tool_use("plan_now", {})),
+        response(
+            say("J'ai ajouté le travail."),
+            tool_use(
+                "clarify_request",
+                {
+                    "question": "Voulez-vous garder Endurance Fondamentale à 11 h 15 ?",
+                    "keep_activities": [dinner],
+                },
+            ),
+        ),
+    )
+    app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    app.state.assistant = assistant(llm)
+    app.state.routing = FakeRouting()
+    app.state.clock = lambda: now
+    with TestClient(app) as api:
+        initial = api.post(
+            "/v1/conversation",
+            headers=AUTH,
+            json={
+                "text": (
+                    "Demain, je travaille toute la journée avec mon père dans la maison de "
+                    "Florne à Solre-sur-Sambre. Je viens en voiture, donc pas besoin de noter "
+                    "le transport."
+                )
+            },
+        ).json()
+        assert initial["status"] == "clarification" and not initial["changed"]
+        assert "J'ai ajouté" not in initial["reply"]
+        draft_id = initial["draft_id"]
+        with sessions() as session:
+            draft = session.get(ProposalRow, uuid.UUID(draft_id))
+            assert draft is not None and draft.details["changes"][0]["arguments"] == work
+            assert (
+                session.scalar(select(ActivityRow).where(ActivityRow.title == work["title"]))
+                is None
+            )
+        cancellation = {
+            "name": "cancel_event",
+            "arguments": {"activity_id": training, "scope": "occurrence"},
+        }
+        # The next turn uses a fresh assistant and reads the prepared steps from PostgreSQL.
+        llm.script.append(
+            response(
+                tool_use(
+                    "resume_request",
+                    {
+                        "draft_id": draft_id,
+                        "changes": [cancellation],
+                    },
+                )
+            )
+        )
+        app.state.assistant = assistant(llm)
+        preview = api.post(
+            "/v1/conversation",
+            headers=AUTH,
+            json={"text": "L'entraînement annule-le et oui je vais toujours chez ma copine."},
+        ).json()
+        assert preview["proposal_id"] == draft_id and not preview["changed"], preview
+        for label in (
+            "Solre-sur-Sambre",
+            "Annuler « Endurance Fondamentale »",
+            "Souper",
+            "18:00",
+            "Aucun trajet ajouté",
+            "chevauchement",
+        ):
+            assert label in preview["reply"]
+        with sessions() as session:
+            assert (
+                session.scalar(select(ActivityRow).where(ActivityRow.title == work["title"]))
+                is None
+            )
+            row = session.get(ProposalRow, uuid.UUID(draft_id))
+            assert row is not None
+            work_step, cancel_step = row.details["plan_changes"]
+            assert work_step["arguments"] == work and cancel_step == cancellation
+        approval = api.post(
+            "/v1/conversation", headers=AUTH, json={"text": f"confirme {draft_id[:8]}"}
+        ).json()
+        assert approval["changed"], approval
+        duplicate = api.post(
+            "/v1/conversation", headers=AUTH, json={"text": f"confirme {draft_id[:8]}"}
+        ).json()
+        assert not duplicate["changed"]
+    with sessions() as session:
+        added = session.scalars(select(ActivityRow).where(ActivityRow.title == work["title"])).one()
+        assert added.remote and added.all_day and added.place_id == "florne"
+        cancelled = session.get(ActivityRow, uuid.UUID(training))
+        saved = session.get(ActivityRow, uuid.UUID(dinner))
+        assert cancelled is not None and cancelled.status == "cancelled"
+        assert saved is not None and saved.status == "active"
+        assert saved.earliest_start_at == datetime(2026, 11, 28, 18, tzinfo=TZ)
+        plan = active_version(session)
+        assert plan is not None
+        assert all(journey["event_title"] != work["title"] for journey in plan.summary["travel"])
 
 
 def test_compound_request_previews_real_results_before_applying(session: Session) -> None:
@@ -392,11 +538,21 @@ def test_interrupted_compound_turn_never_commits_a_prefix(session: Session, fail
         "truncated": [response(tool_use("create_task", {"title": "Lot B"}), finish="MAX_TOKENS")],
         "limit": [response(tool_use("get_summary", {}))] * 15,
     }
-    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
+    ctx = OpContext(
+        session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting(), user_id="a"
+    )
     result = assistant(ScriptedModels(first, *following[failure])).reply(ctx, "modifie le lot", [])
     assert "Aucune modification" in result.text
     assert session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Lot A")) is None
     assert ctx.changed == [] and replan_request(session) is None
+    assert result.status == "interrupted" and result.draft_id is not None
+    resumed = assistant(
+        ScriptedModels(response(tool_use("resume_request", {"draft_id": result.draft_id})))
+    ).reply(ctx, "reprends uniquement la tâche Lot A", [])
+    assert resumed.proposal_id == result.draft_id
+    row = session.get(ProposalRow, uuid.UUID(resumed.proposal_id))
+    assert row is not None
+    assert [step["arguments"]["title"] for step in row.details["plan_changes"]] == ["Lot A"]
 
 
 @pytest.mark.parametrize("decision", ["approved", "rejected", "expired", "stale"])
@@ -516,10 +672,36 @@ def test_approval_rolls_back_the_prefix_on_a_business_failure(
     ctx = OpContext(
         session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting(), user_id="a"
     )
-    agent = assistant(
-        ScriptedModels(response(tool_use("preview_plan_changes", {"changes": changes})))
+    first = assistant(
+        ScriptedModels(
+            response(
+                tool_use(
+                    "clarify_request",
+                    {
+                        "changes": changes,
+                        "question": "Gardez-vous deux étapes ?",
+                    },
+                )
+            )
+        )
+    ).reply(ctx, "Prépare le lot", [])
+    assert first.draft_id is not None
+    proposal = (
+        assistant(
+            ScriptedModels(
+                response(
+                    tool_use(
+                        "resume_request",
+                        {
+                            "draft_id": first.draft_id,
+                        },
+                    )
+                )
+            )
+        )
+        .reply(ctx, "Oui, les deux.", [])
+        .proposal_id
     )
-    proposal = agent.reply(ctx, "Prépare le lot", []).proposal_id
     assert proposal is not None
 
     def invalid(ctx: OpContext, body: Any) -> dict[str, Any]:
@@ -635,61 +817,249 @@ def test_open_questions_are_asked_one_at_a_time_by_urgency(session: Session) -> 
     assert following.text == "C'est noté.\nEst-ce un examen ?"
 
 
-def test_history_is_shared_by_every_assist_conversation(
-    sessions: sessionmaker[Session], database_url: str
+@pytest.mark.parametrize(("user", "thread"), [("a", "other"), ("b", "first")])
+def test_only_owner_and_thread_can_resume_or_cancel(
+    sessions: sessionmaker[Session], database_url: str, user: str, thread: str
 ) -> None:
-    """A clarification asked in one Assist conversation is still known in the next one."""
-    with sessions() as s:
-        seed(s)
-        s.commit()
+    with sessions.begin() as session:
+        seed(session)
     llm = ScriptedModels(
-        response(say("Fractionnable en plusieurs séances ?")), response(say("Noté."))
+        response(
+            tool_use(
+                "clarify_request",
+                {
+                    "question": "Fractionnable en plusieurs séances ?",
+                    "reason": "missing_information",
+                },
+            )
+        )
     )
     app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    app.state.assistant = assistant(llm)
     with TestClient(app) as api:
-        app.state.assistant = assistant(llm)
-        for words, conversation in (("rapport 3 h", "a"), ("oui", "b")):
-            api.post(
+        owner = {"user_id": "a", "conversation_id": "first"}
+        other = {"user_id": user, "conversation_id": thread}
+        first = api.post(
+            "/v1/conversation", headers=AUTH, json={**owner, "text": "rapport 3 h"}
+        ).json()
+        assert first["status"] == "missing_information"
+        draft_id = first["draft_id"]
+        public = api.post("/v1/operations/list_proposals", headers=AUTH, json={}).json()
+        assert draft_id not in str(public)
+        llm.script.append(response(tool_use("resume_request", {"draft_id": draft_id})))
+        wrong = api.post("/v1/conversation", headers=AUTH, json={**other, "text": "oui"}).json()
+        assert not wrong["changed"] and "introuvable" in wrong["reply"]
+        sent = llm.requests[-1]["contents"]
+        assert len(sent) == 1 and "rapport 3 h" not in sent[0].parts[0].text
+        for command, scope in (("annule", other), ("confirme", owner), ("annule", owner)):
+            outcome = api.post(
                 "/v1/conversation",
                 headers=AUTH,
-                json={"text": words, "conversation_id": conversation},
+                json={**scope, "text": f"{command} {draft_id[:8]}"},
+            ).json()
+            assert not outcome["changed"]
+            assert outcome["status"] == (
+                "rejected" if (command, scope) == ("annule", owner) else "interrupted"
             )
-    second = llm.requests[1]["contents"]
-    assert second[0].parts[0].text == "rapport 3 h"  # the earlier conversation is in context
+    with sessions() as session:
+        draft = session.get(ProposalRow, uuid.UUID(draft_id))
+        assert draft is not None and draft.status == "rejected"
 
 
-def test_conversation_clarification_persists_until_answered(session: Session) -> None:
-    """A clarification asked in one conversation survives (other conversation, restart):
-    given with the next message, closed once answered; one question per answer."""
-    from datetime import timedelta
-
-    from tempo.db.store import open_questions
-    from tempo.planning.service import replan
-    from tests.integration.test_decisions import lecture
-
+def test_three_clarifications_preserve_and_edit_multiple_steps(session: Session) -> None:
     seed(session)
-    lecture(session, "tp", NOW + timedelta(days=1), NOW + timedelta(days=1, hours=2), "TP")
-    tp_row = session.scalars(select(FixedEventRow).where(FixedEventRow.uid == "tp")).one()
-    tp_row.location = "Salle Z.99"  # unknown place: a real question of the planner
-    replan(session, FakeRouting(), NOW, TZ, reason="t")
-    (tp_question,) = open_questions(session)
-    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
-    asking = assistant(ScriptedModels(response(say("Noté. Plusieurs séances ?"))))
-    first = asking.reply(ctx, "ajoute mon rapport, 3 h", [])
-    assert first.text == "Noté. Plusieurs séances ?"  # no second question appended
-    (mine, _planner) = open_questions(session)
-    assert mine.dedupe_key.startswith("ask:") and "ajoute mon rapport" in mine.message
-    assert mine.acknowledged_at is not None  # already read in the conversation: no HA notice
-    later = ScriptedModels(
+    ctx = OpContext(session, NOW, TZ, "assistant", FakeRouting(), user_id="student")
+    work = {"title": "Projet", "estimated_minutes": 60, "splittable": False}
+    event = {
+        "title": "Rendez-vous",
+        "scheduling": "fixed",
+        "remote": True,
+        "start": "2026-12-10T21:00",
+        "duration_minutes": 30,
+    }
+    script = ScriptedModels(
+        response(tool_use("create_task", work), tool_use("create_event", event)),
+        response(
+            tool_use("clarify_request", {"question": "Le titre du projet est-il définitif ?"})
+        ),
+    )
+    first = assistant(script).reply(ctx, "Ajoute le projet et le rendez-vous.", [])
+    draft_id = first.draft_id
+    assert draft_id is not None
+    row = session.get(ProposalRow, uuid.UUID(draft_id))
+    assert row is not None
+    responses = [
+        {
+            "edits": [{"step": 1, "arguments": {"title": "Projet physique"}}],
+            "question": "Combien de temps pour le projet ?",
+        },
+        {
+            "edits": [{"step": 1, "arguments": {"estimated_minutes": 120}}],
+            "question": "Gardez-vous le rendez-vous à 21 h ?",
+        },
+        {},
+    ]
+    for extra, words in zip(responses, ("Projet physique", "2 heures", "oui"), strict=True):
+        script = ScriptedModels(
+            response(tool_use("resume_request", {"draft_id": draft_id, **extra}))
+        )
+        answer = assistant(script).reply(ctx, words, [])
+        sent = script.requests[0]["contents"][-1].parts[0].text
+        assert "Rendez-vous" in sent and draft_id in sent
+        if "question" in extra:
+            assert answer.draft_id == draft_id and answer.status == "clarification"
+        else:
+            assert answer.proposal_id == draft_id and answer.status == "pending_confirmation"
+        assert ctx.changed == [] and replan_request(session) is None
+    assert [step["arguments"] for step in row.details["plan_changes"]] == [
+        {**work, "title": "Projet physique", "estimated_minutes": 120},
+        event,
+    ]
+
+
+def test_independent_request_and_idempotent_clarification(
+    sessions: sessionmaker[Session], database_url: str
+) -> None:
+    with sessions.begin() as session:
+        seed(session)
+    work = {"title": "Projet en attente", "estimated_minutes": 60, "splittable": True}
+    other = {"title": "Projet indépendant", "estimated_minutes": 45, "splittable": True}
+    llm = ScriptedModels(
+        response(
+            tool_use(
+                "clarify_request",
+                {
+                    "changes": [{"name": "create_task", "arguments": work}],
+                    "question": "Quelle échéance ?",
+                },
+            )
+        ),
+        response(
+            tool_use(
+                "preview_plan_changes",
+                {
+                    "changes": [{"name": "create_task", "arguments": other}],
+                },
+            )
+        ),
+    )
+    app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    app.state.assistant = assistant(llm)
+    app.state.routing = FakeRouting()
+    app.state.clock = lambda: NOW
+    with TestClient(app) as api:
+        key = {**AUTH, "Idempotency-Key": "clarification-retry"}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            requests = [
+                pool.submit(
+                    api.post, "/v1/conversation", headers=key, json={"text": "Ajoute le projet"}
+                )
+                for _ in range(2)
+            ]
+            first, retry = [request.result(timeout=20).json() for request in requests]
+        assert first == retry
+        second = api.post(
+            "/v1/conversation", headers=AUTH, json={"text": "Prépare un autre projet indépendant"}
+        ).json()
+    assert len(llm.requests) == 2
+    with sessions() as session:
+        draft = session.get(ProposalRow, uuid.UUID(first["draft_id"]))
+        independent = session.get(ProposalRow, uuid.UUID(second["proposal_id"]))
+        assert draft is not None and independent is not None and draft.id != independent.id
+        assert draft.details["changes"][0]["arguments"] == work
+        assert independent.details["plan_changes"] == [{"name": "create_task", "arguments": other}]
+
+
+def test_expired_draft_cannot_be_resumed(session: Session) -> None:
+    seed(session)
+    ctx = OpContext(session, NOW, TZ, "assistant", user_id="student")
+    first = assistant(
+        ScriptedModels(response(tool_use("clarify_request", {"question": "Quelle date ?"})))
+    ).reply(ctx, "Ajoute un rendez-vous", [])
+    assert first.draft_id is not None
+    later = ScriptedModels(response(tool_use("resume_request", {"draft_id": first.draft_id})))
+    result = assistant(later).reply(replace(ctx, now=NOW + timedelta(hours=24)), "demain", [])
+    assert result.status == "interrupted" and "expiré" in result.text
+    assert "Quelle date" not in later.requests[0]["contents"][-1].parts[0].text
+
+
+def test_text_question_does_not_suspend_prepared_operation(session: Session) -> None:
+    seed(session)
+    ctx = OpContext(session, NOW, TZ, "assistant", routing=FakeRouting(), user_id="student")
+    script = ScriptedModels(
         response(
             tool_use(
                 "create_task",
-                {"title": "Rapport", "estimated_minutes": 180, "splittable": True},
+                {
+                    "title": "Projet",
+                    "estimated_minutes": 60,
+                    "splittable": True,
+                },
             )
         ),
-        response(say("C'est noté.")),
+        response(say("Projet ajouté. Autre chose ?")),
     )
-    reply = assistant(later).reply(ctx, "oui, en plusieurs fois", [])  # new conversation
-    assert "Plusieurs séances ?" in later.requests[0]["contents"][-1].parts[0].text
-    assert reply.text == f"C'est noté.\n{tp_question.message}"  # the next question follows
-    assert [q.id for q in open_questions(session)] == [tp_question.id]
+    answer = assistant(script).reply(ctx, "Ajoute le projet", [])
+    assert answer.status == "completed" and answer.draft_id is None
+    assert ctx.changed == ["create_task", "plan_now"]
+
+
+def test_draft_replays_dependent_changes_with_actual_ids(session: Session) -> None:
+    seed(session)
+    ctx = OpContext(session, NOW, TZ, "assistant", FakeRouting(), user_id="student")
+    script = ScriptedModels(
+        response(
+            tool_use(
+                "clarify_request",
+                {
+                    "changes": [
+                        {
+                            "name": "create_task",
+                            "ref": "task",
+                            "arguments": {
+                                "title": "Projet",
+                                "estimated_minutes": 60,
+                                "splittable": True,
+                            },
+                        }
+                    ],
+                    "question": "Quelle durée finale ?",
+                },
+            )
+        ),
+    )
+    first = assistant(script).reply(ctx, "Prépare le projet", [])
+    assert first.draft_id is not None
+    resumed = assistant(
+        ScriptedModels(
+            response(
+                tool_use(
+                    "resume_request",
+                    {
+                        "draft_id": first.draft_id,
+                        "changes": [
+                            {
+                                "name": "update_task",
+                                "arguments": {
+                                    "task_id": {"$ref": "task.task.id"},
+                                    "estimated_minutes": 120,
+                                },
+                            }
+                        ],
+                    },
+                )
+            )
+        )
+    ).reply(ctx, "2 heures", [])
+    assert resumed.proposal_id == first.draft_id, resumed.text
+    approval = run_operation(
+        ctx,
+        "decide_proposal",
+        {
+            "proposal_id": first.draft_id,
+            "approve": True,
+        },
+    )
+    assert approval["ok"], approval
+    task = session.scalars(select(StudyTaskRow).where(StudyTaskRow.subject == "Projet")).one()
+    assert task.effort_minutes == 120

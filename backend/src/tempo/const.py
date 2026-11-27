@@ -193,6 +193,9 @@ RETENTION_HOUR = 4
 NOTIFICATION_RETENTION = timedelta(days=90)
 PROPOSAL_RETENTION = timedelta(days=180)
 PLAN_PROPOSAL_VALIDITY = timedelta(minutes=15)
+CONVERSATION_DRAFT_VALIDITY = timedelta(hours=24)
+CONVERSATION_DRAFT_KIND = "conversation_draft"
+MAX_PLAN_CHANGES = 5
 WORKER_HEARTBEAT_MAX_AGE = timedelta(minutes=5)
 VERSION_RETENTION = timedelta(days=30)
 ACTIVITY_RETENTION = timedelta(days=180)
@@ -203,7 +206,7 @@ IDEMPOTENCY_RETENTION = timedelta(days=2)
 
 HISTORY_TURNS = 12
 HISTORY_WINDOW = timedelta(hours=24)
-"""Recent turns of EVERY Assist conversation (one user): clarifications survive."""
+"""Recent messages within one user's Assist conversation."""
 MAX_AGENT_STEPS = 16
 CONVERSATION_BUDGET_SECONDS = 60.0
 """No new model call after this; Home Assistant waits longer (one re-plan + the answer)."""

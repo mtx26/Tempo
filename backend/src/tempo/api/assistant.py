@@ -24,7 +24,12 @@ from sqlalchemy.orm import Session
 from tempo.api.location import SessionDep
 from tempo.assistant.agent import Assistant, LLMUnavailableError
 from tempo.assistant.catalog import CATALOG, OpContext, run_operation
-from tempo.const import HISTORY_TURNS, HISTORY_WINDOW, IDEMPOTENCY_RETENTION
+from tempo.const import (
+    CONVERSATION_DRAFT_KIND,
+    HISTORY_TURNS,
+    HISTORY_WINDOW,
+    IDEMPOTENCY_RETENTION,
+)
 from tempo.db.models import ConversationTurnRow
 from tempo.db.store import get_setting, set_setting
 from tempo.transport.routing import RoutingProvider
@@ -33,7 +38,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
 IdempotencyKey = Annotated[str | None, Header(max_length=150)]
 PROPOSAL_DECISION = re.compile(
-    r"(confirme|accepte|refuse)\s+(?:la proposition\s+)?"
+    r"(confirme|accepte|refuse|annule)\s+(?:(?:la proposition|le brouillon)\s+)?"
     r"([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)"
     r"[.!]?",
     re.IGNORECASE,
@@ -119,13 +124,14 @@ class ConversationIn(BaseModel):
     user_id: str = Field(default="tempo", min_length=1, max_length=100)
 
 
-def _history(session: Any, conversation_id: str, now: datetime) -> list[dict[str, str]]:
+def _history(session: Session, scope: str, now: datetime) -> list[dict[str, str]]:
     rows = list(
         session.scalars(
             select(ConversationTurnRow)
-            # One user: a clarification asked in another Assist conversation (or before a
-            # restart) is still in context; the conversation id only labels the turns.
-            .where(ConversationTurnRow.created_at >= now - HISTORY_WINDOW)
+            .where(
+                ConversationTurnRow.conversation_id == scope,
+                ConversationTurnRow.created_at >= now - HISTORY_WINDOW,
+            )
             .order_by(ConversationTurnRow.created_at.desc())
             .limit(HISTORY_TURNS)
         )
@@ -136,10 +142,10 @@ def _history(session: Any, conversation_id: str, now: datetime) -> list[dict[str
     return turns
 
 
-def _remember(session: Any, conversation_id: str, role: str, content: str) -> None:
+def _remember(session: Session, scope: str, role: str, content: str) -> None:
     session.add(
         ConversationTurnRow(
-            conversation_id=conversation_id,
+            conversation_id=scope,
             role=role,
             content=content[:8000],
             created_at=datetime.now(UTC),
@@ -165,14 +171,24 @@ def conversation(
             return previous
     ctx = _context(request, session, "assistant")
     ctx.user_id = body.user_id
+    ctx.conversation_id = body.conversation_id
+    # A stable, unambiguous key for both history and serialization of turns in the same thread.
+    scope = (
+        "scope:"
+        + hashlib.sha256(json.dumps([body.user_id, body.conversation_id]).encode()).hexdigest()
+    )
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext('conversation'), hashtext(:scope))"),
+        {"scope": scope},
+    )
     decision = PROPOSAL_DECISION.fullmatch(body.text.strip())
     if decision:
-        response = _decide(ctx, decision[2].lower(), decision[1].lower() != "refuse")
+        response = _decide(ctx, decision[2].lower(), decision[1].lower() in {"confirme", "accepte"})
     else:
         assistant: Assistant | None = getattr(request.app.state, "assistant", None)
         if assistant is None:
             return _unavailable("assistant Gemini non configuré (compte de service Vertex AI)")
-        history = _history(session, body.conversation_id, ctx.now)
+        history = _history(session, scope, ctx.now)
         try:
             reply = assistant.reply(ctx, body.text, history)
         except LLMUnavailableError as exc:
@@ -183,11 +199,14 @@ def conversation(
             "used_llm": True,
             "operations": reply.operations,
             "changed": bool(ctx.changed),
+            "status": reply.status,
         }
         if reply.proposal_id is not None:
             response["proposal_id"] = reply.proposal_id
-    _remember(session, body.conversation_id, "user", body.text)
-    _remember(session, body.conversation_id, "assistant", response["reply"])
+        if reply.draft_id is not None:
+            response["draft_id"] = reply.draft_id
+    _remember(session, scope, "user", body.text)
+    _remember(session, scope, "assistant", response["reply"])
     if key is not None:
         _remember_response(session, key, fingerprint, response)
     return response
@@ -196,11 +215,13 @@ def conversation(
 def _decide(ctx: OpContext, code: str, approve: bool) -> dict[str, Any]:
     outcome = run_operation(ctx, "decide_proposal", {"proposal_id": code, "approve": approve})
     result = outcome.get("result", {})
-    state = result.get("proposal", {}).get("status")
+    proposal = result.get("proposal", {})
+    state = proposal.get("status")
+    is_draft = proposal.get("kind") == CONVERSATION_DRAFT_KIND
     return {
         "reply": {
             "approved": "Proposition approuvée. Les changements confirmés ont été appliqués.",
-            "rejected": "Proposition refusée.",
+            "rejected": "Demande abandonnée." if is_draft else "Proposition refusée.",
             "obsolete": "La proposition a expiré ou le planning a changé. "
             "Demandez un nouvel aperçu.",
         }.get(state, outcome.get("error", "Proposition indisponible.")),
@@ -208,7 +229,8 @@ def _decide(ctx: OpContext, code: str, approve: bool) -> dict[str, Any]:
         "operations": [
             {"name": "decide_proposal", "ok": outcome["ok"], "error": outcome.get("error")}
         ],
-        "changed": state in {"approved", "rejected"},
+        "changed": not is_draft and state in {"approved", "rejected"},
+        "status": "completed" if state == "approved" else state or "interrupted",
     }
 
 
@@ -220,5 +242,6 @@ def _unavailable(reason: str) -> dict[str, Any]:
         "used_llm": False,
         "operations": [],
         "changed": False,
+        "status": "interrupted",
         "error": "llm_unavailable",
     }

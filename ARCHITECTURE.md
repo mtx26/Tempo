@@ -96,8 +96,9 @@ M -- T
   résidence entre deux activités n'existe que sur demande explicite.
 - **Clarification** : une information manquante, ambiguë ou contradictoire fait l'objet d'une
   question ; seuls l'élément et la période concernés attendent, le reste est planifié. Rien
-  n'est supposé. Les questions sont persistantes (redémarrages, autres conversations), posées
-  une à la fois par ordre d'urgence, et la suivante est posée dès qu'une réponse est traitée.
+  n'est supposé. Les questions du planificateur restent disponibles dans Assist par ordre
+  d'urgence. Une demande en cours de clarification garde ses opérations dans le même fil,
+  y compris après un redémarrage.
 - **Accord** : les éléments déjà prévus aujourd'hui ne bougent qu'avec l'accord de
   l'utilisateur (sauf demande explicite de réorganiser la journée), de même qu'une activité dont
   l'itinéraire réel ne permet plus le créneau prévu, et toute activité ou séance verrouillée.
@@ -184,26 +185,28 @@ sequenceDiagram
  participant H as HA / HACS
  participant A as Assistant
  participant L as LLM
- participant API as Opérations
+ participant DB as PostgreSQL
  participant P as Planificateur
- U->>H: Demain je pars de chez papa et je rentre chez maman après les cours
- H->>A: Texte + identifiant de conversation
- A->>L: Historique récent, date et fuseau, catalogue
- L-->>A: Appels d'opérations
- A->>API: get_context, list_places, get_schedule
- API-->>A: Données structurées
- alt Information indispensable inconnue
- A-->>U: Question naturelle
- U->>A: Précision
+ U->>H: Ajouter le travail à Solre-sur-Sambre sans trajet
+ H->>A: Texte + identifiants du profil et du fil
+ A->>L: Contexte du fil et outils
+ L-->>A: clarify_request avec l'ajout et le souper à conserver
+ A->>DB: Enregistrer le brouillon
+ A-->>U: Gardez-vous l'entraînement ?
+ U->>A: Annulez l'entraînement, je garde le souper
+ A->>L: Brouillon actif et réponse
+ L-->>A: resume_request avec l'annulation
+ A->>P: Simuler le lot complet et vérifier le souper
+ P-->>A: Résultats et diff
+ A->>DB: Convertir le brouillon en proposition
+ A-->>U: Aperçu complet et code
+ U->>A: Confirme CODE
+ A->>DB: Vérifier fil, échéance et révision
+ alt Proposition valide
+ A->>DB: Appliquer le lot et sa décision dans une transaction
+ else Expiration, révision modifiée ou erreur
+ A-->>U: Demande expirée ou opération interrompue
  end
- A->>API: set_planned_location puis plan_now
- API->>P: Calcul sur le planning publié
- P-->>API: Résultat, diff, conflits
- API-->>A: État réel
- A->>L: Résultats des opérations
- L-->>A: Réponse fidèle
- A-->>H: Réponse
- H-->>U: Réponse naturelle
 ```
 
 Contrat (implémenté) :
@@ -223,23 +226,33 @@ Contrat (implémenté) :
   `plan_now` et les approbations éventuelles. Les opérations autorisées utilisent des
   écritures PostgreSQL transactionnelles et le routage en lecture. Notifications, versions,
   propositions du solveur et demandes de recalcul simulées sont annulées.
-- La conversation enregistre une proposition `plan_changes` pour les modifications sensibles
-  ou composées. Elle contient les opérations et arguments, le diff, l'identité fournie par
-  le client authentifié et l'expiration de 15 min. Home Assistant transmet son identifiant
-  utilisateur quand il est disponible. Les clients sans identifiant partagent le profil
-  Tempo unique. Le jeton d'API identifie un client de confiance.
-- La commande « confirme CODE » ou « refuse CODE » correspond au code de la proposition.
-  Le backend l'interprète directement, y compris pendant une panne Gemini. Il relit la
-  proposition sous le verrou du planificateur, vérifie l'identité, l'expiration, la version
-  active et la révision de recalcul, puis exécute les arguments mémorisés en bloc. En cas
-  d'échec, la décision et les écritures du lot sont annulées ensemble.
-- Contexte LLM : prompt système stable, 12 derniers tours de toutes les conversations Assist
-  (24 h ; un seul utilisateur), la question ouverte la plus urgente, date et
-  fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
-  shell, Docker ou secret.
+- `clarify_request` conserve dans la table `proposal` un `conversation_draft` en attente,
+  avec les messages concernés, la question, les opérations ordonnées, leurs arguments, les
+  activités à conserver et une échéance de 24 h après la dernière précision. L'API distingue
+  `clarification` et `missing_information`. Une réponse en texte libre reste informative
+  ou signale une opération terminée selon le résultat du tour.
+- `resume_request` désigne le brouillon et transmet les ajouts ou corrections ciblées.
+  Le serveur conserve les autres étapes et leurs contraintes. Une référence `$ref` vers le
+  résultat d'une étape antérieure est résolue à chaque exécution, avec l'identifiant issu de
+  cette exécution. Le serveur vérifie la présence, l'heure, la durée et le lieu des activités
+  à conserver. Un lot devient une seule proposition `plan_changes` après simulation.
+  La même ligne et le même identifiant sont utilisés quand le lot vient d'un brouillon.
+- Chaque fil est sérialisé et son historique est limité aux 12 derniers messages sur 24 h.
+  L'historique et les brouillons sont rattachés au couple utilisateur et fil. Home Assistant
+  transmet son identifiant utilisateur quand il est disponible. Les clients sans identifiant
+  utilisent le profil Tempo. Le jeton d'API identifie un client de confiance. Les historiques
+  antérieurs dépourvus d'identité sont écartés. Les propositions antérieures gardent leur
+  règle d'identification par utilisateur.
+- « Confirme CODE » ou « refuse CODE » traite une proposition prête dans le fil concerné
+  pendant 15 min. « Annule CODE » abandonne aussi un brouillon. Ces commandes restent
+  disponibles pendant une panne Gemini. Le backend relit la proposition sous le verrou du
+  planificateur et compare la version active et la révision de recalcul. Il rejoue ensuite
+  les étapes approuvées ensemble. En cas d'échec, la décision et le lot sont annulés ensemble.
 - Une panne ou un refus Gemini annule le tour et retourne `llm_unavailable`. Une sortie
   tronquée, une limite d'appels atteinte ou un échec après le début d'un lot annule aussi
-  le tour. La planification et le worker fonctionnent indépendamment de Gemini.
+  toutes les écritures métier du tour. Les opérations préparées et validées avant
+  l'interruption restent disponibles pour reprise. La planification et le worker
+  fonctionnent indépendamment de Gemini.
 - Durée : l'assistant ne lance plus d'appel au modèle après 60 s (chaque appel borné par le
   temps restant) ; Home Assistant attend jusqu'à 150 s, de sorte que l'utilisateur entend le
   résultat réel plutôt qu'une expiration côté client pendant qu'un changement s'applique.
@@ -935,8 +948,10 @@ stateDiagram-v2
 ```
 
 - **Un seul mécanisme d'accord** : la proposition (`move_activity`, `move_block`,
-  `unlock_block`, `unlock_activity`, `coach_plan_change`, `training_import`) enregistre l'empreinte de son entrée (`input_revision`) ; à l'accord, l'empreinte est
-  recalculée : différente ⇒ `obsolete`, rien n'est appliqué, une replanification est demandée.
+  `unlock_block`, `unlock_activity`, `coach_plan_change`, `training_import`,
+  `plan_changes`) enregistre l'empreinte de son entrée (`input_revision`). À l'accord,
+  une empreinte différente rend la proposition obsolète. Le prochain aperçu d'un lot
+  conversationnel doit être demandé dans Assist.
 - Conflits entre engagements de toutes catégories (cours, compétitions, rendez-vous fixes,
   activités verrouillées), détectés en un seul endroit (`planning/engine.find_conflicts`) et
   repris dans le résumé de chaque version, même rejetée : une activité flexible verrouillée en conflit produit une
@@ -950,8 +965,8 @@ stateDiagram-v2
   rappels relatifs suivent le planning publié, jamais une proposition.
 - Accord et refus se font en conversation (`decide_proposal` sur une proposition identifiée,
   uniquement sur réponse explicite).
-- **Un seul suivi des points ouverts** : questions, problèmes et pannes passent par
-  `db.store.notify` (dédupliqués par clé). **Une seule file de questions** : notifications
+- Les questions du planificateur et des sources passent par
+  `db.store.notify` (dédupliquées par clé). Les notifications
   `question` persistantes (redémarrages compris) avec leur échéance (`due_at`) et leur
   résolution (`resolved_at`, distincte de l'affichage : Home Assistant acquitte à la remise
   sans répondre).
@@ -959,17 +974,10 @@ stateDiagram-v2
     cours, examen incertain : une seule question par série, texte stable) : affichées une fois
     dans Home Assistant (notification persistante), closes quand le dernier plan ne les soulève
     plus, rouvertes si elles reviennent (sans nouvelle notification).
-  - Clarifications de la conversation : quand Gemini termine un tour **sans rien modifier** par
-    une question, Tempo l'enregistre (`ask:`, échéance « maintenant », avec la demande en
-    attente ; déjà lue, donc pas renotifiée) ; elle est donnée à Gemini avec le message suivant,
-    quelle que soit la conversation, puis close (reposée et réenregistrée si la réponse manque).
-  - À chaque message, la question ouverte la plus urgente (clarification en cours, puis
-    échéance la plus proche, puis la plus ancienne) est donnée à Gemini pour rattacher la
-    réponse et réutiliser ce qui est confirmé (alias, réponse d'examen par série, heure de
-    changement par date : jamais redemandés). Une réponse porte **au plus une question** :
-    si Gemini n'en pose pas, Tempo ajoute lui-même la plus urgente. Un changement du planning
-    sans recalcul dans le tour est recalculé à la fin du tour : la question résolue se ferme et
-    la suivante est posée dans la même réponse.
+  - À chaque message, Tempo transmet à Gemini la question du planificateur la plus urgente.
+    Tempo peut l'ajouter à sa réponse informative ou après une opération directe. Un changement
+    du planning sans recalcul dans le tour est recalculé à la fin du tour. Une clarification
+    active est présentée dans la réponse de son fil et conservée dans sa proposition (§4).
   - Ouverture d'Assist : vérifié dans Home Assistant 2026.11.2, l'interface n'envoie à l'agent
     que `conversation/prepare` (préchargement, aucune réponse affichable) : un agent ne peut
     pas parler le premier. La première interaction possible est le premier message de toute
@@ -1087,7 +1095,7 @@ Légende : **Vérifié** = test automatisé sur PostgreSQL réel (et MOTIS réel
 
 | Besoin | État | Preuve / écart |
 |---|---|---|
-| B01 Conversation | Partiel | Agent Gemini à outils testé avec un client simulé (`tests/integration/test_assistant.py`) et **avec le vrai Gemini** le 26/11/2026 (base jetable, données fictives) : questions quand la date est ambiguë (« vendredi prochain », « jeudi qui vient »), question sur le fractionnement d'une tâche de 3 h, indisponibilité générale créée pour « pas disponible samedi », activité déplacée à l'heure demandée sans verrou, « cette semaine le soir » enregistré comme préférence temporaire, aucune tâche inventée ; quota Vertex AI atteint une fois (429, annoncé « quota LLM atteint »). Sans Gemini, la conversation annonce la panne et ne modifie rien (test, et vrai Home Assistant). Questions persistantes (planificateur, sources et clarifications de la conversation), une par réponse par urgence, reprises dans toute conversation : testées avec un client simulé (`test_assistant.py`) et avec le vrai Gemini (§12). Contrat HA ↔ backend vérifié avec le vrai client HA. |
+| B01 Conversation | Partiel | Client Gemini simulé et PostgreSQL réel (`tests/integration/test_assistant.py`). Le scénario de Solre-sur-Sambre vérifie la reprise du travail, l'annulation de l'entraînement, la conservation du souper et l'absence de trajet associé au travail. Les tests couvrent les précisions successives, l'isolation par fil et utilisateur, l'expiration, le refus, l'atomicité et les reprises. Gemini réel a été testé le 26/11/2026 sur les anciens parcours. La nouvelle sélection des outils de clarification par Gemini réel reste à vérifier. Le contrat avec le client Home Assistant est couvert par `test_ha_contract.py`. |
 | B02 Événements | Vérifié | Fixe, flexible, journée entière occupée/informative, plusieurs jours, série + exception + « suivantes » + série entière, verrouillage (`test_operations.py`). |
 | B03 Tâches | Vérifié | Sans durée puis estimée, planifiée, progression partielle idempotente ; fractionnement demandé au-delà de 90 min, indépendant du lieu ; tâche située fractionnable en plusieurs séances avec trajets ; tâche terminée : toutes les séances restantes annulées, verrouillées comprises, jamais signalées manquées (`test_decisions.py`, `test_domain_rules.py`). |
 | B04 Université | Partiel | Import, modifications, annulations, sync suspecte, DST testés sur fixtures ; éléments ignorés (journée entière, repères, invalides) notifiés. **Flux réel de l'université validé localement** le 25/11/2026 (secret `tempo_ics_url`) : téléchargement sécurisé, 36 cours importés dans une base jetable, seconde synchronisation sans changement ; ses congés codés en durée nulle ont révélé un défaut corrigé (`test_ics.py`). Pas encore en service continu (worker non déployé). |
@@ -1132,7 +1140,19 @@ de la conversation).
 
 ### Améliorations du 27/11/2026
 
-Recette finale locale : 610 tests réussis, 3 ignorés et 94 % de couverture. PostgreSQL 16,
+Le correctif conversationnel local reproduit l'incident du 27 novembre avec PostgreSQL et
+Gemini simulé. L'aperçu maintient le souper à 18 h et signale le chevauchement d'un événement
+occupé sur toute la journée avec le souper fixe. Le calcul conserve les heures saisies et la
+confirmation applique le lot correspondant. Le choix de l'intention et du brouillon à
+reprendre reste une interprétation de Gemini. Le backend garantit la conservation et
+l'exécution des opérations qu'il a reçues sous forme structurée.
+
+La suite backend du correctif conversationnel totalise 643 tests réussis et 3 tests
+ignorés qui nécessitent la clé Belgian Mobility. Les vérifications incluent le contrat
+Home Assistant, PostgreSQL, MOTIS et GreenMail locaux.
+
+La recette locale de la version 0.8.3 totalisait 610 tests réussis, 3 ignorés et 94 % de
+couverture. PostgreSQL 16,
 MOTIS Bruxelles et national, GreenMail et le contrat avec le client Home Assistant ont été
 utilisés. Les trois tests ignorés requièrent la clé du portail Belgian Mobility. Ruff,
 mypy strict et la validation de la configuration Compose et Swarm sont passés.

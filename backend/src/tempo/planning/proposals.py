@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from tempo.ai.apply import apply_result, result_from_json
+from tempo.const import CONVERSATION_DRAFT_KIND
 from tempo.db.models import ActivityRow, ProposalRow, ScheduleVersion, StudyBlockRow
 from tempo.db.store import active_version, audit, notify, proposal_revision, request_replan
 from tempo.domain.ops import DomainError
@@ -21,7 +22,11 @@ def proposal_out(row: ProposalRow) -> dict[str, Any]:
         "id": str(row.id),
         "kind": row.kind,
         "title": row.title,
-        "details": {key: value for key, value in row.details.items() if key != "user_id"},
+        "details": {
+            key: value
+            for key, value in row.details.items()
+            if key not in {"user_id", "conversation_id"}
+        },
         "status": row.status,
         "created_at": row.created_at.isoformat(),
     }
@@ -137,6 +142,7 @@ def decide(
     actor: str,
     now: datetime,
     user_id: str | None = None,
+    conversation_id: str | None = None,
     apply_plan_changes: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Approve or reject a pending proposal. Approval re-checks the input revision: changed
@@ -144,22 +150,35 @@ def decide(
     row = session.get(ProposalRow, proposal_id, with_for_update=True)
     if row is None:
         raise DomainError("proposition introuvable")
+    draft = row.kind == CONVERSATION_DRAFT_KIND
+    compound = row.kind == "plan_changes"
+    conversational = draft or compound
+    if conversational:
+        owner = row.details["user_id"]
+        thread = row.details.get("conversation_id")
+        if (
+            user_id is None
+            or user_id != owner
+            or (thread is not None and thread != conversation_id)
+        ):
+            raise DomainError("proposition introuvable")
+        if compound and apply_plan_changes is None:
+            raise DomainError("proposition introuvable")
     if row.status != "pending":
         raise DomainError(f"proposition déjà {row.status}")
-    compound = row.kind == "plan_changes"
-    if compound and (apply_plan_changes is None or user_id != row.details["user_id"]):
-        raise DomainError("proposition introuvable")
-    expired = compound and now >= datetime.fromisoformat(row.details["expires_at"])
+    expired = conversational and now >= datetime.fromisoformat(row.details["expires_at"])
     if expired or (
         approve
         and row.input_revision is not None
         and proposal_revision(session, row.details) != row.input_revision
     ):
         row.status, row.decided_at = "obsolete", now
-        if not compound:
+        if not conversational:
             request_replan(session, now)
         audit(session, actor, "proposal_obsolete", "proposal", str(row.id), kind=row.kind)
         return proposal_out(row)
+    if approve and draft:
+        raise DomainError("ce brouillon attend une précision avant de pouvoir être confirmé")
     row.status, row.decided_at = ("approved" if approve else "rejected"), now
     if not approve and row.kind in ("move_activity", "move_block"):
         # Declined same-day move: the item is not re-placed today (from tomorrow onward).

@@ -59,7 +59,13 @@ accord (propositions visibles dans le capteur « Approbations en attente »).
 Pour examiner une demande composée, demandez par exemple « Simule l'annulation de mon
 rendez-vous de sport et le déplacement de ma séance de physique ». Tempo enregistre le lot
 après la simulation et donne un code. Dites « confirme CODE » ou « refuse CODE » dans les
-15 minutes. Si le planning ou une de ses entrées a changé, demandez un nouvel aperçu.
+15 minutes dans le même fil Assist. Si le planning ou une de ses entrées a changé, demandez
+un nouvel aperçu.
+
+Si Tempo demande une précision, répondez dans le même fil. Les opérations préparées et leurs
+contraintes restent en brouillon pendant 24 heures après la dernière précision. L'aperçu
+regroupe les étapes une fois les réponses obtenues. « Annule CODE » abandonne le brouillon
+identifié dans la réponse. Une autre demande peut être traitée pendant ce temps.
 Home Assistant envoie une clé `Idempotency-Key` par tour et réutilise la même clé après une
 coupure de la connexion. Les autres clients HTTP peuvent également fournir cette clé.
 Mettez à jour le backend avant l'intégration Home Assistant pour que l'API accepte le champ
@@ -270,9 +276,9 @@ Exploitation :
 - Sauvegarde quotidienne (14 jours) dans le volume `backups` ; la copier hors du nœud.
   Exercice mensuel : `docker exec <tâche backup> sh /scripts/restore_drill.sh` (restaure le
   dernier dump dans une base temporaire, compare les comptes, la supprime).
-- Rétention automatique : notifications lues 90 j, propositions décidées et activités 180 j,
-  plans remplacés 30 j, conversations 7 j. `audit_entry` n'est purgé qu'avec le rôle
-  propriétaire.
+- La rétention automatique conserve les notifications lues 90 j, les propositions décidées
+  et les activités 180 j, les plans remplacés 30 j et les conversations 7 j. Les brouillons de
+  conversation sont purgés 7 j après expiration. Seul le rôle propriétaire purge `audit_entry`.
 - Les purges de rétention et de conversation reprennent indépendamment après un échec.
   Le dernier succès est enregistré avec chaque purge dans `app_setting`.
 - Une seule réplique pour `api` (limiteur d'authentification en mémoire), `worker` et

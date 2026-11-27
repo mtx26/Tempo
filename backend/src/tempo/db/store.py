@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import ColumnElement, and_, delete, or_, select, update
+from sqlalchemy import ColumnElement, and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,7 @@ from tempo.const import (
     ACCESS_OVERRIDES_SETTING,
     ALTERNATION_SETTING,
     CLASS_ATTENDANCE_SETTING,
+    CONVERSATION_DRAFT_KIND,
     MAX_JOURNEY_SETTING,
     SETTING_DEFAULTS,
     SWITCHES_SETTING,
@@ -186,40 +187,16 @@ def notify(
         session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
 
 
-def ask_again(session: Session, question: str, request: str, now: datetime) -> None:
-    """A clarification asked in the conversation, kept open until the user answers (any
-    conversation, after a restart): the live exchange comes first (due now). Already read in
-    the conversation: never re-notified in Home Assistant."""
-    key = f"ask:{digest(question)}"
-    notify(
-        session,
-        "question",
-        "Tempo attend votre réponse",
-        f"{question} (votre demande : « {request[:300]} »)",
-        key,
-        due_at=now,
-    )
-    session.execute(
-        update(NotificationRow)
-        .where(NotificationRow.dedupe_key == key)
-        .values(acknowledged_at=now, resolved_at=None)
-    )
-
-
-def resolve_question(session: Session, question_id: str, now: datetime) -> None:
-    row = session.get(NotificationRow, uuid.UUID(question_id))
-    if row is not None and row.resolved_at is None:
-        row.resolved_at = now
-        row.acknowledged_at = row.acknowledged_at or now
-
-
 def open_questions(session: Session) -> list[NotificationRow]:
-    """Unresolved questions of every origin (planning, sources, conversation), most urgent
-    first: the earliest needed answer, then the oldest question."""
+    """Unresolved planner and source questions, most urgent first."""
     return list(
         session.scalars(
             select(NotificationRow)
-            .where(NotificationRow.kind == "question", NotificationRow.resolved_at.is_(None))
+            .where(
+                NotificationRow.kind == "question",
+                NotificationRow.resolved_at.is_(None),
+                ~NotificationRow.dedupe_key.startswith("ask:"),
+            )
             .order_by(NotificationRow.due_at.asc().nulls_last(), NotificationRow.created_at)
         )
     )
@@ -256,6 +233,7 @@ def proposal_revision(session: Session, details: dict[str, Any]) -> str | None:
 def pending_proposals(now: datetime) -> ColumnElement[bool]:
     return and_(
         ProposalRow.status == "pending",
+        ProposalRow.kind != CONVERSATION_DRAFT_KIND,
         or_(
             ProposalRow.kind != "plan_changes",
             ProposalRow.details["expires_at"].astext > now.astimezone(UTC).isoformat(),
