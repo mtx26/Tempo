@@ -44,7 +44,7 @@ class ChangeEdit(Strict):
 
 
 class ResumeIn(PreparedChanges):
-    draft_id: uuid.UUID
+    draft_id: uuid.UUID = Field(description="Exact id of the draft or pending preview to revise.")
     edits: list[ChangeEdit] = Field(default_factory=list, max_length=MAX_PLAN_CHANGES)
     release_activities: list[str] = Field(
         default_factory=list,
@@ -64,21 +64,22 @@ CONTROL_TOOLS: dict[str, tuple[type[Strict], str]] = {
     ),
     "resume_request": (
         ResumeIn,
-        "Continue one specific pending draft using the user's answer. Supply only additional "
+        "Continue one pending draft or revise a pending preview from this thread. Supply only "
+        "additional "
         "operations, explicit edits to existing steps, and additional activities to keep. "
         "Set question only if another answer is needed. Otherwise request a single preview.",
     ),
 }
 
 
-def active_drafts(ctx: OpContext) -> list[ProposalRow]:
+def active_requests(ctx: OpContext) -> list[ProposalRow]:
     if ctx.user_id is None:
         return []
     return list(
         ctx.session.scalars(
             select(ProposalRow)
             .where(
-                ProposalRow.kind == CONVERSATION_DRAFT_KIND,
+                ProposalRow.kind.in_((CONVERSATION_DRAFT_KIND, "plan_changes")),
                 ProposalRow.status == "pending",
                 ProposalRow.details["expires_at"].astext > ctx.now.astimezone(UTC).isoformat(),
                 ProposalRow.details["user_id"].astext == ctx.user_id,
@@ -87,6 +88,12 @@ def active_drafts(ctx: OpContext) -> list[ProposalRow]:
             .order_by(ProposalRow.created_at.desc())
         )
     )
+
+
+def request_changes(row: ProposalRow) -> list[dict[str, Any]]:
+    key = "changes" if row.kind == CONVERSATION_DRAFT_KIND else "plan_changes"
+    changes: list[dict[str, Any]] = row.details[key]
+    return changes
 
 
 def draft_inputs(
@@ -100,7 +107,7 @@ def draft_inputs(
         if draft is None
         else PreparedChanges.model_validate(
             {
-                "changes": draft.details["changes"],
+                "changes": request_changes(draft),
                 "keep_activities": draft.details["keep_activities"],
             }
         )
@@ -144,10 +151,13 @@ def draft_inputs(
         if change.ref is not None:
             if change.ref in refs:
                 raise OpError(f"référence d'opération répétée : {change.ref}")
-            refs[change.ref] = {
-                entity: {"id": str(uuid.UUID(int=0))}
-                for entity in ("activity", "task", "reminder", "first")
-            }
+            if change.name == "upsert_place":
+                refs[change.ref] = {"place_id": arguments["place_id"]}
+            else:
+                refs[change.ref] = {
+                    entity: {"id": str(uuid.UUID(int=0))}
+                    for entity in ("activity", "task", "reminder", "first")
+                }
     retained = [activity for activity in previous.keep_activities if activity not in released]
     ids = list(dict.fromkeys([*retained, *body.keep_activities]))
     kept = kept_activities(ctx, ids)

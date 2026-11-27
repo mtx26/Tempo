@@ -753,7 +753,11 @@ class EventIn(Strict):
     all_day: bool = False
     all_day_last_day: date | None = Field(default=None, description="Multi-day all-day event")
     busy: bool = Field(default=True, description="All-day events: False = informative only")
-    place_id: str | None = None
+    place_id: str | None = Field(
+        default=None,
+        description="Exact id from list_places. For a descriptive location without travel, "
+        "put the supplied location in the title or notes and omit this field.",
+    )
     remote: bool | None = Field(
         default=None,
         description="True: Tempo plans no journey for it (online, at home, or the user does not "
@@ -2562,7 +2566,10 @@ class PreviewChange(Strict):
         "acknowledge_notification",
         "plan_now",
     ]
-    arguments: dict[str, Any]
+    arguments: dict[str, Any] = Field(
+        description="Exact catalogue arguments. Use string identifiers from lookup tools. "
+        'Inside this batch only, use {"$ref": "step.result_key"} for a named earlier result.'
+    )
     ref: str | None = Field(
         default=None,
         pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,39}$",
@@ -2658,7 +2665,20 @@ def resolve_references(value: Any, references: dict[str, Any]) -> Any:
             if not isinstance(prefix, str) or not isinstance(result, str):
                 raise OpError("la référence d'opération doit désigner un identifiant")
             return prefix + result
-        return {key: resolve_references(item, references) for key, item in value.items()}
+        resolved = {}
+        for key, item in value.items():
+            # Some model responses represent a named place result with a boolean marker.
+            if (
+                key == "place_id"
+                and isinstance(item, dict)
+                and item.keys() == {"is_ref", "ref"}
+                and item["is_ref"] is True
+                and isinstance(item["ref"], str)
+                and "." not in item["ref"]
+            ):
+                item = {"$ref": f"{item['ref']}.place_id"}
+            resolved[key] = resolve_references(item, references)
+        return resolved
     if isinstance(value, list):
         return [resolve_references(item, references) for item in value]
     return value
@@ -3094,6 +3114,15 @@ def _audit_target(result: dict[str, Any]) -> tuple[str, str]:
     return "operation", "-"
 
 
+def validation_detail(error: ValidationError | OpError) -> str:
+    if isinstance(error, ValidationError):
+        fields = ", ".join(
+            f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors()[:5]
+        )
+        return f"arguments invalides : {fields}"
+    return str(error)
+
+
 def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate and run one operation inside a savepoint: a failure leaves nothing behind.
 
@@ -3104,8 +3133,7 @@ def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[
     try:
         body = op.model.model_validate(arguments)
     except ValidationError as exc:
-        details = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:5])
-        return {"ok": False, "error": f"arguments invalides : {details}"}
+        return {"ok": False, "error": validation_detail(exc)}
     if op.mutates:
         lock_replan(ctx.session)
     writes = op.mutates and not (isinstance(body, PlanIn) and body.dry_run)
@@ -3125,7 +3153,9 @@ def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[
                 if op.replan:
                     request_replan(ctx.session, ctx.now)
             ctx.session.flush()
-    except (OpError, DomainError, ValidationError) as exc:
+    except (OpError, ValidationError) as exc:
+        return {"ok": False, "error": validation_detail(exc)}
+    except DomainError as exc:
         return {"ok": False, "error": str(exc)}
     except HTTPException as exc:
         return {"ok": False, "error": str(exc.detail)}

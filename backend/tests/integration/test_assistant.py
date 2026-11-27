@@ -244,6 +244,123 @@ def test_solre_workday_survives_clarification(
         assert all(journey["event_title"] != work["title"] for journey in plan.summary["travel"])
 
 
+@pytest.mark.parametrize("with_saved_place", [False, True])
+def test_revise_workday_preview_after_question_about_hours(
+    session: Session, with_saved_place: bool
+) -> None:
+    from tempo.db.models import PlaceRow
+
+    seed(session)
+    now = datetime(2026, 11, 27, 21, 23, tzinfo=TZ)
+    ctx = OpContext(session, now, TZ, "assistant", FakeRouting(), user_id="student")
+    title = "Travail à Solre-sur-Sambre"
+    work = {
+        "title": title,
+        "scheduling": "fixed",
+        "all_day": True,
+        "start": "2026-11-28T00:00",
+        "remote": True,
+    }
+    changes = []
+    if with_saved_place:
+        changes.append(
+            {
+                "name": "upsert_place",
+                "ref": "place",
+                "arguments": {
+                    "place_id": "solre_sur_sambre",
+                    "name": "Solre-sur-Sambre",
+                    "latitude": 50.3,
+                    "longitude": 4.2,
+                },
+            }
+        )
+        work["place_id"] = "solre_sur_sambre"
+    changes.append({"name": "create_event", "arguments": work})
+    first_turn = (
+        [response(tool_use("preview_plan_changes", {"changes": changes}))]
+        if with_saved_place
+        else [response(tool_use("create_event", work)), response(say("Voici le résultat."))]
+    )
+    script = ScriptedModels(
+        *first_turn, response(say("Pour le 28 novembre, de minuit au minuit suivant."))
+    )
+    agent = assistant(script)
+    original = agent.reply(ctx, "Demain je travaille toute la journée à Solre, sans trajet.", [])
+    original_id = original.proposal_id
+    assert original_id is not None
+    assert "00:00 à 00:00 le 29/11" in original.text
+    question = agent.reply(
+        ctx, "Attends, journée entière c'est de quelle heure à quelle heure ?", []
+    )
+    assert question.status == "informative" and question.draft_id is None
+    original_row = session.get(ProposalRow, uuid.UUID(original_id))
+    assert original_row is not None and original_row.status == "pending"
+
+    edit: dict[str, Any] = {
+        "all_day": False,
+        "start": "2026-11-28T08:00",
+        "end": "2026-11-28T17:00",
+    }
+    if with_saved_place:
+        edit["place_id"] = {"is_ref": True, "ref": "place"}
+        script.script.append(
+            response(
+                tool_use(
+                    "resume_request",
+                    {
+                        "draft_id": original_id,
+                        "edits": [
+                            {
+                                "step": len(changes),
+                                "arguments": {
+                                    **edit,
+                                    "place_id": {"is_ref": True, "ref": "missing"},
+                                },
+                            }
+                        ],
+                    },
+                )
+            )
+        )
+        invalid = agent.reply(ctx, "De 8 à 17 h.", [])
+        assert invalid.status == "interrupted" and invalid.proposal_id is None
+        assert "validation error" not in invalid.text and "pydantic.dev" not in invalid.text
+        assert original_row.status == "pending"
+    script.script.append(
+        response(
+            tool_use(
+                "resume_request",
+                {
+                    "draft_id": original_id,
+                    "edits": [{"step": len(changes), "arguments": edit}],
+                },
+            )
+        )
+    )
+    revised = agent.reply(ctx, "Oui, genre 8 à 17 h.", [])
+    assert original_id in script.requests[-1]["contents"][-1].parts[0].text
+    new_id = revised.proposal_id
+    assert new_id is not None and new_id != original_id, revised.text
+    assert "08:00 à 17:00" in revised.text and "Aucun trajet ajouté" in revised.text
+    assert original_row.status == "obsolete"
+    assert (
+        ctx.changed == []
+        and session.scalar(select(ActivityRow).where(ActivityRow.title == title)) is None
+    )
+    assert session.get(PlaceRow, "solre_sur_sambre") is None
+    former = run_operation(ctx, "decide_proposal", {"proposal_id": original_id, "approve": True})
+    assert not former["ok"]
+    approval = run_operation(ctx, "decide_proposal", {"proposal_id": new_id, "approve": True})
+    assert approval["ok"], approval
+    activity = session.scalars(select(ActivityRow).where(ActivityRow.title == title)).one()
+    assert activity.remote and not activity.all_day
+    assert activity.earliest_start_at == datetime(2026, 11, 28, 8, tzinfo=TZ)
+    assert activity.latest_end_at == datetime(2026, 11, 28, 17, tzinfo=TZ)
+    assert activity.place_id == ("solre_sur_sambre" if with_saved_place else None)
+    assert (session.get(PlaceRow, "solre_sur_sambre") is not None) == with_saved_place
+
+
 def test_compound_request_previews_real_results_before_applying(session: Session) -> None:
     seed(session)
     llm = ScriptedModels(

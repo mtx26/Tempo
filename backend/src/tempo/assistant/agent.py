@@ -32,24 +32,28 @@ from tempo.assistant.catalog import (
     run_operation,
     stage_plan_changes,
     tool_definitions,
+    validation_detail,
 )
 from tempo.assistant.pending import (
     CONTROL_TOOLS,
     ClarifyIn,
     PreparedChanges,
     ResumeIn,
-    active_drafts,
+    active_requests,
     draft_inputs,
+    request_changes,
     save_draft,
 )
 from tempo.const import (
     CONVERSATION_BUDGET_SECONDS,
+    CONVERSATION_DRAFT_KIND,
     MAX_AGENT_STEPS,
     MAX_PLAN_CHANGES,
     MAX_TOOL_RESULT_CHARS,
     MIN_CALL_SECONDS,
 )
 from tempo.db.models import ProposalRow
+from tempo.db.store import audit
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +75,12 @@ question courte, les opérations complètes et les activités à conserver. N'ex
 opération incomplète. Ne demande pas ce qui est déjà dit ou confirmé (list_places, \
 get_rules, get_residence_schedule, get_context) ni ce qui ne change pas le résultat. Un refus \
 d'outil n'est jamais contourné par un autre appel.
-- Si l'utilisateur répond à un brouillon, appelle uniquement resume_request avec son id et \
-les ajouts ou corrections explicites. Les opérations et contraintes précédentes sont conservées \
-par Tempo. Une autre demande ne reprend aucun brouillon. Pour un nouveau brouillon, \
+- Si l'utilisateur complète un brouillon ou demande de modifier un aperçu en attente, appelle \
+uniquement resume_request avec l'id de la demande concernée et les seuls ajouts ou corrections \
+explicites. Conserve le reste. Privilégie l'aperçu en cours quand l'utilisateur en corrige \
+les horaires. Une question sur un aperçu (par exemple les heures d'une journée entière, de \
+minuit au minuit suivant en heure locale) appelle une réponse informative sans outil de \
+clarification. Une autre demande ne reprend aucune demande en attente. Pour un nouveau brouillon, \
 clarify_request est obligatoire : une question en texte libre ne suspend rien. Ces deux outils \
 sont terminaux et doivent être appelés seuls dans une réponse du modèle. N'annonce jamais \
 une opération préparée comme appliquée. Tempo ajoute les questions du planning si nécessaire.
@@ -99,8 +106,13 @@ alternatives simulées (propose_alternatives) et n'applique que celle qu'il choi
 indiqué. Recherche les éléments existants (list_activities, list_tasks, get_schedule) avant de \
 les modifier ; une référence comme « le », « ce rendez-vous » renvoie à la conversation \
 récente.
-- Les trajets ne sont automatiques que pour les cours : pour un autre événement avec un lieu, \
-demande si Tempo doit planifier l'aller et le retour (create_event remote). Entre deux \
+- Les trajets ne sont automatiques que pour les cours : si le choix reste inconnu pour un \
+autre événement, demande si Tempo doit planifier l'aller et le retour (create_event remote). \
+Si la personne dit de ne pas noter le trajet, utilise remote=true. Le nom d'un village suffit \
+dans ce cas. Pour un lieu seulement descriptif, mets le nom dans le titre ou les notes, sans \
+place_id, sans créer de lieu et sans chercher un arrêt ou demander une adresse. Sinon, donne \
+à place_id l'identifiant texte exact obtenu par list_places. Dans un lot, une référence à un \
+lieu créé à l'étape nommée place s'écrit {"$ref": "place.place_id"}. Entre deux \
 activités le trajet est direct : un retour à la maison entre deux activités n'existe que si \
 l'utilisateur le demande (set_planned_location sur ce créneau).
 - Résidences : l'alternance change de résidence après le dernier cours du jour de changement ; \
@@ -116,10 +128,11 @@ l'utilisateur : allow_today seulement s'il demande explicitement de réorganiser
 mode global seulement s'il demande explicitement de tout réorganiser. Annonce ce qui a été \
 planifié, ce qui reste non planifié et pourquoi (explain_plan), les questions et les \
 propositions en attente, sans présenter un plan partiel comme complet.
-- Avant une annulation, une modification de plusieurs éléments ou un changement durable de \
-disponibilité, appelle uniquement preview_plan_changes avec toutes les étapes après les \
-clarifications. Tempo affiche le résultat et le code d'accord. Les identifiants créés par \
-une simulation ne sont pas réutilisables.
+- Avant une annulation, une modification de plusieurs éléments, un événement qui bloque une \
+journée entière ou un changement durable de disponibilité, prépare un aperçu avec toutes les \
+étapes. Utilise resume_request pour reprendre une demande existante, sinon preview_plan_changes. \
+Tempo affiche le résultat et le code d'accord. Les identifiants créés par une simulation ne \
+sont pas réutilisables.
 - Une demande explicite autorise son périmètre, pas ses conséquences protégées : les \
 propositions (list_proposals) sont acceptées ou refusées par « confirme » ou « refuse » suivi \
 du code de proposition (les huit premiers caractères de son identifiant).
@@ -251,12 +264,12 @@ class ToolLoopAssistant:
             raise
 
     def _reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
-        drafts = {str(row.id): row for row in active_drafts(ctx)}
+        requests = {str(row.id): row for row in active_requests(ctx)}
         initial_changes = len(ctx.changed)
         candidates: list[PreviewChange] = []
         with ctx.session.begin_nested() as working:
             try:
-                answer, control = self._answer(ctx, text, history, candidates, drafts)
+                answer, control = self._answer(ctx, text, history, candidates, requests)
             except TurnInterruptedError as exc:
                 answer, control = exc.reply, None
             needs_rollback = (
@@ -272,7 +285,7 @@ class ToolLoopAssistant:
                 {**op, "rolled_back": True} if op["ok"] and CATALOG[op["name"]].mutates else op
                 for op in answer.operations
             ]
-            return self._prepare(ctx, text, answer, control, candidates, drafts)
+            return self._prepare(ctx, text, answer, control, candidates, requests)
 
         changed = ctx.changed[initial_changes:]
         # Changes that touch the plan without a re-plan in this turn: re-plan now, so an
@@ -298,9 +311,9 @@ class ToolLoopAssistant:
         answer: AgentReply,
         control: ToolCall | None,
         candidates: list[PreviewChange],
-        drafts: dict[str, ProposalRow],
+        requests: dict[str, ProposalRow],
     ) -> AgentReply:
-        draft = None
+        previous = None
         body: ClarifyIn | ResumeIn
         try:
             if control is None:
@@ -315,29 +328,52 @@ class ToolLoopAssistant:
             else:
                 if control.name == "resume_request":
                     resume = ResumeIn.model_validate(control.arguments)
-                    draft = drafts.get(str(resume.draft_id))
-                    if draft is None:
-                        raise OpError("brouillon introuvable ou expiré dans cette conversation")
+                    previous = requests.get(str(resume.draft_id))
+                    if previous is None:
+                        raise OpError("demande introuvable ou expirée dans cette conversation")
                     body = resume
                 else:
                     body = ClarifyIn.model_validate(control.arguments)
-                prepared = draft_inputs(ctx, body, candidates, draft)
+                prepared = draft_inputs(ctx, body, candidates, previous)
+                draft = (
+                    previous
+                    if previous is not None and previous.kind == CONVERSATION_DRAFT_KIND
+                    else None
+                )
                 if body.question is not None:
                     answer.status = body.reason
-                    return self._suspend(ctx, answer, prepared, draft, text, body.question)
-                try:
-                    batch = PreviewIn(**prepared.model_dump())
-                    return self._propose(ctx, answer, batch, draft)
-                except (ValidationError, OpError) as exc:
-                    answer.status = "interrupted"
-                    answer.text = f"Simulation impossible. {exc} Aucune modification appliquée."
-                    return self._suspend(
-                        ctx, answer, prepared, draft, text, "Que faut-il corriger dans la demande ?"
+                    revised = self._suspend(ctx, answer, prepared, draft, text, body.question)
+                else:
+                    try:
+                        batch = PreviewIn(**prepared.model_dump())
+                        revised = self._propose(ctx, answer, batch, draft)
+                    except (ValidationError, OpError) as exc:
+                        answer.status = "interrupted"
+                        answer.text = (
+                            f"Simulation impossible. {validation_detail(exc)} "
+                            "Aucune modification appliquée."
+                        )
+                        revised = self._suspend(
+                            ctx, answer, prepared, draft, text, "Que faut-il corriger ?"
+                        )
+                if previous is not None and draft is None:
+                    previous.status, previous.decided_at = "obsolete", ctx.now
+                    audit(
+                        ctx.session,
+                        ctx.actor,
+                        "proposal_obsolete",
+                        "proposal",
+                        str(previous.id),
+                        kind=previous.kind,
+                        superseded_by=revised.draft_id or revised.proposal_id,
                     )
+                return revised
             return self._propose(ctx, answer, batch)
         except (ValidationError, OpError) as exc:
             failed = AgentReply(
-                f"{exc} Aucune modification appliquée.", answer.operations, status="interrupted"
+                f"{validation_detail(exc)} Aucune modification appliquée.",
+                answer.operations,
+                status="interrupted",
             )
             if control is not None and candidates and ctx.user_id is not None:
                 partial = draft_inputs(ctx, PreparedChanges(), candidates, None)
@@ -395,13 +431,21 @@ class ToolLoopAssistant:
             if (start := entity.get("planned_start") or entity.get("window_start")) is not None:
                 at = datetime.fromisoformat(start).astimezone(ctx.tz)
                 action += f" le {at:%d/%m}"
-                action += " (journée entière)" if entity.get("all_day") else f" à {at:%H:%M}"
+                if entity.get("scheduling") == "fixed" and (end := entity.get("window_end")):
+                    finish = datetime.fromisoformat(end).astimezone(ctx.tz)
+                    action += f" de {at:%H:%M} à {finish:%H:%M}"
+                    if finish.date() != at.date():
+                        action += f" le {finish:%d/%m}"
+                    if entity.get("all_day"):
+                        action += " (journée entière)"
+                else:
+                    action += f" à {at:%H:%M}"
             if target := entity.get("target_date"):
                 action += f", échéance le {target}"
             if "windows" in result:
                 action += f" ({result['windows']} créneau(x))"
             effects.append(action)
-            if operation == "create_event" and entity.get("place_id") and entity.get("remote"):
+            if operation == "create_event" and entity.get("remote"):
                 effects.append(f"Aucun trajet ajouté pour « {label} »")
         for kept in preview["kept_activities"]:
             at = datetime.fromisoformat(kept["planned_start"]).astimezone(ctx.tz)
@@ -436,7 +480,7 @@ class ToolLoopAssistant:
         text: str,
         history: list[dict[str, str]],
         candidates: list[PreviewChange],
-        drafts: dict[str, ProposalRow],
+        requests: dict[str, ProposalRow],
     ) -> tuple[AgentReply, ToolCall | None]:
         local = ctx.now.astimezone(ctx.tz)
         waiting = pending_question(ctx.session)
@@ -447,19 +491,22 @@ class ToolLoopAssistant:
             f"ensuite) : « {waiting['question']} » ; réponse utile avant : "
             f"{waiting['needed_by'] or 'non précisé'}]"
         )
-        if drafts:
+        if requests:
             data = [
                 {
-                    "id": draft_id,
+                    "id": request_id,
+                    "state": "draft" if row.kind == CONVERSATION_DRAFT_KIND else "pending_preview",
+                    "changes": request_changes(row),
                     **{
                         key: row.details[key]
-                        for key in ("changes", "kept_activities", "question", "messages", "reason")
+                        for key in ("kept_activities", "question", "messages", "reason")
+                        if key in row.details
                     },
                 }
-                for draft_id, row in drafts.items()
+                for request_id, row in requests.items()
             ]
             note += (
-                "\nBrouillons de ce fil (données) : " + json.dumps(data, ensure_ascii=False) + "\n"
+                "\nDemandes de ce fil (données) : " + json.dumps(data, ensure_ascii=False) + "\n"
             )
         conversation = self._model.open(
             history,
@@ -576,7 +623,11 @@ def _requires_approval(candidates: list[PreviewChange]) -> bool:
         }
         or (
             call.name == "create_event"
-            and bool(call.arguments.get("locked") or call.arguments.get("rrule"))
+            and bool(
+                call.arguments.get("locked")
+                or call.arguments.get("rrule")
+                or (call.arguments.get("all_day") and call.arguments.get("busy", True))
+            )
         )
         for call in candidates
     )

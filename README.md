@@ -66,6 +66,10 @@ Si Tempo demande une précision, répondez dans le même fil. Les opérations pr
 contraintes restent en brouillon pendant 24 heures après la dernière précision. L'aperçu
 regroupe les étapes une fois les réponses obtenues. « Annule CODE » abandonne le brouillon
 identifié dans la réponse. Une autre demande peut être traitée pendant ce temps.
+Un événement qui bloque une journée entière passe par un aperçu. Vous pouvez préciser les
+horaires dans le même fil après l'avoir reçu. Tempo
+édite les étapes préparées et calcule un nouvel aperçu avec un nouveau code. Un village peut
+figurer dans le titre ou les notes si vous ne demandez aucun trajet.
 Home Assistant envoie une clé `Idempotency-Key` par tour et réutilise la même clé après une
 coupure de la connexion. Les autres clients HTTP peuvent également fournir cette clé.
 Mettez à jour le backend avant l'intégration Home Assistant pour que l'API accepte le champ

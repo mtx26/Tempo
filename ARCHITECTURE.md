@@ -237,6 +237,12 @@ Contrat (implémenté) :
   cette exécution. Le serveur vérifie la présence, l'heure, la durée et le lieu des activités
   à conserver. Un lot devient une seule proposition `plan_changes` après simulation.
   La même ligne et le même identifiant sont utilisés quand le lot vient d'un brouillon.
+- Un événement qui bloque une journée entière exige un aperçu. Une question sur un aperçu
+  en attente conserve son code. Une correction explicite dans
+  le même fil reprend les opérations de cet aperçu. Après préparation de la demande révisée,
+  l'ancien code devient obsolète et la révision reçoit son propre identifiant. Un lieu décrit
+  seulement par son village, sans trajet demandé, peut figurer dans le titre ou les notes.
+  Un identifiant de lieu référencé dans un lot doit venir d'une étape antérieure nommée.
 - Chaque fil est sérialisé et son historique est limité aux 12 derniers messages sur 24 h.
   L'historique et les brouillons sont rattachés au couple utilisateur et fil. Home Assistant
   transmet son identifiant utilisateur quand il est disponible. Les clients sans identifiant
@@ -1146,6 +1152,11 @@ occupé sur toute la journée avec le souper fixe. Le calcul conserve les heures
 confirmation applique le lot correspondant. Le choix de l'intention et du brouillon à
 reprendre reste une interprétation de Gemini. Le backend garantit la conservation et
 l'exécution des opérations qu'il a reçues sous forme structurée.
+
+La régression sur la révision d'un aperçu couvre le passage d'une journée entière à
+08 h–17 h dans le même fil. Le test vérifie le village en texte libre, la résolution d'un
+lieu issu d'une étape antérieure, le rejet d'une référence inconnue et l'obsolescence de
+l'ancien code après la révision.
 
 La suite backend du correctif conversationnel totalise 643 tests réussis et 3 tests
 ignorés qui nécessitent la clé Belgian Mobility. Les vérifications incluent le contrat
