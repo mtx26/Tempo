@@ -10,9 +10,10 @@ Times: an input datetime without offset is local time in the configured timezone
 (Europe/Brussels). Results always carry ISO 8601 with offset.
 """
 
+import re
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
@@ -40,7 +41,6 @@ from tempo.db.models import (
     AvailabilityRow,
     CategoryWindowRow,
     FixedEventRow,
-    JobRunRow,
     NotificationRow,
     PhonePositionRow,
     PlaceAliasRow,
@@ -59,9 +59,11 @@ from tempo.db.store import (
     audit,
     declared_stays,
     get_setting,
+    job_statuses,
     open_questions,
     place_directory,
     reference_residence,
+    request_replan,
     residence_alternation,
     set_setting,
     temporary_preferences,
@@ -86,7 +88,14 @@ from tempo.planning.service import PlanningNotConfiguredError, lock_block, relea
 from tempo.planning.views import schedule_items, summary
 from tempo.scheduler.model import STUDY_PREFERENCE_KEYS, Preferences, TrainingPreferences
 from tempo.transport.access import Access
-from tempo.transport.itinerary import Objective, TripQuery, find_trips
+from tempo.transport.itinerary import (
+    Objective,
+    TripQuery,
+    connection_margins,
+    find_trips,
+    journey_notes,
+    leg_payload,
+)
 from tempo.transport.location import (
     AmbiguousLocationError,
     PhonePosition,
@@ -219,7 +228,7 @@ def _range(ctx: OpContext, body: RangeIn) -> tuple[datetime, datetime]:
     mutates=False,
 )
 def get_schedule(ctx: OpContext, body: RangeIn) -> dict[str, Any]:
-    return {"items": schedule_items(ctx.session, *_range(ctx, body))}
+    return {"items": schedule_items(ctx.session, *_range(ctx, body), as_of=ctx.now)}
 
 
 @operation(
@@ -638,18 +647,9 @@ def explain_plan(ctx: OpContext, _: NoInput) -> dict[str, Any]:
     mutates=False,
 )
 def get_sources_status(ctx: OpContext, _: NoInput) -> dict[str, Any]:
-    jobs = [
-        {
-            "name": j.name,
-            "last_finished": _iso(j.last_finished_at),
-            "status": j.last_status,
-            "error": j.last_error,
-        }
-        for j in ctx.session.scalars(select(JobRunRow).order_by(JobRunRow.name))
-    ]
     sync = ctx.session.scalars(select(SyncRun).order_by(SyncRun.started_at.desc())).first()
     return {
-        "jobs": jobs,
+        "jobs": job_statuses(ctx.session, include_error=True),
         "last_ical_sync": None
         if sync is None
         else {
@@ -1463,19 +1463,54 @@ class AddressIn(Strict):
 
 @operation(
     "find_address",
-    "Coordinates of an address the user gave, from the local OpenStreetMap geocoder of the "
-    "routing engine (nothing sent elsewhere). Read the matches back and call upsert_place only "
+    "Find a named place, explicit latitude/longitude pair, address or stop using saved places "
+    "and the local MOTIS geocoder. Read the matches back and call upsert_place only "
     "with the one the user confirms; no match: ask for a more precise address (street, number, "
     "town). Never guess coordinates.",
     AddressIn,
     mutates=False,
 )
 def find_address(ctx: OpContext, body: AddressIn) -> dict[str, Any]:
+    directory = place_directory(ctx.session)
+    if places := directory.matches(body.text):
+        return {
+            "status": "ok",
+            "ambiguous": len(places) > 1,
+            "matches": [
+                {
+                    "place_id": p.id,
+                    "label": p.name,
+                    "kind": "SAVED_PLACE",
+                    "latitude": p.coordinates.lat,
+                    "longitude": p.coordinates.lon,
+                }
+                for p in places
+            ],
+        }
+    pair = re.fullmatch(r"\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*", body.text)
+    if pair is not None:
+        try:
+            coords = Coordinates(float(pair[1]), float(pair[2]))
+        except ValueError as exc:
+            raise OpError("coordonnées hors limites") from exc
+        return {
+            "status": "ok",
+            "ambiguous": False,
+            "matches": [
+                {
+                    "label": body.text,
+                    "kind": "COORDINATES",
+                    "latitude": coords.lat,
+                    "longitude": coords.lon,
+                }
+            ],
+        }
+    near = directory.get(body.near_place_id) if body.near_place_id else None
+    if body.near_place_id is not None and near is None:
+        raise OpError("lieu de référence inconnu")
     geocode = getattr(ctx.routing, "geocode", None)
     if geocode is None:
         return {"status": "unavailable", "detail": "recherche d'adresse indisponible"}
-    directory = place_directory(ctx.session)
-    near = directory.get(body.near_place_id) if body.near_place_id else None
     near = near or reference_residence(ctx.session, directory)
     try:
         matches = geocode(body.text, near=None if near is None else near.coordinates)
@@ -1488,6 +1523,7 @@ def find_address(ctx: OpContext, body: AddressIn) -> dict[str, Any]:
         }
     return {
         "status": "ok",
+        "ambiguous": len(matches) > 1,
         "matches": [
             {
                 "label": m.label,
@@ -2366,7 +2402,9 @@ class PlanIn(Strict):
 )
 def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
     if ctx.routing is None:
-        set_setting(ctx.session, "replan_requested", ctx.now.isoformat())
+        if body.dry_run:
+            raise OpError("simulation impossible : routage indisponible dans l'API")
+        request_replan(ctx.session, ctx.now)
         return {
             "status": "requested",
             "detail": "routage indisponible dans l'API : le worker replanifie sous une minute",
@@ -2391,6 +2429,7 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
             "diff": plan.get("diff"),
             "unplanned_minutes": plan.get("unplanned_minutes"),
             "deadline_misses": plan.get("deadline_misses"),
+            "deadline_capacity": plan.get("deadline_capacity"),
             "hard_deadline_misses": plan.get("hard_deadline_misses"),
             "unplaced_activities": plan.get("unplaced_activities"),
             "pending_approval": plan.get("pending_approval"),
@@ -2411,13 +2450,52 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
         savepoint.rollback()
     else:
         savepoint.commit()
-        set_setting(ctx.session, "replan_requested", None)
     explain = explain_plan(ctx, NoInput())["active_plan"] if not body.dry_run else None
     if explain is not None:
         result["explanation"] = {
             k: explain.get(k) for k in ("unplanned_minutes", "unplaced_activities")
         }
     return result
+
+
+class PreviewChange(Strict):
+    name: Literal[
+        "create_event",
+        "update_event",
+        "cancel_event",
+        "create_task",
+        "update_task",
+        "set_class_attendance",
+        "set_weekly_availability",
+        "set_category_windows",
+    ]
+    arguments: dict[str, Any]
+
+
+class PreviewIn(Strict):
+    changes: list[PreviewChange] = Field(min_length=1, max_length=5)
+
+
+@operation(
+    "preview_plan_changes",
+    "Simulate a compound planning change before applying it. Use the exact arguments of "
+    "each operation. Returns the plan comparison and pending approvals, with no changes saved.",
+    PreviewIn,
+    mutates=False,
+)
+def preview_plan_changes(ctx: OpContext, body: PreviewIn) -> dict[str, Any]:
+    preview = replace(ctx, changed=[])
+    savepoint = ctx.session.begin_nested()
+    try:
+        simulated = []
+        for index, change in enumerate(body.changes, start=1):
+            outcome = run_operation(preview, change.name, change.arguments)
+            if not outcome["ok"]:
+                raise OpError(f"simulation interrompue à l'étape {index} : {outcome['error']}")
+            simulated.append({"name": change.name, "preview_result": outcome["result"]})
+        return {**plan_now(preview, PlanIn(dry_run=True)), "simulated_operations": simulated}
+    finally:
+        savepoint.rollback()
 
 
 def _simulate(ctx: OpContext, change: Callable[[StudyTaskRow], None], task_id: str) -> Any:
@@ -2573,21 +2651,10 @@ def _journey_out(journey: Journey) -> dict[str, Any]:
         "arrival": _iso(journey.arrival),
         "duration_minutes": int(journey.duration.total_seconds() // 60),
         "transfers": journey.transfers,
-        "realtime": any(leg.realtime for leg in journey.legs),
-        "legs": [
-            {
-                "mode": leg.mode,
-                "line": leg.line,
-                "operator": leg.agency,
-                "from": leg.origin_name,
-                "to": leg.destination_name,
-                "start": _iso(leg.start),
-                "end": _iso(leg.end),
-                "realtime": leg.realtime,
-                "cancelled": leg.cancelled,
-            }
-            for leg in journey.legs
-        ],
+        "realtime": journey.uses_realtime,
+        "legs": [leg_payload(leg, operator_key="operator") for leg in journey.legs],
+        "connections": connection_margins(journey),
+        "warnings": journey_notes(journey).specific,
     }
 
 
@@ -2841,7 +2908,7 @@ def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[
         entity, entity_id = _audit_target(result)
         audit(ctx.session, ctx.actor, f"op:{name}", entity, entity_id, fields=sorted(arguments))
         if op.replan:
-            set_setting(ctx.session, "replan_requested", ctx.now.isoformat())
+            request_replan(ctx.session, ctx.now)
     return {"ok": True, "result": result}
 
 

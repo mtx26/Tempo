@@ -5,8 +5,10 @@ against a REAL MOTIS v2.11.4 (Brussels and nationwide data, recorded fixtures, l
 transport or format problem raises ``RoutingUnavailableError`` — never partial data.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -17,7 +19,9 @@ from tempo.transport.routing import Journey, Leg, RoutingUnavailableError, Servi
 
 PLAN_PATH = "/api/v6/plan"
 GEOCODE_PATH = "/api/v1/geocode"
+HEALTH_PATH = "/api/v1/health"
 MAX_ADDRESS_MATCHES = 5
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,19 +77,33 @@ def _alert(raw: dict[str, Any]) -> ServiceAlert:
 
 
 def _leg(raw: dict[str, Any]) -> Leg:
+    origin, destination = raw["from"], raw["to"]
     return Leg(
         mode=str(raw["mode"]),
-        origin_name=str(raw["from"]["name"]),
-        destination_name=str(raw["to"]["name"]),
+        origin_name=str(origin["name"]),
+        destination_name=str(destination["name"]),
         start=_time(raw["startTime"]),
         end=_time(raw["endTime"]),
         scheduled_start=_time(raw["scheduledStartTime"]),
         scheduled_end=_time(raw["scheduledEndTime"]),
         realtime=bool(raw["realTime"]),
-        cancelled=bool(raw.get("cancelled", False)),
+        cancelled=bool(
+            raw.get("cancelled") or origin.get("cancelled") or destination.get("cancelled")
+        ),
         line=raw.get("routeShortName"),
         agency=raw.get("agencyName"),
         distance_m=raw.get("distance"),
+        departure_track=origin.get("track"),
+        arrival_track=destination.get("track"),
+        scheduled_departure_track=origin.get("scheduledTrack"),
+        scheduled_arrival_track=destination.get("scheduledTrack"),
+        departure_time_reason=origin.get("departureTimestampReason"),
+        arrival_time_reason=destination.get("arrivalTimestampReason"),
+        skipped_stops=tuple(
+            stop["name"]
+            for stop in raw.get("intermediateStops") or ()
+            if stop.get("cancelled") and stop.get("name")
+        ),
         alerts=tuple(_alert(alert) for alert in raw.get("alerts") or ()),
     )
 
@@ -141,6 +159,27 @@ class MotisClient:
         self._base_url = base_url.rstrip("/")
         self._http = http_client or httpx2.Client(timeout=timeout_seconds)
 
+    def _get(self, path: str, params: dict[str, str]) -> httpx2.Response:
+        started = monotonic()
+        try:
+            response = self._http.get(self._base_url + path, params=params)
+        except httpx2.HTTPError as exc:
+            logger.warning(
+                "motis path=%s error=%s elapsed_ms=%.2f",
+                path,
+                type(exc).__name__,
+                (monotonic() - started) * 1000,
+            )
+            raise RoutingUnavailableError(f"MOTIS request failed: {type(exc).__name__}") from exc
+        logger.log(
+            logging.INFO if response.status_code == 200 else logging.WARNING,
+            "motis path=%s status=%d elapsed_ms=%.2f",
+            path,
+            response.status_code,
+            (monotonic() - started) * 1000,
+        )
+        return response
+
     def geocode(self, text: str, *, near: Coordinates | None = None) -> list[AddressMatch]:
         """Addresses, places or stops matching ``text`` (best first), from the local geocoder.
 
@@ -148,10 +187,7 @@ class MotisClient:
         params = {"text": text, "language": "fr", "numResults": str(MAX_ADDRESS_MATCHES)}
         if near is not None:
             params["place"] = near.as_motis()
-        try:
-            response = self._http.get(self._base_url + GEOCODE_PATH, params=params)
-        except httpx2.HTTPError as exc:
-            raise RoutingUnavailableError(f"MOTIS request failed: {type(exc).__name__}") from exc
+        response = self._get(GEOCODE_PATH, params)
         if response.status_code != 200:
             raise RoutingUnavailableError(
                 f"MOTIS geocoding returned HTTP {response.status_code}: {_error_text(response)}"
@@ -180,10 +216,7 @@ class MotisClient:
         }
         if max_travel is not None:  # native MOTIS limit (minutes) on the whole journey
             params["maxTravelTime"] = str(max(1, int(max_travel.total_seconds() // 60)))
-        try:
-            response = self._http.get(self._base_url + PLAN_PATH, params=params)
-        except httpx2.HTTPError as exc:
-            raise RoutingUnavailableError(f"MOTIS request failed: {type(exc).__name__}") from exc
+        response = self._get(PLAN_PATH, params)
         if response.status_code != 200:
             raise RoutingUnavailableError(
                 f"MOTIS returned HTTP {response.status_code}: {_error_text(response)}"

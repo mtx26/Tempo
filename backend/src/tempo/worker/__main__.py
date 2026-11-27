@@ -98,15 +98,22 @@ def tick(
         run_job(sessions, "ics_sync", lambda: ics_sync(sessions, fetch_ics(http, url), now, tz))
     if due_ics:
         run_job(sessions, "series", lambda: series_job(sessions, now))
-    run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz))
+    run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz), skip_empty=True)
     run_job(sessions, "reminders", lambda: reminders_job(sessions, now, tz))
     if due_departure:
         run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now, tz))
-    if retention_due(sessions, now, tz):
-        run_job(sessions, "retention", lambda: retention_job(sessions, now))
-        run_job(
-            sessions, "conversation_retention", lambda: conversation_retention_job(sessions, now)
-        )
+    run_job(
+        sessions,
+        "retention",
+        lambda: retention_job(sessions, now),
+        due=lambda: retention_due(sessions, now, tz),
+    )
+    run_job(
+        sessions,
+        "conversation_retention",
+        lambda: conversation_retention_job(sessions, now),
+        due=lambda: retention_due(sessions, now, tz, "conversation_retention"),
+    )
     if mail is not None and due_ics:
         run_job(
             sessions,

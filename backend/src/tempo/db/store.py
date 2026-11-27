@@ -12,10 +12,10 @@ interpretation code never depends on the planning pipeline:
 import hashlib
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,7 @@ from tempo.db.models import (
     ActivityRow,
     AuditEntry,
     FixedEventRow,
+    JobRunRow,
     NotificationRow,
     PlaceAliasRow,
     PlaceRow,
@@ -47,6 +48,23 @@ from tempo.transport.places import Coordinates, Place, PlaceDirectory
 from tempo.transport.routing import RoutingProvider
 
 
+def job_statuses(session: Session, *, include_error: bool = False) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": job.name,
+            "last_started": None
+            if job.last_started_at is None
+            else job.last_started_at.isoformat(),
+            "last_finished": None
+            if job.last_finished_at is None
+            else job.last_finished_at.isoformat(),
+            "status": job.last_status,
+            **({"error": job.last_error} if include_error else {}),
+        }
+        for job in session.scalars(select(JobRunRow).order_by(JobRunRow.name))
+    ]
+
+
 def get_setting(session: Session, key: str, default: Any = None) -> Any:
     """A setting, else ``default``, else its documented default (``SETTING_DEFAULTS``)."""
     fallback = SETTING_DEFAULTS.get(key) if default is None else default
@@ -56,10 +74,37 @@ def get_setting(session: Session, key: str, default: Any = None) -> Any:
 
 
 def set_setting(session: Session, key: str, value: Any) -> None:
-    stmt = insert(SettingRow).values(key=key, value={"value": value})
+    _upsert_setting(session, key, {"value": value})
+
+
+def _upsert_setting(session: Session, key: str, payload: dict[str, Any]) -> None:
+    stmt = insert(SettingRow).values(key=key, value=payload)
     session.execute(
         stmt.on_conflict_do_update(index_elements=["key"], set_={"value": stmt.excluded.value})
     )
+
+
+def request_replan(session: Session, now: datetime) -> None:
+    _upsert_setting(
+        session, "replan_requested", {"value": now.isoformat(), "revision": uuid.uuid4().hex}
+    )
+
+
+def replan_request(session: Session) -> dict[str, Any] | None:
+    request = session.scalar(select(SettingRow.value).where(SettingRow.key == "replan_requested"))
+    return request if request and request.get("value") is not None else None
+
+
+def acknowledge_replan(session: Session, request: dict[str, Any]) -> None:
+    # An API transaction may be writing a newer request and waiting for the planning lock.
+    # Leave its request alone, including when its uncommitted write still hides the new value.
+    key = session.scalar(
+        select(SettingRow.key)
+        .where(SettingRow.key == "replan_requested", SettingRow.value == request)
+        .with_for_update(skip_locked=True)
+    )
+    if key is not None:
+        session.execute(delete(SettingRow).where(SettingRow.key == key))
 
 
 def audit(
@@ -215,11 +260,17 @@ def declared_stays(session: Session, directory: PlaceDirectory) -> list[Declared
     ]
 
 
-def attended_classes(
-    session: Session, start: datetime, end: datetime
-) -> list[tuple[str, str, datetime, datetime, str | None]]:
-    """University events in ``[start, end)`` as the user attends them: ``(ref, title, start,
-    end, location)`` with partial attendance applied and skipped occurrences left out."""
+class AttendedClass(NamedTuple):
+    ref: str
+    title: str
+    start: datetime
+    end: datetime
+    location: str | None
+    uid: str
+
+
+def attended_classes(session: Session, start: datetime, end: datetime) -> list[AttendedClass]:
+    """University events in ``[start, end)`` with the declared attendance applied."""
     attendance = get_setting(session, CLASS_ATTENDANCE_SETTING, {}) or {}
     found = []
     for event in session.scalars(
@@ -236,12 +287,13 @@ def attended_classes(
             continue
         arrive, leave = stated.get("arrive_at"), stated.get("leave_at")
         found.append(
-            (
+            AttendedClass(
                 ref,
                 event.summary,
                 datetime.fromisoformat(arrive) if arrive else event.start_at,
                 datetime.fromisoformat(leave) if leave else event.end_at,
                 event.location,
+                event.uid,
             )
         )
     return found
@@ -269,9 +321,10 @@ def residence_alternation(
     moment = now or datetime.now(UTC)
     switches: dict[date, datetime] = {}
     if alternation.switch_at is None:  # after the last attended class of each change day
-        for _ref, _title, _start, end, _location in attended_classes(
+        for lesson in attended_classes(
             session, moment - timedelta(days=alternation.period_days), moment + timedelta(days=62)
         ):
+            end = lesson.end
             day = end.astimezone(tz).date()
             if (day - alternation.first_day).days % alternation.period_days == 0:
                 switches[day] = max(switches.get(day, end), end, key=lambda x: x.timestamp())

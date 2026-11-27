@@ -23,7 +23,7 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -100,43 +100,66 @@ def validate_gtfs(
     previous_size: int | None,
     *,
     forbid_frequencies: bool = False,
-) -> date | None:
+) -> date:
     """Raise ``InvalidGtfsError`` unless the feed is usable; returns its last service date."""
     size = data.stat().st_size if isinstance(data, Path) else len(data)
     if previous_size and size < MIN_SIZE_RATIO * previous_size:
         raise InvalidGtfsError(f"size collapsed ({size} vs {previous_size} bytes)")
     try:
-        archive = zipfile.ZipFile(data if isinstance(data, Path) else io.BytesIO(data))
-        if archive.testzip() is not None:
-            raise InvalidGtfsError("corrupt zip member")
-    except zipfile.BadZipFile as exc:
-        raise InvalidGtfsError("not a zip file") from exc
-    names = set(archive.namelist())
-    missing = [n for n in REQUIRED_GTFS if n not in names]
-    if missing or not ({"calendar.txt", "calendar_dates.txt"} & names):
-        raise InvalidGtfsError(f"missing GTFS files: {missing or ['calendar*.txt']}")
-    if forbid_frequencies and "frequencies.txt" in names:
-        raise InvalidGtfsError(
-            "frequencies.txt present: the realtime start_time repair is no longer valid "
-            "(disable needs_repair in transport/feeds.py and re-check realtime resolution)"
-        )
-    last = _last_service_date(archive, names)
-    if last is not None and last < today + COVERAGE:
+        with zipfile.ZipFile(data if isinstance(data, Path) else io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+            for name in names:
+                path = PurePosixPath(name)
+                if path.is_absolute() or ".." in path.parts or "\\" in name or ":" in name:
+                    raise InvalidGtfsError(f"unsafe zip member: {name!r}")
+            if len(names) != len(archive.infolist()):
+                raise InvalidGtfsError("duplicate zip members")
+            if sum(member.file_size for member in archive.infolist()) > MAX_DOWNLOAD:
+                raise InvalidGtfsError("oversized uncompressed archive")
+            missing = sorted(set(REQUIRED_GTFS) - names)
+            if missing or not ({"calendar.txt", "calendar_dates.txt"} & names):
+                raise InvalidGtfsError(f"missing GTFS files: {missing or ['calendar*.txt']}")
+            if forbid_frequencies and "frequencies.txt" in names:
+                raise InvalidGtfsError(
+                    "frequencies.txt present: the realtime start_time repair is no longer valid "
+                    "(disable needs_repair in transport/feeds.py and re-check realtime resolution)"
+                )
+            for name in REQUIRED_GTFS:
+                with io.TextIOWrapper(
+                    archive.open(name), encoding="utf-8-sig", newline=""
+                ) as csv_file:
+                    if next(csv.DictReader(csv_file), None) is None:
+                        raise InvalidGtfsError(f"empty {name}")
+            if archive.testzip() is not None:
+                raise InvalidGtfsError("corrupt zip member")
+            last = _last_service_date(archive, names)
+    except (zipfile.BadZipFile, UnicodeError, csv.Error, RuntimeError, EOFError) as exc:
+        raise InvalidGtfsError(f"unreadable GTFS zip: {type(exc).__name__}") from exc
+    if last is None:
+        raise InvalidGtfsError("no service date in GTFS calendar")
+    if last < today + COVERAGE:
         raise InvalidGtfsError(f"calendar ends on {last}, less than a week ahead")
     return last
 
 
 def _last_service_date(archive: zipfile.ZipFile, names: set[str]) -> date | None:
-    ends: list[date] = []
+    last: date | None = None
     for name, column in (("calendar.txt", "end_date"), ("calendar_dates.txt", "date")):
         if name not in names:
             continue
         with archive.open(name) as handle:
             for row in csv.DictReader(io.TextIOWrapper(handle, "utf-8-sig")):
+                if name == "calendar_dates.txt" and row.get("exception_type") == "2":
+                    continue  # a service removal does not extend coverage
                 value = (row.get(column) or "").strip()
-                if len(value) == 8 and value.isdigit():
-                    ends.append(date(int(value[:4]), int(value[4:6]), int(value[6:])))
-    return max(ends) if ends else None
+                try:
+                    if len(value) != 8 or not value.isascii() or not value.isdecimal():
+                        raise ValueError(value)
+                    end = date.fromisoformat(value)
+                except ValueError as exc:
+                    raise InvalidGtfsError(f"invalid date in {name}: {value}") from exc
+                last = end if last is None else max(last, end)
+    return last
 
 
 @dataclass(slots=True)
@@ -227,41 +250,49 @@ def update_inputs(
             report.skipped.append(source.name)
             continue
         headers = {"User-Agent": "tempo-routing-update"}
-        if entry.get("etag") and (folder / source.name).exists():
+        destination = folder / source.name
+        if entry.get("etag") and destination.is_file():
             headers["If-None-Match"] = entry["etag"]
         part = folder / (source.name + ".part")
         result = _download(client, source.url, headers, key if source.gtfs else None, part)
         try:
-            if result.status == 304:
-                entry["checked_at"] = now.isoformat()
-                state[source.name] = entry
-                report.unchanged.append(source.name)
-                continue
-            if result.error or result.status != 200:
+            if result.error or result.status not in (200, 304):
                 rejected = " (Belgian Mobility key rejected)" if result.status in (401, 403) else ""
                 report.failed[source.name] = result.error or f"HTTP {result.status}{rejected}"
                 continue
-            if result.size == 0:
+            if result.status == 200 and result.size == 0:
                 report.failed[source.name] = "empty download"
                 continue
-            if result.sha256 == entry.get("sha256") and (folder / source.name).exists():
-                entry.update(checked_at=now.isoformat(), etag=result.etag)
+            unchanged = result.status == 304 or (
+                result.sha256 == entry.get("sha256") and destination.is_file()
+            )
+            if source.gtfs:
+                try:
+                    if unchanged and entry.get("valid_until"):
+                        last = date.fromisoformat(entry["valid_until"])
+                        if last < now.date() + COVERAGE:
+                            raise InvalidGtfsError(
+                                f"calendar ends on {last}, less than a week ahead"
+                            )
+                    else:
+                        last = validate_gtfs(
+                            destination if result.status == 304 else part,
+                            now.date(),
+                            entry.get("bytes"),
+                            forbid_frequencies=source.forbid_frequencies,
+                        )
+                except (ValueError, OSError) as exc:
+                    report.failed[source.name] = f"rejected: {exc}"
+                    continue
+                entry["valid_until"] = last.isoformat()
+            if unchanged:
+                entry["checked_at"] = now.isoformat()
+                if result.status == 200:
+                    entry["etag"] = result.etag
                 state[source.name] = entry
                 report.unchanged.append(source.name)
                 continue
-            if source.gtfs:
-                try:
-                    last = validate_gtfs(
-                        part,
-                        now.date(),
-                        entry.get("bytes"),
-                        forbid_frequencies=source.forbid_frequencies,
-                    )
-                except InvalidGtfsError as exc:
-                    report.failed[source.name] = f"rejected: {exc}"
-                    continue
-                entry["valid_until"] = None if last is None else last.isoformat()
-            part.replace(folder / source.name)
+            part.replace(destination)
             entry.update(
                 sha256=result.sha256,
                 bytes=result.size,
@@ -304,7 +335,7 @@ def main(argv: list[str]) -> int:
             Path(argv[0]), client, key=key, region=argv[1] if len(argv) == 2 else "belgium"
         )
     print(json.dumps(asdict(report), indent=2))
-    return 1 if report.failed and not (report.changed or report.unchanged) else 0
+    return int(bool(report.failed))
 
 
 if __name__ == "__main__":  # pragma: no cover

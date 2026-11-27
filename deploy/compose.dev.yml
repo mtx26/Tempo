@@ -49,6 +49,7 @@ services:
     image: tempo-backend:dev
     environment:
       TEMPO_MOTIS_URL: http://routing:8080   # same as the Swarm stack (plan_now, search_journey)
+      TEMPO_RT_RELAY_URL: http://tempo-rt-relay:8090
     secrets: [tempo_api_token, tempo_database_url]
     read_only: true
     tmpfs: [/tmp]

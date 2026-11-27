@@ -77,6 +77,65 @@ def make_relay(
     )
 
 
+def test_health_distinguishes_invalid_degraded_and_stale_feed() -> None:
+    portal, clock = Portal(), Clock()
+    relay = make_relay(portal, clock)
+    key = feed(Operator.TEC, FeedKind.TRIP_UPDATES).name
+
+    def status() -> dict[str, object]:
+        values = relay.status()["feeds"]
+        assert isinstance(values, dict)
+        return dict(values[key])
+
+    assert status()["state"] == "unavailable"
+    portal.body_by_operator["tec"] = b"<html>"
+    with pytest.raises(RelayUnavailableError):
+        relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    assert status()["state"] == "invalid"
+    assert status()["consecutive_errors"] == 1
+
+    relay = make_relay(portal, clock)
+    portal.body_by_operator["tec"] = _restamp(TEC_TU, clock.now)
+    relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    snapshot = status()
+    assert snapshot["state"] == "operational"
+    assert snapshot["last_success_at"] == clock.now.isoformat()
+    assert isinstance(snapshot["response_ms"], float)
+    portal.status = 503
+    clock.now += timedelta(seconds=61)
+    relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    assert status()["state"] == "degraded"
+    assert status()["last_success_at"] == snapshot["last_success_at"]
+    clock.now += timedelta(minutes=12)
+    with pytest.raises(RelayUnavailableError, match="stale"):
+        relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    assert status()["state"] == "stale"
+
+
+def test_copy_that_expires_during_request_is_never_served() -> None:
+    portal, clock = Portal(), Clock()
+    produced = clock.now
+    portal.body_by_operator["tec"] = _restamp(TEC_TU, produced)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if portal.status == 503:
+            clock.now += timedelta(seconds=2)
+        return portal(request)
+
+    relay = FeedRelay(
+        REALTIME,
+        PollingPlan(),
+        key=KEY,
+        http_client=httpx2.Client(transport=httpx2.MockTransport(handler)),
+        clock=clock,
+    )
+    relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+    clock.now = produced + timedelta(seconds=89)
+    portal.status = 503
+    with pytest.raises(RelayUnavailableError, match="stale"):
+        relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
+
+
 def test_tec_is_served_repaired_with_the_key_header() -> None:
     portal, clock = Portal(), Clock()
     relay = make_relay(portal, clock)
@@ -90,9 +149,11 @@ def test_tec_is_served_repaired_with_the_key_header() -> None:
 
 def test_cached_within_interval_and_refetched_after() -> None:
     portal, clock = Portal(), Clock()
+    portal.body_by_operator["delijn"] = _restamp(DELIJN_TU, clock.now)
     relay = make_relay(portal, clock)
     relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
     clock.now += timedelta(seconds=30)
+    portal.body_by_operator["delijn"] = _restamp(DELIJN_TU, clock.now)
     relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
     assert len(portal.requests) == 1
     clock.now += timedelta(seconds=30)
@@ -120,11 +181,26 @@ def test_429_without_cache_is_unavailable_and_backs_off() -> None:
 
 def test_upstream_error_keeps_serving_a_still_fresh_copy() -> None:
     portal, clock = Portal(), Clock()
+    portal.body_by_operator["delijn"] = _restamp(DELIJN_TU, clock.now)
     relay = make_relay(portal, clock)
     first = relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
     portal.status = 500
-    clock.now += timedelta(minutes=3)
+    clock.now += timedelta(seconds=61)
     assert relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES) == first
+
+
+def test_old_trip_updates_are_expired_while_alerts_are_still_usable() -> None:
+    portal, clock = Portal(), Clock()
+    portal.body_by_operator["tec"] = _restamp(TEC_TU, clock.now - timedelta(seconds=91))
+    portal.body_by_operator["nmbssncb"] = _restamp(
+        (FIXTURES / "sncb_alerts.pbf").read_bytes(), clock.now - timedelta(seconds=91)
+    )
+    client = TestClient(create_relay_app(make_relay(portal, clock)))
+    assert client.get("/feeds/tec/trip-updates.pbf").status_code == 503
+    assert client.get("/feeds/nmbssncb/alerts.pbf").status_code == 200
+    health = client.get("/health").json()["feeds"]
+    assert health["tec/gtfs-rt-trip-updates"]["state"] == "stale"
+    assert health["tec/gtfs-rt-trip-updates"]["age_seconds"] == 91
 
 
 def test_stale_copy_is_never_served() -> None:
@@ -333,12 +409,13 @@ def test_feed_selection_rejects_unknown_or_empty_values() -> None:
 
 def test_429_pauses_every_feed_because_the_quota_is_per_account() -> None:
     portal, clock = Portal(), Clock()
+    portal.body_by_operator["nmbssncb"] = _restamp(DELIJN_TU, clock.now)
     relay = make_relay(portal, clock)
     sncb = relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES)  # fresh copy before the 429
     portal.status, portal.headers = 429, {"Retry-After": "900"}
     with pytest.raises(RelayUnavailableError, match="429"):
         relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
-    clock.now += timedelta(minutes=2)
+    clock.now += timedelta(seconds=61)
     # Another feed is due but the account is paused: no request, the fresh copy is still served.
     assert relay.get(Operator.SNCB, FeedKind.TRIP_UPDATES) == sncb
     with pytest.raises(RelayUnavailableError, match="paused"):
@@ -346,7 +423,7 @@ def test_429_pauses_every_feed_because_the_quota_is_per_account() -> None:
     assert len(portal.requests) == 2
     assert relay.status()["paused_until"] is not None
     portal.status, portal.headers = 200, {}
-    clock.now += timedelta(minutes=14)
+    clock.now += timedelta(minutes=15)
     portal.body_by_operator["delijn"] = _restamp(DELIJN_TU, clock.now)
     assert relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)
     assert relay.status()["paused_until"] is None

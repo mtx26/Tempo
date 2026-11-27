@@ -61,6 +61,17 @@ def test_task_operations_require_the_token(api: TestClient) -> None:
     assert api.post("/v1/operations/create_task", json={}).status_code == 401
 
 
+def test_diagnostics_is_private_and_reuses_postgresql_stats(api: TestClient) -> None:
+    assert api.get("/v1/diagnostics").status_code == 401
+    response = api.get("/v1/diagnostics", headers=AUTH)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["postgresql"]["status"] == "ok"
+    assert body["postgresql"]["connections"] >= 1
+    assert body["postgresql"]["waiting_locks"] >= 0
+    assert body["motis"]["status"] == "unconfigured"
+
+
 def test_created_task_has_soft_target_by_default(api: TestClient) -> None:
     task = create_task(api)
     assert task["hard_deadline"] is False

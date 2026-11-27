@@ -10,6 +10,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from tempo.assistant.catalog import OpContext, run_operation
 from tempo.const import MAX_ICS_BYTES
 from tempo.db.models import (
     Base,
@@ -21,7 +22,12 @@ from tempo.db.models import (
     PlaceRow,
     ScheduleVersion,
 )
-from tempo.db.store import active_version, get_setting, set_setting
+from tempo.db.store import active_version, get_setting, request_replan, set_setting
+from tempo.planning import service
+from tempo.planning.engine import OutcomeStatus, PlanningInput, PlanningOutcome, run_planning
+from tempo.planning.service import replan
+from tempo.transport.routing import RoutingProvider
+from tempo.worker import jobs
 from tempo.worker.jobs import JobError, departure_job, fetch_ics, ics_sync, replan_job, run_job
 from tests.test_engine import FakeRouting
 
@@ -177,6 +183,139 @@ def test_replan_scheduling(sessions: sessionmaker[Session]) -> None:
     assert replan_job(sessions, FakeRouting(), night, TZ) == "nightly"
     with sessions() as s:
         assert len(list(s.scalars(select(ScheduleVersion)))) == 3
+
+
+def test_interrupted_replan_keeps_request_and_retry_delay(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(sessions)
+    with sessions.begin() as session:
+        set_setting(session, "replan_requested", NOW.isoformat())
+
+    def interrupted(*args: object, **kwargs: object) -> ScheduleVersion:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(jobs, "replan", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        replan_job(sessions, FakeRouting(), NOW, TZ)
+    with sessions() as session:
+        assert get_setting(session, "replan_requested") == NOW.isoformat()
+        assert active_version(session) is None
+    assert replan_job(sessions, FakeRouting(), NOW + timedelta(minutes=1), TZ) is None
+    monkeypatch.setattr(jobs, "replan", replan)
+    assert replan_job(sessions, FakeRouting(), NOW + timedelta(minutes=20), TZ) == "requested"
+    with sessions() as session:
+        assert get_setting(session, "replan_requested") is None
+        assert active_version(session) is not None
+
+
+def test_busy_planner_leaves_the_worker_request_and_attempt_untouched(
+    sessions: sessionmaker[Session],
+) -> None:
+    configure(sessions)
+    with sessions.begin() as session:
+        request_replan(session, NOW)
+    with sessions.begin() as api:
+        api.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": service.REPLAN_LOCK})
+        assert replan_job(sessions, FakeRouting(), NOW, TZ) is None
+        assert get_setting(api, "last_replan_attempt") is None
+        assert get_setting(api, "replan_requested") == NOW.isoformat()
+    assert replan_job(sessions, FakeRouting(), NOW, TZ) == "requested"
+
+
+def test_unknown_replan_does_not_acknowledge_request(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with sessions.begin() as session:
+        set_setting(session, "replan_requested", NOW.isoformat())
+
+    def unknown(session: Session, *args: object, **kwargs: object) -> ScheduleVersion:
+        version = ScheduleVersion(state="rejected", solver_status="UNKNOWN", summary={})
+        session.add(version)
+        return version
+
+    monkeypatch.setattr(jobs, "replan", unknown)
+    assert replan_job(sessions, FakeRouting(), NOW, TZ) == "requested"
+    with sessions() as session:
+        assert get_setting(session, "replan_requested") == NOW.isoformat()
+    assert replan_job(sessions, FakeRouting(), NOW + timedelta(minutes=1), TZ) is None
+
+
+@pytest.mark.parametrize("from_assistant", [False, True])
+@pytest.mark.parametrize("writer_commits_before_publication", [False, True])
+def test_replan_preserves_another_transactions_new_revision(
+    sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    from_assistant: bool,
+    writer_commits_before_publication: bool,
+) -> None:
+    configure(sessions)
+    with sessions.begin() as session:
+        request_replan(session, NOW)
+
+    with sessions.begin() as writer:
+
+        def concurrent_request(data: PlanningInput, routing: RoutingProvider) -> PlanningOutcome:
+            # The wall time can coincide. Only the revision distinguishes these requests.
+            request_replan(writer, NOW)
+            if writer_commits_before_publication:
+                writer.commit()
+            return run_planning(data, routing)
+
+        monkeypatch.setattr(service, "run_planning", concurrent_request)
+        if from_assistant:
+            with sessions.begin() as session:
+                session.execute(text("SET LOCAL statement_timeout = '5s'"))
+                ctx = OpContext(
+                    session=session, now=NOW, tz=TZ, actor="test", routing=FakeRouting()
+                )
+                result = run_operation(ctx, "plan_now", {})
+                assert result["ok"] and result["result"]["published"]
+        else:
+
+            def replan_with_timeout(
+                session: Session,
+                routing: RoutingProvider,
+                now: datetime,
+                tz: ZoneInfo,
+                *,
+                reason: str,
+            ) -> ScheduleVersion:
+                session.execute(text("SET LOCAL statement_timeout = '5s'"))
+                return service.replan(session, routing, now, tz, reason=reason)
+
+            monkeypatch.setattr(jobs, "replan", replan_with_timeout)
+            assert replan_job(sessions, FakeRouting(), NOW, TZ) == "requested"
+
+    with sessions() as session:
+        assert active_version(session) is not None
+        assert get_setting(session, "replan_requested") == NOW.isoformat()
+    monkeypatch.setattr(service, "run_planning", run_planning)
+    assert replan_job(sessions, FakeRouting(), NOW + timedelta(minutes=20), TZ) == "requested"
+    with sessions() as session:
+        assert get_setting(session, "replan_requested") is None
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_assistant_does_not_acknowledge_unpublished_replan(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    configure(sessions)
+    with sessions.begin() as session:
+        request_replan(session, NOW)
+
+    def inconclusive(*args: object) -> PlanningOutcome:
+        return PlanningOutcome(OutcomeStatus.NO_SOLUTION, None)
+
+    if not dry_run:
+        monkeypatch.setattr(service, "run_planning", inconclusive)
+    with sessions.begin() as session:
+        ctx = OpContext(session=session, now=NOW, tz=TZ, actor="test", routing=FakeRouting())
+        result = run_operation(ctx, "plan_now", {"dry_run": dry_run})
+        assert result["ok"] and not result["result"]["published"]
+    with sessions() as session:
+        assert get_setting(session, "replan_requested") == NOW.isoformat()
+        assert active_version(session) is None
 
 
 def exact_class_times(sessions: sessionmaker[Session]) -> None:
@@ -450,8 +589,55 @@ def test_retention_runs_once_per_local_day(sessions: sessionmaker[Session]) -> N
     early = datetime(2026, 12, 8, 3, 0, tzinfo=TZ)
     assert not retention_due(sessions, early, TZ)
     assert retention_due(sessions, early.replace(hour=4, minute=7), TZ)
+    assert retention_due(sessions, early.replace(hour=9), TZ)
+    jobs.retention_job(sessions, early.replace(hour=9))
     assert not retention_due(sessions, early.replace(hour=9), TZ)
     assert retention_due(sessions, early + timedelta(days=1, hours=2), TZ)
+
+
+def test_retention_failure_rolls_back_and_retries_only_the_failed_purge(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with sessions.begin() as session:
+        session.add(ScheduleVersion(state="rejected", solver_status="UNKNOWN", summary={}))
+        session.flush()
+        row = session.scalars(select(ScheduleVersion)).one()
+        row.created_at = NOW - timedelta(days=365)
+
+    deleted = jobs._deleted
+
+    def fail_after_version_delete(session: Session, statement: object) -> int:
+        count = deleted(session, statement)
+        if count:
+            raise JobError("purge interrupted after deletion")
+        return count
+
+    monkeypatch.setattr(jobs, "_deleted", fail_after_version_delete)
+    assert not run_job(sessions, "retention", lambda: jobs.retention_job(sessions, NOW))
+    assert run_job(
+        sessions, "conversation_retention", lambda: jobs.conversation_retention_job(sessions, NOW)
+    )
+    with sessions() as session:
+        assert session.scalars(select(ScheduleVersion)).one() is not None
+        run = session.get(JobRunRow, "retention")
+        assert run is not None and run.last_status == "error"
+        assert get_setting(session, "retention_success_at") is None
+        assert get_setting(session, "conversation_retention_success_at") == NOW.isoformat()
+
+    later = NOW + timedelta(minutes=1)
+    assert jobs.retention_due(sessions, later, TZ)
+    assert not jobs.retention_due(sessions, later, TZ, "conversation_retention")
+    monkeypatch.setattr(jobs, "_deleted", deleted)
+    assert jobs.retention_job(sessions, later)["schedule_versions"] == 1
+    assert not jobs.retention_due(sessions, later, TZ)
+
+
+def test_run_job_survives_failure_to_record_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*args: object) -> None:
+        raise JobError("database unavailable")
+
+    monkeypatch.setattr(jobs, "record_run", fail)
+    assert not run_job(sessionmaker(), "retention", fail)
 
 
 def test_skipped_ics_items_are_notified(sessions: sessionmaker[Session]) -> None:
@@ -469,7 +655,6 @@ def test_skipped_ics_items_are_notified(sessions: sessionmaker[Session]) -> None
 
 
 def test_relative_reminder_ends_after_its_target(sessions: sessionmaker[Session]) -> None:
-    from tempo.assistant.catalog import OpContext, run_operation
     from tempo.db.models import ReminderRow
     from tempo.worker.jobs import reminders_job
 

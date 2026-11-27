@@ -30,7 +30,6 @@ from tempo.db.models import (
     AvailabilityExceptionRow,
     AvailabilityRow,
     CategoryWindowRow,
-    FixedEventRow,
     NotificationRow,
     ProposalRow,
     ScheduleVersion,
@@ -39,6 +38,7 @@ from tempo.db.models import (
 )
 from tempo.db.store import (
     access_routing,
+    acknowledge_replan,
     active_version,
     attended_classes,
     audit,
@@ -48,6 +48,7 @@ from tempo.db.store import (
     notify,
     place_directory,
     propose,
+    replan_request,
     residence_alternation,
     set_setting,
     temporary_preferences,
@@ -76,6 +77,7 @@ from tempo.scheduler.model import (
     TrainingPreferences,
 )
 from tempo.timeutil import Interval, end_of_day, subtract, utc
+from tempo.transport.itinerary import connection_margins, journey_notes, leg_payload
 from tempo.transport.places import Place
 from tempo.transport.routing import Journey, Leg, RoutingProvider
 from tempo.transport.travel import Previous
@@ -200,11 +202,15 @@ def _previous_travel(summary: dict[str, Any]) -> Previous:
                 leg.get("to") or "",
                 datetime.fromisoformat(leg["start"]),
                 datetime.fromisoformat(leg["end"]),
-                datetime.fromisoformat(leg["start"]),
-                datetime.fromisoformat(leg["end"]),
-                bool(leg.get("realtime")),
+                datetime.fromisoformat(leg.get("scheduled_start") or leg["start"]),
+                datetime.fromisoformat(leg.get("scheduled_end") or leg["end"]),
+                False,  # The previous plan is a fallback, not a live observation.
                 line=leg.get("line"),
                 agency=leg.get("agency"),
+                departure_track=leg.get("departure_track"),
+                arrival_track=leg.get("arrival_track"),
+                scheduled_departure_track=leg.get("scheduled_departure_track"),
+                scheduled_arrival_track=leg.get("scheduled_arrival_track"),
             )
             for leg in trip["legs"]
         )
@@ -280,17 +286,9 @@ def build_input(
 
     commitments: list[Commitment] = []
     answers = get_setting(session, EXAM_SETTING, {}) or {}
-    uids = {
-        f"event:{row.id}": row.uid
-        for row in session.scalars(
-            select(FixedEventRow).where(
-                FixedEventRow.end_at > now, FixedEventRow.start_at < horizon_end
-            )
-        )
-    }
     questions: dict[str, datetime] = {}
-    for ref, title, start, end, location in attended_classes(session, now, horizon_end):
-        exam = answers.get(uids.get(ref, ""), exam_status(title))
+    for ref, title, start, end, location, uid in attended_classes(session, now, horizon_end):
+        exam = answers.get(uid, exam_status(title))
         if exam is None:  # uncertain: asked once per series (the answer covers all of it);
             # meanwhile the full arrival margin (safe side). Stable text: never re-notified.
             question = (
@@ -442,7 +440,7 @@ def build_input(
     if far:
         last = end_of_day(max(t.target_date or last_day for t in far), tz)
         far_rules = load_rules(session, now, last, tz)
-        known = [Interval(c[2], c[3]) for c in attended_classes(session, now, last)] + [
+        known = [Interval(c.start, c.end) for c in attended_classes(session, now, last)] + [
             Interval(a.earliest_start_at, a.latest_end_at)
             for a in session.scalars(
                 select(ActivityRow).where(
@@ -630,21 +628,19 @@ def _travel_json(outcome: PlanningOutcome) -> list[dict[str, Any]]:
                 "event_end": None if block.event_end is None else block.event_end.isoformat(),
                 "departure": None if journey is None else journey.departure.isoformat(),
                 "arrival": None if journey is None else journey.arrival.isoformat(),
+                "arrival_margin_seconds": None
+                if journey is None or block.returning or block.event_start is None
+                else int((utc(block.event_start) - utc(journey.arrival)).total_seconds()),
                 "legs": []
                 if journey is None
                 else [
-                    {
-                        "mode": leg.mode,
-                        "line": leg.line,
-                        "agency": leg.agency,
-                        "from": leg.origin_name,
-                        "to": leg.destination_name,
-                        "start": leg.start.isoformat(),
-                        "end": leg.end.isoformat(),
-                        "realtime": leg.realtime,
-                    }
+                    leg_payload(leg, operator_key="agency", stale=block.status.value == "stale")
                     for leg in journey.legs
                 ],
+                "connections": [] if journey is None else connection_margins(journey),
+                "warnings": []
+                if journey is None
+                else list(journey_notes(journey, planning_snapshot=True).specific),
                 "alternatives": [
                     {
                         "departure": alt.departure.isoformat(),
@@ -882,23 +878,30 @@ def _schedule_diff(
     removed, added = before - after, after - before
     shift = 0
     moved = 0
-    pending = sorted(added)
-    for task, start, _end in sorted(removed):
-        same = next((a for a in pending if a[0] == task), None)
-        if same is None:
-            continue
-        pending.remove(same)
-        moved += 1
-        shift += abs(
-            int(
-                (datetime.fromisoformat(same[1]) - datetime.fromisoformat(start)).total_seconds()
-                // 60
+    resized = 0
+    previous_at = {(t, s): e for t, s, e in removed}
+    current_at = {(t, s): e for t, s, e in added}
+    stationary = previous_at.keys() & current_at.keys()
+    pending: dict[str, list[tuple[str, str]]] = {}
+    for task, start, end in sorted(added, reverse=True):
+        if (task, start) not in stationary:
+            pending.setdefault(task, []).append((start, end))
+    for task, start, end in sorted(removed):
+        if (task, start) not in stationary and (matches := pending.get(task)):
+            new_start, new_end = matches.pop()
+            begin, finish = datetime.fromisoformat(start), datetime.fromisoformat(end)
+            next_begin, next_finish = (
+                datetime.fromisoformat(new_start),
+                datetime.fromisoformat(new_end),
             )
-        )
+            moved += 1
+            resized += (finish - begin) != (next_finish - next_begin)
+            shift += int(abs((next_begin - begin).total_seconds()) // 60)
     return {
-        "added_blocks": len(added) - moved,
-        "removed_blocks": len(removed) - moved,
+        "added_blocks": len(added) - moved - len(stationary),
+        "removed_blocks": len(removed) - moved - len(stationary),
         "moved_blocks": moved,
+        "resized_blocks": resized + len(stationary),
         "kept_blocks": len(before & after),
         "total_shift_minutes": shift,
         "moved_activities": moved_activities,
@@ -921,11 +924,16 @@ def replan(
     request to reorganise the current day, implied by global) lets today's placements move
     without a proposal. Locked and under-way items stay protected in every mode."""
     session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": REPLAN_LOCK})
+    requested = replan_request(session)
     routing = access_routing(session, routing)  # access points + realistic journeys only
     refresh_task_sessions(session, now, tz)
     _expire_moves(session, now)
     missed = mark_missed_blocks(session, now)
     loaded = build_input(session, now, tz, allow_today=allow_today or mode == "global")
+    previous = active_version(session)
+    previous_summary = {} if previous is None else previous.summary
+    before_blocks = _block_keys(session, previous)
+    before_activities = {t.activity_id: t.previous_start for t in loaded.data.activities}
     if mode == "global":
         loaded = replace(
             loaded,
@@ -935,8 +943,6 @@ def replan(
                 activities=[replace(t, previous_start=None) for t in loaded.data.activities],
             ),
         )
-    before_blocks = _block_keys(session, active_version(session))
-    before_activities = {t.activity_id: t.previous_start for t in loaded.data.activities}
     outcome = run_planning(loaded.data, routing)
     for question, due in loaded.questions.items():
         outcome.questions.append(question)
@@ -1051,7 +1057,25 @@ def replan(
             if (before := before_activities.get(placed.activity_id)) is not None
             and utc(before) != utc(placed.start)
         ]
-        summary["diff"] = _schedule_diff(before_blocks, _block_keys(session, version), moved)
+        diff = _schedule_diff(before_blocks, _block_keys(session, version), moved)
+        diff.update(
+            added_activities=[
+                p.activity_id
+                for p in outcome.activities
+                if before_activities.get(p.activity_id) is None
+            ],
+            removed_activities=[
+                a for a in outcome.unplaced_activities if before_activities.get(a) is not None
+            ],
+            new_deadline_misses=sorted(
+                set(misses) - set(previous_summary.get("deadline_misses", []))
+            ),
+            resolved_deadline_misses=sorted(
+                set(previous_summary.get("deadline_misses", [])) - set(misses)
+            ),
+            journeys_changed=summary["travel"] != previous_summary.get("travel", []),
+        )
+        summary["diff"] = diff
         version.summary = dict(summary)
     keep = _publish_conflicts(session, outcome.conflicts, tz)
     if usable:
@@ -1086,6 +1110,8 @@ def replan(
         reason=reason,
         status=outcome.status.value,
     )
+    if usable and requested is not None:
+        acknowledge_replan(session, requested)
     return version
 
 

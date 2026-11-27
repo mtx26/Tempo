@@ -94,6 +94,14 @@ def training(activity_id: str = "t", **kw: Any) -> FlexibleActivity:
 # --- study blocks --------------------------------------------------------------------------------
 
 
+def test_study_splits_across_disjoint_windows_without_crossing_gap() -> None:
+    availability = [Interval(at(7, 9), at(7, 10)), Interval(at(7, 11), at(7, 12))]
+    p = problem(availability=availability, demands=[StudyDemand("a", "maths", 90, at(7, 18))])
+    result = run(p)
+    assert len(result.blocks) == 2
+    assert minutes(result, "a") == 90
+
+
 def test_blocks_are_90_minutes_with_one_shorter_remainder() -> None:
     """C21: 90-minute sessions preferred, 30-90 minutes when necessary."""
     result = run(problem(demands=[StudyDemand("a", "maths", 210, at(13, 23, 59))]))
@@ -325,6 +333,17 @@ def test_coach_order_and_explicit_recovery() -> None:
     placed = {p.activity_id: p for p in result.activities}
     gap = (placed["b"].start.date() - placed["a"].start.date()).days
     assert utc(placed["a"].end) <= utc(placed["b"].start) and gap >= 2
+
+
+def test_coach_order_survives_absent_middle_session() -> None:
+    items = [
+        training("a", earliest_start=at(8, 11), latest_end=at(8, 12), sequence_index=0),
+        training("b", allowed=(), sequence_index=1),
+        training("c", earliest_start=at(8, 9), latest_end=at(8, 10), sequence_index=2),
+    ]
+    result = run(problem(activities=[replace(item, sequence_group="week") for item in items]))
+    assert "b" in result.unplaced
+    assert len(result.activities) == 1
 
 
 def test_recovery_after_a_fixed_race() -> None:

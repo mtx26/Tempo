@@ -77,7 +77,6 @@ def problem(case: Case) -> PlanningProblem:
         availability=availability,
         busy=busy,
         demands=demands,
-        locked_blocks=[],
     )
 
 
@@ -96,7 +95,7 @@ def run(limit: float) -> list[dict[str, object]]:
                 "seconds": round(elapsed, 2),
                 "blocks": len(result.blocks),
                 "unplanned": sum(result.unplanned_minutes.values()),
-                "late": sum(result.late_minutes.values()),
+                "deadline_misses": len(result.deadline_misses),
                 "objective": result.objective,
                 "valid": validate_plan(p, result) == [],
             }

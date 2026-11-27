@@ -16,6 +16,7 @@ from tempo.db.models import (
     ProposalRow,
     RecurrenceExceptionRow,
     ReminderRow,
+    ScheduleVersion,
     StudyBlockRow,
     StudyTaskRow,
     WorkLogRow,
@@ -34,7 +35,7 @@ def ctx(session: Session, now: datetime = NOW) -> OpContext:
     return OpContext(session=session, now=now, tz=TZ, actor="test", routing=FakeRouting())
 
 
-def ok(session: Session, name: str, now: datetime = NOW, **args: Any) -> dict[str, Any]:
+def ok(session: Session, name: str, /, now: datetime = NOW, **args: Any) -> dict[str, Any]:
     outcome = run_operation(ctx(session, now), name, args)
     assert outcome["ok"], outcome
     result: dict[str, Any] = outcome["result"]
@@ -134,6 +135,66 @@ def test_dry_run_publishes_nothing(session: Session) -> None:
     result = ok(session, "plan_now", dry_run=True)
     assert result["published"] is False
     assert active_version(session).id == first.id  # type: ignore[union-attr]
+
+
+def test_compound_preview_uses_real_plan_and_rolls_back_all_steps(session: Session) -> None:
+    seed(session)
+    first = replan(session, FakeRouting(), NOW, TZ, reason="initial")
+    change = {
+        "name": "create_task",
+        "arguments": {"title": "Économie", "estimated_minutes": 90, "splittable": True},
+    }
+    preview = ok(session, "preview_plan_changes", changes=[change])
+    assert preview["published"] is False and preview["diff"]["added_blocks"] >= 1
+    invalid = {"name": "update_task", "arguments": {"task_id": "wrong"}}
+    assert "étape 2" in err(session, "preview_plan_changes", changes=[change, invalid])
+    assert session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Économie")) is None
+    active = active_version(session)
+    assert active is not None and active.id == first.id
+
+
+def test_address_search_reuses_locations_and_reports_ambiguity(session: Session) -> None:
+    seed(session)
+    saved = ok(session, "find_address", text="Auditoire A.1")
+    assert saved["matches"][0]["place_id"] == "campus" and not saved["ambiguous"]
+    ok(session, "upsert_place", place_id="campus_b", name="Campus", latitude=50, longitude=4)
+    ambiguous = ok(session, "find_address", text="Campus")
+    assert ambiguous["ambiguous"] and len(ambiguous["matches"]) == 2
+    coords = ok(session, "find_address", text="50.0, 4.0")["matches"][0]
+    assert coords["kind"] == "COORDINATES" and coords["latitude"] == 50
+    assert "hors limites" in err(session, "find_address", text="500, 4.0")
+
+
+def test_old_routing_snapshot_keeps_the_route_without_live_claims(session: Session) -> None:
+    session.add(
+        ScheduleVersion(
+            state="active",
+            solver_status="OPTIMAL",
+            summary={
+                "planned_at": (NOW - timedelta(minutes=2)).isoformat(),
+                "travel": [
+                    {
+                        "status": "routed",
+                        "origin": "home",
+                        "destination": "campus",
+                        "origin_name": "Kot",
+                        "destination_name": "Campus",
+                        "start": NOW.isoformat(),
+                        "end": (NOW + timedelta(hours=1)).isoformat(),
+                        "legs": [{"realtime": True}],
+                        "arrival_margin_seconds": 600,
+                    }
+                ],
+            },
+        )
+    )
+    session.flush()
+    result = ok(
+        session, "get_schedule", start=NOW.isoformat(), end=(NOW + timedelta(hours=2)).isoformat()
+    )
+    old = result["items"][0]
+    assert old["status"] == "routed" and old["stale_snapshot"]
+    assert old["legs"][0]["realtime"] is False and old["arrival_margin_seconds"] == 600
 
 
 def test_all_day_events_informative_or_busy(session: Session) -> None:

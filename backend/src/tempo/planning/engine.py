@@ -312,18 +312,25 @@ class PlanningOutcome:
     unconfirmed_journeys: int = 0
 
 
-def free_minutes(availability: list[Interval], busy: list[Interval], until: datetime) -> int:
+def free_minutes(
+    availability: list[Interval],
+    busy: list[Interval],
+    until: datetime,
+    since: datetime | None = None,
+) -> int:
     """Study-window minutes before ``until`` not taken by busy time (an upper bound shared by
     every task: the diagnosis of a missed deadline)."""
-    total = 0
-    for window in availability:
-        if utc(window.start) >= utc(until):
-            continue
-        clipped = Interval(window.start, min(window.end, until, key=utc))
-        total += sum(
-            int((utc(p.end) - utc(p.start)).total_seconds() // 60) for p in subtract(clipped, busy)
-        )
-    return total
+    seconds = 0.0
+    for window in sorted(availability, key=lambda w: utc(w.start)):
+        start = utc(window.start) if since is None else max(utc(window.start), utc(since))
+        end = min(utc(window.end), utc(until))
+        if start < end:
+            seconds += sum(
+                (utc(p.end) - utc(p.start)).total_seconds()
+                for p in subtract(Interval(start, end), busy)
+            )
+            since = end
+    return int(seconds // 60)
 
 
 def _presence(commitment: Commitment, tolerance: timedelta) -> LocatedEvent:
@@ -1225,11 +1232,21 @@ def _deadline_capacity(
     data: PlanningInput, problem: PlanningProblem, outcome: PlanningOutcome
 ) -> None:
     by_task = {d.task_id: d for d in data.demands}
-    taken = problem.busy + [a.reserved for a in outcome.activities]
+    fixed = problem.busy + [b.interval for b in problem.fixed_blocks]
+    taken = fixed + [a.reserved for a in outcome.activities]
     for task_id in outcome.deadline_misses:
         demand = by_task.get(task_id)
         if demand is None or demand.target is None:
             continue
+        since = max(problem.horizon.start, demand.not_before or problem.horizon.start, key=utc)
+        until = min(problem.horizon.end, demand.target, key=utc)
+        fixed_minutes = sum(
+            int(b.duration.total_seconds() // 60)
+            for b in problem.fixed_blocks
+            if b.task_id == task_id and utc(b.end) <= utc(demand.target)
+        )
+        free = free_minutes(problem.availability, taken, until, since)
+        upper_bound = free_minutes(problem.availability, fixed, until, since) + fixed_minutes
         outcome.deadline_capacity[task_id] = {
             "deadline": (demand.target - timedelta(minutes=1))
             .astimezone(data.timezone)
@@ -1238,7 +1255,7 @@ def _deadline_capacity(
             "deadline_end": demand.target.isoformat(),
             "strict": task_id in outcome.hard_deadline_misses,
             "needed_minutes": demand.remaining_minutes,
-            "free_minutes_before_deadline": free_minutes(
-                problem.availability, taken, demand.target
-            ),
+            "free_minutes_before_deadline": free,
+            "fixed_minutes_before_deadline": fixed_minutes,
+            "minimum_missing_minutes": max(0, demand.remaining_minutes - upper_bound),
         }

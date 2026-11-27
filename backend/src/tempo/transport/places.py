@@ -47,7 +47,7 @@ class PlaceDirectory:
     aliases: dict[str, str] = field(default_factory=dict)
     """Location text -> place id, configured by the user."""
     _by_id: dict[str, Place] = field(init=False, repr=False)
-    _by_alias: dict[str, Place] = field(init=False, repr=False)
+    _by_alias: dict[str, list[Place]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._by_id = {p.id: p for p in self.places}
@@ -56,14 +56,18 @@ class PlaceDirectory:
         missing = sorted(set(self.aliases.values()) - self._by_id.keys())
         if missing:
             raise ValueError(f"aliases point to unknown places: {missing}")
-        self._by_alias = {_normalise(k): self._by_id[v] for k, v in self.aliases.items()}
+        self._by_alias = {}
         for place in self.places:
-            self._by_alias.setdefault(_normalise(place.name), place)
+            self._by_alias.setdefault(_normalise(place.name), []).append(place)
+        for alias, place_id in self.aliases.items():
+            self._by_alias[_normalise(alias)] = [self._by_id[place_id]]
 
     def get(self, place_id: str) -> Place | None:
         return self._by_id.get(place_id)
 
     def resolve(self, text: str | None) -> Place | None:
-        if not text or not text.strip():
-            return None
-        return self._by_alias.get(_normalise(text))
+        matches = self.matches(text)
+        return matches[0] if len(matches) == 1 else None
+
+    def matches(self, text: str | None) -> tuple[Place, ...]:
+        return () if not text else tuple(self._by_alias.get(_normalise(text), ()))

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from tempo.ai.apply import apply_result, result_from_json
 from tempo.db.models import ActivityRow, ProposalRow, ScheduleVersion, StudyBlockRow
-from tempo.db.store import active_version, audit, notify, proposal_revision, set_setting
+from tempo.db.store import active_version, audit, notify, proposal_revision, request_replan
 from tempo.domain.ops import DomainError
 from tempo.planning.service import decline_today, release_block
 
@@ -145,7 +145,7 @@ def decide(
         and proposal_revision(session, row.details) != row.input_revision
     ):
         row.status, row.decided_at = "obsolete", now
-        set_setting(session, "replan_requested", now.isoformat())
+        request_replan(session, now)
         audit(session, actor, "proposal_obsolete", "proposal", str(row.id), kind=row.kind)
         return proposal_out(row)
     row.status, row.decided_at = ("approved" if approve else "rejected"), now
@@ -160,11 +160,11 @@ def decide(
             activity = session.get(ActivityRow, uuid.UUID(row.details["activity_id"]))
             if activity is not None:
                 activity.planned_start_at = None
-        set_setting(session, "replan_requested", now.isoformat())
+        request_replan(session, now)
     if approve:
         handler = PROPOSAL_HANDLERS.get(row.kind)
         if handler is not None:
             handler(session, row)
-        set_setting(session, "replan_requested", now.isoformat())
+        request_replan(session, now)
     audit(session, actor, "proposal_" + row.status, "proposal", str(row.id), kind=row.kind)
     return proposal_out(row)

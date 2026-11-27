@@ -93,6 +93,13 @@ class Leg:
     agency: str | None = None
     distance_m: float | None = None
     alerts: tuple[ServiceAlert, ...] = ()
+    departure_track: str | None = None
+    arrival_track: str | None = None
+    scheduled_departure_track: str | None = None
+    scheduled_arrival_track: str | None = None
+    departure_time_reason: str | None = None
+    arrival_time_reason: str | None = None
+    skipped_stops: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         start, end = utc(self.start, "leg start"), utc(self.end, "leg end")

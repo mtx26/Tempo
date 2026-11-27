@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from tempo.ai.apply import apply_result, from_extraction, known_places, result_to_json
 from tempo.ai.llm import Interpreter
 from tempo.ai.text_parser import ParseResult, parse_text
-from tempo.db.store import get_setting, notify, propose, set_setting
+from tempo.db.store import get_setting, notify, propose, request_replan, set_setting
 from tempo.sync.coach_import import apply_weekly_plan
 from tempo.sync.coach_plan import MAX_DOCX_BYTES, PlanFormatError, parse_plan_docx
 
@@ -255,7 +255,7 @@ def import_messages(
         known.add(message.digest)
     set_setting(session, "training_mail_seen", seen[-MAX_SEEN:])
     if stats["trainings"]:
-        set_setting(session, "replan_requested", datetime.now(UTC).isoformat())
+        request_replan(session, datetime.now(UTC))
     return stats
 
 

@@ -1,6 +1,6 @@
 """Read models for Home Assistant: the merged calendar and the sensor summary."""
 
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,9 +21,12 @@ from tempo.db.store import active_version, get_setting, place_directory
 from tempo.domain.models import EventStatus
 from tempo.domain.ops import remaining_minutes
 from tempo.timeutil import utc
+from tempo.transport.gtfsrt import TRIP_UPDATE_MAX_AGE
 
 
-def schedule_items(session: Session, start: datetime, end: datetime) -> list[dict[str, Any]]:
+def schedule_items(
+    session: Session, start: datetime, end: datetime, *, as_of: datetime | None = None
+) -> list[dict[str, Any]]:
     """Every planned item overlapping ``[start, end)``, sorted by start."""
     items: list[dict[str, Any]] = []
     directory = place_directory(session)
@@ -126,6 +129,13 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
             }
         )
     if version is not None:
+        planned_at = version.summary.get("planned_at")
+        age = (
+            None
+            if planned_at is None
+            else utc(as_of or datetime.now(UTC)) - utc(datetime.fromisoformat(planned_at))
+        )
+        expired = age is None or not timedelta(0) <= age <= TRIP_UPDATE_MAX_AGE
         for index, trip in enumerate(version.summary.get("travel", [])):
             t_start, t_end = (
                 datetime.fromisoformat(trip["start"]),
@@ -133,6 +143,25 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
             )
             if t_end <= t_start or utc(t_end) <= utc(start) or utc(t_start) >= utc(end):
                 continue
+            legs = trip.get("legs", [])
+            realtime_snapshot = any(leg.get("realtime") for leg in legs)
+            stale_snapshot = expired and realtime_snapshot
+            if realtime_snapshot:
+                legs = [
+                    {
+                        **leg,
+                        "realtime": False,
+                        "realtime_at_planning": True,
+                        **(
+                            {"departure_time_status": "stale", "arrival_time_status": "stale"}
+                            if stale_snapshot
+                            else {}
+                        ),
+                    }
+                    if leg.get("realtime")
+                    else leg
+                    for leg in legs
+                ]
             items.append(
                 {
                     "type": "travel",
@@ -143,7 +172,12 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
                     "status": trip["status"],
                     "departure": trip.get("departure"),
                     "arrival": trip.get("arrival"),
-                    "legs": trip.get("legs", []),
+                    "legs": legs,
+                    "information_at": planned_at,
+                    "stale_snapshot": stale_snapshot or trip["status"] == "stale",
+                    "connections": trip.get("connections", []),
+                    "arrival_margin_seconds": trip.get("arrival_margin_seconds"),
+                    "warnings": trip.get("warnings", []),
                     "origin": trip["origin"],
                     "destination": trip["destination"],
                     "event_title": trip.get("event_title"),
@@ -158,7 +192,7 @@ def schedule_items(session: Session, start: datetime, end: datetime) -> list[dic
 def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
     today = now.astimezone(tz).date()
     day_start = datetime.combine(today, time(0), tzinfo=tz)
-    upcoming = schedule_items(session, now, now + timedelta(days=7))
+    upcoming = schedule_items(session, now, now + timedelta(days=7), as_of=now)
     next_event = next(
         (
             i
@@ -177,7 +211,7 @@ def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
         ),
         None,
     )
-    today_items = schedule_items(session, day_start, day_start + timedelta(days=1))
+    today_items = schedule_items(session, day_start, day_start + timedelta(days=1), as_of=now)
     today_study = sum(
         (datetime.fromisoformat(i["end"]) - datetime.fromisoformat(i["start"])).total_seconds()
         // 60

@@ -20,7 +20,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from dateutil.rrule import rrulestr
+from dateutil.parser import parse
+from dateutil.rrule import rrule, rrulestr
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -259,38 +260,54 @@ def occurrence_key(local_start: datetime) -> str:
     return local_start.replace(tzinfo=None).isoformat(timespec="minutes")
 
 
-def occurrences(series: RecurrenceSeriesRow, start: datetime, end: datetime) -> list[Occurrence]:
-    """Occurrences of the series starting in ``[start, end)`` (wall-clock expansion)."""
-    tz = ZoneInfo(series.timezone)
-    local_start = series.dtstart.astimezone(tz).replace(tzinfo=None)
+def _recurrence_rule(text: str, local_start: datetime) -> rrule:
+    parts = text.upper().removeprefix("RRULE:").split(";")
     try:
-        rule = rrulestr(series.rrule, dtstart=local_start)
+        for index, part in enumerate(parts):
+            if part.startswith("UNTIL="):
+                until = parse(part.removeprefix("UNTIL="))
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=local_start.tzinfo)
+                parts[index] = "UNTIL=" + until.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+        rule = rrulestr(";".join(parts), dtstart=local_start)
     except (ValueError, TypeError) as exc:
         raise DomainError(f"règle de récurrence invalide : {exc}") from exc
-    found: list[Occurrence] = []
-    lower = start.astimezone(tz).replace(tzinfo=None) - timedelta(days=1)
-    upper = end.astimezone(tz).replace(tzinfo=None)
-    for naive in rule.xafter(lower, inc=True, count=MAX_SERIES_OCCURRENCES):
-        if naive >= upper:
+    if not isinstance(rule, rrule):
+        raise DomainError("règle de récurrence invalide")
+    return rule
+
+
+def recurrence_starts(
+    text: str, anchor: datetime, tz: ZoneInfo, start: datetime, end: datetime
+) -> list[datetime]:
+    """Expand wall-clock occurrences within an exact half-open interval of instants."""
+    rule = _recurrence_rule(text, anchor.astimezone(tz))
+    lower = start.astimezone(tz) - timedelta(days=1)
+    upper = end.astimezone(tz) + timedelta(days=1)
+    start_utc, end_utc = start.astimezone(UTC), end.astimezone(UTC)
+    found: list[datetime] = []
+    for local in rule.xafter(lower, inc=True, count=MAX_SERIES_OCCURRENCES):
+        if local >= upper:
             break
-        aware = naive.replace(tzinfo=tz)
-        # A wall-clock time that does not exist (DST gap) is shifted by fold handling of
-        # zoneinfo; comparing in UTC keeps the window exact.
-        if aware.astimezone(UTC) < start.astimezone(UTC):
-            continue
-        found.append(Occurrence(occurrence_key(naive), aware))
+        if start_utc <= local.astimezone(UTC) < end_utc:
+            found.append(local)
     return found
 
 
+def occurrences(series: RecurrenceSeriesRow, start: datetime, end: datetime) -> list[Occurrence]:
+    tz = ZoneInfo(series.timezone)
+    return [
+        Occurrence(occurrence_key(local), local)
+        for local in recurrence_starts(series.rrule, series.dtstart, tz, start, end)
+    ]
+
+
 def validate_rrule(rule: str) -> str:
-    text = rule.strip().removeprefix("RRULE:")
-    if not text or len(text) > 400 or "\n" in text:
+    text = rule.strip().upper().removeprefix("RRULE:")
+    if not text or len(text) > 400 or "\n" in text or "\r" in text:
         raise DomainError("règle de récurrence invalide")
-    try:
-        rrulestr(text, dtstart=datetime(2026, 1, 1))  # noqa: DTZ001 - naive wall-clock by design
-    except (ValueError, TypeError) as exc:
-        raise DomainError(f"règle de récurrence invalide : {exc}") from exc
-    if "FREQ=SECONDLY" in text or "FREQ=MINUTELY" in text or "FREQ=HOURLY" in text:
+    _recurrence_rule(text, datetime(2026, 1, 1, tzinfo=UTC))
+    if {"FREQ=SECONDLY", "FREQ=MINUTELY", "FREQ=HOURLY"}.intersection(text.split(";")):
         raise DomainError("récurrence trop fréquente (au plus quotidienne)")
     return text
 
@@ -425,9 +442,9 @@ def end_series_before(
 ) -> None:
     """Stop the series before occurrence ``from_key`` (scope "this and following")."""
     tz = ZoneInfo(series.timezone)
-    cut = datetime.fromisoformat(from_key).replace(tzinfo=tz) - timedelta(seconds=1)
+    cut = datetime.fromisoformat(from_key).replace(tzinfo=tz).astimezone(UTC) - timedelta(seconds=1)
     parts = [p for p in series.rrule.split(";") if not p.upper().startswith(("UNTIL=", "COUNT="))]
-    parts.append("UNTIL=" + cut.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ"))
+    parts.append("UNTIL=" + cut.strftime("%Y%m%dT%H%M%SZ"))
     series.rrule = ";".join(parts)
     for row in _future_rows(session, series, from_key):
         if row.status != "done":

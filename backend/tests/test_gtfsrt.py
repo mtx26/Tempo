@@ -118,6 +118,19 @@ def test_message_without_timestamp_is_rejected() -> None:
         decode(message.SerializeToString())
 
 
+def test_partial_entity_and_differential_message_are_rejected() -> None:
+    message = gtfs_realtime_pb2.FeedMessage()
+    message.header.gtfs_realtime_version = "2.0"
+    message.header.timestamp = int(NOW.timestamp())
+    message.entity.add(id="partial").trip_update.SetInParent()
+    with pytest.raises(InvalidFeedError, match="required protobuf fields"):
+        prepare(message.SerializePartialToString(), repair=True, now=NOW)
+    message.ClearField("entity")
+    message.header.incrementality = gtfs_realtime_pb2.FeedHeader.DIFFERENTIAL
+    with pytest.raises(InvalidFeedError, match="differential"):
+        prepare(message.SerializeToString(), repair=False, now=NOW)
+
+
 def test_stale_feed_is_rejected() -> None:
     with pytest.raises(InvalidFeedError, match="stale"):
         prepare(raw("delijn_trip_updates.pbf"), repair=False, now=NOW + timedelta(minutes=15))

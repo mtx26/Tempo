@@ -67,6 +67,7 @@ services:
     environment:
       # The assistant searches journeys and re-plans synchronously (ARCHITECTURE.md §3).
       TEMPO_MOTIS_URL: http://routing:8080
+      TEMPO_RT_RELAY_URL: http://tempo-rt-relay:8090
       # Gemini on Vertex AI (TEMPO_LLM_MODEL defaults to gemini-3.5-flash-lite).
       TEMPO_VERTEX_PROJECT_ID: ${TEMPO_VERTEX_PROJECT_ID:?set TEMPO_VERTEX_PROJECT_ID}
     # tempo_calendar_token: secret path of the read-only iCalendar feed /calendar/<token>.ics.

@@ -99,6 +99,11 @@ l'utilisateur : allow_today seulement s'il demande explicitement de réorganiser
 mode global seulement s'il demande explicitement de tout réorganiser. Annonce ce qui a été \
 planifié, ce qui reste non planifié et pourquoi (explain_plan), les questions et les \
 propositions en attente, sans présenter un plan partiel comme complet.
+- Avant une annulation, une modification de plusieurs éléments ou un changement durable de \
+disponibilité, utilise preview_plan_changes après les clarifications. Dis quels déplacements, \
+durées, trajets ou échéances changeraient et demande l'accord sur la simulation avant de \
+l'appliquer. Les identifiants créés par une simulation ne sont pas réutilisables. Une simulation \
+rejetée ou inconclusive ne prédit aucun résultat publiable.
 - Une demande explicite autorise son périmètre, pas ses conséquences protégées : les \
 propositions (list_proposals) ne sont acceptées ou refusées (decide_proposal) que sur réponse \
 explicite de l'utilisateur, en identifiant laquelle.
@@ -213,6 +218,15 @@ class ToolLoopAssistant:
         self._clock = clock
 
     def reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
+        before_change = len(ctx.changed)
+        try:
+            with ctx.session.begin_nested():
+                return self._reply(ctx, text, history)
+        except LLMUnavailableError:
+            del ctx.changed[before_change:]
+            raise
+
+    def _reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
         before = pending_question(ctx.session)
         answer = self._answer(ctx, text, history)
         changed = list(ctx.changed)
@@ -262,23 +276,8 @@ class ToolLoopAssistant:
             remaining = deadline - self._clock()
             if remaining < MIN_CALL_SECONDS:
                 return AgentReply(_partial("Je manque de temps pour finir", operations), operations)
-            try:
-                turn = self._model.step(conversation, remaining)
-            except LLMUnavailableError as exc:
-                if not ctx.changed:
-                    raise  # nothing changed yet: the outage is reported as is
-                # Changes are already applied: never re-run the request another way.
-                return AgentReply(
-                    _partial(f"L'assistant est devenu indisponible ({exc})", operations),
-                    operations,
-                )
+            turn = self._model.step(conversation, remaining)
             if turn.refused:
-                if operations:
-                    return AgentReply(
-                        "Je ne peux pas poursuivre cette demande. Ce qui a déjà été fait : "
-                        + ", ".join(o["name"] for o in operations if o["ok"]),
-                        operations,
-                    )
                 raise LLMUnavailableError("demande refusée par le modèle")
             if not turn.calls:
                 answer = turn.text + (" (réponse interrompue)" if turn.truncated else "")

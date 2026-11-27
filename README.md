@@ -56,6 +56,11 @@ Synchronisations, planification, trajets, rappels et contrôle de départ ne dé
 LLM et restent automatiques. Les éléments déjà prévus aujourd'hui ne bougent qu'avec votre
 accord (propositions visibles dans le capteur « Approbations en attente »).
 
+Pour examiner une demande composée, demandez par exemple « Simule l'annulation de mon cours
+de sport et le déplacement de ma séance de physique ». Tempo calcule un aperçu avec les
+opérations et règles habituelles. Les clients HTTP peuvent fournir `Idempotency-Key` sur
+`POST /v1/conversation` pour reprendre la même requête après une coupure.
+
 ## Développement local
 
 Prérequis : Python 3.13 et [`uv`](https://docs.astral.sh/uv/) ; Docker Desktop pour MOTIS et la
@@ -107,6 +112,15 @@ indisponible ». Pour le national, `config/belgium.yml` lit le temps réel via l
 (`python -m tempo.transport.rt_relay`, port 8090, à ne jamais publier : il consomme le quota du
 portail).
 
+Le relais rejette les TripUpdates âgés de plus de 90 s et les alertes âgées de plus de 10 min.
+Les horaires et quais précédemment enregistrés dans un planning restent visibles avec une
+indication de péremption. Une recherche d'itinéraire relance MOTIS. Les lieux et alias
+enregistrés sont recherchés avant le géocodeur local, qui permet aussi de retrouver des
+adresses, établissements et arrêts. Un homonyme demande une clarification.
+
+Le benchmark CP-SAT s'exécute depuis `backend/` avec
+`uv run python -m benchmarks.scheduler_bench 2 --json` (budget de 2 s par scénario).
+
 ### Pile de développement
 
 ```bash
@@ -150,6 +164,7 @@ Toute la configuration passe par des secrets Docker (`/run/secrets/<nom>`) ou de
 | `tempo_database_url` (secret) | api, worker | `postgresql+psycopg://tempo_app:<mdp>@postgres:5432/tempo`. |
 | `TEMPO_VERTEX_PROJECT_ID`, secret `tempo_gcp_credentials`, `TEMPO_LLM_MODEL` (`gemini-3.5-flash-lite` par défaut, remplaçable depuis Home Assistant : réglages de l'intégration), `TEMPO_VERTEX_REGION` (`global` par défaut) | api, worker | LLM facultatif (assistant conversationnel et e-mails du coach) : Gemini sur Google Cloud Vertex AI. Projet Google Cloud (API Vertex AI / Agent Platform activée) et clé JSON d'un compte de service ayant le rôle Vertex AI User ; le modèle doit être accessible au projet. Sans projet ou sans clé : mode déterministe. Chaque appel journalise une ligne `llm usage` (usage, modèle, latence, jetons d'entrée dont servis par le cache implicite, de sortie, de réflexion), jamais le contenu. |
 | `TEMPO_MOTIS_URL` | api, worker | `http://routing:8080`. |
+| `TEMPO_RT_RELAY_URL` | api | URL interne facultative du relais pour les diagnostics, `http://tempo-rt-relay:8090` dans les piles fournies. |
 | `TEMPO_TIMEZONE` | api, worker | `Europe/Brussels` par défaut. |
 | `tempo_ics_url` (secret) | worker | URL iCal de l'université (contient souvent un jeton personnel). |
 | `TEMPO_TRAINING_IMAP_HOST`, `TEMPO_TRAINING_IMAP_USER`, `TEMPO_TRAINING_ALLOWED_SENDER`, `TEMPO_TRAINING_AUTHSERV_ID`, secret `tempo_training_imap_password` | worker | Import du programme du coach : seule l'adresse exacte autorisée est lue, et seulement si le serveur de réception désigné par `TEMPO_TRAINING_AUTHSERV_ID` (premier mot de son en-tête `Authentication-Results`, ex. `mx.google.com`) a validé DMARC ou DKIM pour le domaine de l'expéditeur. Désactivé tant que tout n'est pas défini. |
@@ -159,6 +174,16 @@ Côté Home Assistant (intégration) : URL interne du backend, jeton, `device_tr
 téléphone, service `notify` facultatif, modèle d'IA, adresse publique de l'agenda. Le reste
 (lieux, résidences, disponibilités, préférences, rappels) se dit à l'assistant ; les
 coordonnées d'un lieu sont fournies par l'utilisateur, jamais devinées.
+
+### Observabilité
+
+- Uptime Kuma peut vérifier `GET /health`. `GET /v1/diagnostics`, protégé par le jeton API,
+  rassemble les connexions, la taille et les attentes de verrous PostgreSQL, les derniers
+  jobs, la replanification en attente, l'état HTTP de MOTIS et les états GTFS-RT.
+- Les journaux Docker indiquent la latence et le résultat de l'API, de MOTIS et de Gemini,
+  ainsi que les imports GTFS, les basculements de graphe et les rapprochements GTFS-RT.
+  Glances et Docker fournissent le CPU, la mémoire et l'espace libre. Tempo utilise le cache
+  MOTIS limité à un calcul de planning pour éviter la réutilisation entre deux relevés.
 
 ## Déploiement Swarm (Portainer)
 
@@ -219,6 +244,10 @@ Déploiement manuel par l'utilisateur via Portainer sur le serveur Debian (Swarm
    `tempo_api_token_previous`, mettre à jour Home Assistant, retirer l'ancien.
 
 Exploitation :
+- Santé du relais GTFS-RT : `GET /health` rapporte par flux son état, la validation
+  du dernier message analysé, le dernier succès, l'âge des données, la latence et les
+  erreurs consécutives. Les compteurs de trajets et d'alertes décrivent le dernier message
+  accepté par le relais. Une copie périmée reste visible dans le diagnostic et n'est plus servie.
 - Santé : health checks `api` et `rt-relay` ; table `job_run` (exposée par `get_sources_status`
   et les capteurs HA).
 - Sauvegarde quotidienne (14 jours) dans le volume `backups` ; la copier hors du nœud.
@@ -227,6 +256,8 @@ Exploitation :
 - Rétention automatique : notifications lues 90 j, propositions décidées et activités 180 j,
   plans remplacés 30 j, conversations 7 j. `audit_entry` n'est purgé qu'avec le rôle
   propriétaire.
+- Les purges de rétention et de conversation reprennent indépendamment après un échec.
+  Le dernier succès est enregistré avec chaque purge dans `app_setting`.
 - Une seule réplique pour `api` (limiteur d'authentification en mémoire), `worker` et
   `rt-relay`.
 

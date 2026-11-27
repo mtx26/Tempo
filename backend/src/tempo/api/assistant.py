@@ -10,6 +10,7 @@
 """
 
 import hashlib
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -17,6 +18,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
 from tempo.api.location import SessionDep
 from tempo.assistant.agent import Assistant, LLMUnavailableError
@@ -28,6 +30,7 @@ from tempo.transport.routing import RoutingProvider
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
+IdempotencyKey = Annotated[str | None, Header(max_length=150)]
 
 
 def _context(request: Request, session: Any, actor: str) -> OpContext:
@@ -60,33 +63,44 @@ def call_operation(
     body: dict[str, Any],
     request: Request,
     session: SessionDep,
-    idempotency_key: Annotated[str | None, Header(max_length=150)] = None,
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     if name not in CATALOG:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown operation")
-    key = None
+    key = fingerprint = None
     if idempotency_key and CATALOG[name].mutates:
-        digest = hashlib.sha256(f"{name}:{idempotency_key}".encode()).hexdigest()[:40]
-        key = f"idem:{digest}"
-        # Concurrent retries with the same key wait here: the second one replays the first's
-        # stored response instead of running the operation twice (lock held until commit).
-        session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
-        previous = get_setting(session, key)
+        key, fingerprint, previous = _idempotency(session, name, idempotency_key, body)
         if previous is not None:
-            return dict(previous["response"])
+            return previous
     outcome = run_operation(_context(request, session, "api"), name, body)
     if not outcome["ok"]:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, outcome["error"])
     if key is not None:
-        stored = {"at": datetime.now(UTC).isoformat(), "response": outcome}
-        set_setting(session, key, _jsonable(stored))
+        _remember_response(session, key, fingerprint, outcome)
     return outcome
 
 
-def _jsonable(value: Any) -> Any:
-    import json
+def _idempotency(
+    session: Session, operation: str, identifier: str, body: dict[str, Any]
+) -> tuple[str, str, dict[str, Any] | None]:
+    digest = hashlib.sha256(f"{operation}:{identifier}".encode()).hexdigest()[:40]
+    key = f"idem:{digest}"
+    fingerprint = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+    # A retry waits for the response and writes to commit together.
+    session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
+    previous = get_setting(session, key)
+    if previous is None:
+        return key, fingerprint, None
+    if previous.get("fingerprint", fingerprint) != fingerprint:
+        raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key already used")
+    return key, fingerprint, dict(previous["response"])
 
-    return json.loads(json.dumps(value, default=str))
+
+def _remember_response(
+    session: Session, key: str, fingerprint: str | None, response: dict[str, Any]
+) -> None:
+    stored = {"at": datetime.now(UTC).isoformat(), "fingerprint": fingerprint, "response": response}
+    set_setting(session, key, json.loads(json.dumps(stored, default=str)))
 
 
 class ConversationIn(BaseModel):
@@ -125,7 +139,19 @@ def _remember(session: Any, conversation_id: str, role: str, content: str) -> No
 
 
 @router.post("/conversation")
-def conversation(body: ConversationIn, request: Request, session: SessionDep) -> dict[str, Any]:
+def conversation(
+    body: ConversationIn,
+    request: Request,
+    session: SessionDep,
+    idempotency_key: IdempotencyKey = None,
+) -> dict[str, Any]:
+    key = fingerprint = None
+    if idempotency_key:
+        key, fingerprint, previous = _idempotency(
+            session, "conversation", idempotency_key, body.model_dump(mode="json")
+        )
+        if previous is not None:
+            return previous
     assistant: Assistant | None = getattr(request.app.state, "assistant", None)
     if assistant is None:
         return _unavailable("assistant Gemini non configuré (compte de service Vertex AI)")
@@ -138,12 +164,15 @@ def conversation(body: ConversationIn, request: Request, session: SessionDep) ->
         return _unavailable(str(exc))
     _remember(session, body.conversation_id, "user", body.text)
     _remember(session, body.conversation_id, "assistant", reply.text)
-    return {
+    response = {
         "reply": reply.text,
         "used_llm": True,
         "operations": reply.operations,
         "changed": bool(ctx.changed),
     }
+    if key is not None:
+        _remember_response(session, key, fingerprint, response)
+    return response
 
 
 def _unavailable(reason: str) -> dict[str, Any]:

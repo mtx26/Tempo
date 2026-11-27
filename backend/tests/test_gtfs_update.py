@@ -80,6 +80,33 @@ def run(folder: Path, portal: Portal, now: datetime, key: str = "k") -> object:
     return update_inputs(folder, client, key=key, clock=lambda: now, only=SOURCES)
 
 
+def test_future_removal_does_not_extend_gtfs_coverage() -> None:
+    data = gtfs(
+        end="20261126",
+        extra={"calendar_dates.txt": "service_id,date,exception_type\nC1,20270131,2\n"},
+    )
+    with pytest.raises(InvalidGtfsError, match="less than a week"):
+        validate_gtfs(data, NOW.date(), None)
+
+
+def test_invalid_gtfs_date_is_reported_as_validation_failure() -> None:
+    with pytest.raises(InvalidGtfsError, match=r"invalid date in calendar\.txt"):
+        validate_gtfs(gtfs(end="20270230"), NOW.date(), None)
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        ({"stop_times.txt": "trip_id,stop_id,stop_sequence\n"}, "empty stop_times"),
+        ({"calendar.txt": "service_id,start_date,end_date\n"}, "no service date"),
+        ({"../stops.txt": "unexpected"}, "unsafe zip member"),
+    ],
+)
+def test_incomplete_or_unsafe_archive_is_rejected(extra: dict[str, str], reason: str) -> None:
+    with pytest.raises(InvalidGtfsError, match=reason):
+        validate_gtfs(gtfs(extra=extra), NOW.date(), None)
+
+
 def test_first_run_downloads_validates_and_signals(tmp_path: Path) -> None:
     portal = Portal()
     report = run(tmp_path, portal, NOW, key="secret-key")
@@ -102,6 +129,19 @@ def test_unchanged_feeds_cost_no_download_and_no_rebuild(tmp_path: Path) -> None
     assert (tmp_path / "READY").read_text() == ready
     weekly = run(tmp_path, portal, NOW + timedelta(days=8))
     assert "osm.pbf" in weekly.unchanged  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("same_etag", [True, False])
+def test_expired_unchanged_feed_is_reported(tmp_path: Path, same_etag: bool) -> None:
+    portal = Portal()
+    run(tmp_path, portal, NOW)
+    ready = (tmp_path / "READY").read_text()
+    if not same_etag:
+        body, _ = portal.files["/stib"]
+        portal.files["/stib"] = (body, '"other-etag"')
+    report = run(tmp_path, portal, NOW + timedelta(days=65))
+    assert "less than a week" in report.failed["stib.gtfs.zip"]  # type: ignore[attr-defined]
+    assert (tmp_path / "READY").read_text() == ready
 
 
 def test_invalid_update_keeps_the_previous_file(tmp_path: Path) -> None:

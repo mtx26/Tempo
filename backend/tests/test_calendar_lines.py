@@ -48,3 +48,11 @@ def test_description_is_one_short_line_per_leg() -> None:
         "18 07:55 MONS Lycée → 08:05 MONS Grand-Place",
         "À pied 10 min",
     ]
+
+
+def test_description_uses_reported_tracks() -> None:
+    rail = leg("RAIL", "06:00", "06:45", "Mons", "Bruxelles", "IC")
+    rail.update(departure_track="4", scheduled_departure_track="2", scheduled_arrival_track="8")
+    assert _description({**TRIP, "legs": [rail]}, TZ) == (
+        "IC 07:00 Mons (quai 4) → 07:45 Bruxelles (quai prévu 8)"
+    )

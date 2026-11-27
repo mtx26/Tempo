@@ -171,7 +171,7 @@ supplémentaire.
 | `scheduler/` | **Un seul** modèle CP-SAT pour l'étude et toutes les activités flexibles (`solver.py`, types `model.py`), validateur indépendant (`validate.py`) appliqué au plan final. |
 | `transport/` | `itinerary.py` : **service d'itinéraire unique** (bornes, objectif, critères, pagination MOTIS, alternatives, cache par exécution) utilisé par la recherche, les trajets du planning, l'estimation des activités flexibles et le contrôle de départ ; `location.py` : modèle de présence unique (position réelle, alternance des résidences avec changement après le dernier cours, lieux prévus, base à un instant) ; client MOTIS, trajets obligatoires (`travel.py`), contrôle de départ, relais GTFS-RT, flux belges, mise à jour des données de routage. |
 | `sync/` | iCal (`ics.py`, enregistrement `ics_repository.py`), programme du coach `.docx` (`coach_plan.py`, `coach_import.py`), IMAP restreint (`training_mail.py`). |
-| `worker/` | Boucle de jobs durables (`job_run`) : iCal, séries, replanification, rappels, contrôle de départ, e-mails, rétention. |
+| `worker/` | Boucle de jobs avec état dans `job_run` : iCal, séries, replanification, rappels, contrôle de départ, e-mails, rétention. Chaque purge enregistre son propre dernier succès dans la transaction de suppression. |
 | `../tempo-homeassistant` | Intégration HACS `custom_components/tempo` (dépôt séparé). |
 
 ## 4. Conversation et contrat d'opérations
@@ -213,18 +213,23 @@ Contrat (implémenté) :
 - Une mutation réussie est auditée (`audit_entry`, acteur `assistant`/`api`, entité touchée) et, si elle touche
   le planning, demande une replanification (`replan_requested`) ; l'assistant appelle
   `plan_now` pour obtenir le résultat réel.
-- `POST /v1/operations/{name}` accepte un en-tête `Idempotency-Key` (réponse rejouée à
-  l'identique pendant 2 jours, puis purgée par le worker ; deux requêtes simultanées avec la
-  même clé sont sérialisées). Le journal de travail est idempotent par clé.
+- `POST /v1/conversation` et `POST /v1/operations/{name}` (mutations) acceptent
+  `Idempotency-Key`. La requête et sa réponse sont enregistrées dans la même transaction.
+  Les retries simultanés avec la même clé sont sérialisés, la réponse est rejouée pendant
+  2 jours et une nouvelle charge utile avec cette clé reçoit `409`. Le journal de travail a
+  aussi sa propre clé de déduplication.
+- `preview_plan_changes` exécute jusqu'à cinq opérations du catalogue sur les événements,
+  tâches, présences ou disponibilités dans une transaction annulée après le calcul. Il renvoie
+  les résultats simulés, le même diff que `plan_now` et les approbations éventuelles. Le prompt
+  demande une prévisualisation et un accord pour une annulation, une demande composée ou un
+  changement durable de disponibilité. Les règles de protection restent dans le domaine.
 - Contexte LLM : prompt système stable, 12 derniers tours de toutes les conversations Assist
   (24 h ; un seul utilisateur), la question ouverte la plus urgente, date et
   fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
   shell, Docker ou secret.
-- Sans Gemini (non configuré, panne, blocage) : `/v1/conversation` répond que la demande n'a
-  pas pu être traitée et que rien n'a été modifié (`used_llm: false`, `error:
-  llm_unavailable`) ; il n'existe pas de second chemin conversationnel. Si Gemini tombe après
-  avoir modifié quelque chose, la demande n'est jamais rejouée : la réponse liste les opérations
-  réellement effectuées. La planification et le worker ne dépendent pas de Gemini.
+- Si Gemini est indisponible ou refuse le tour, le backend annule toutes les écritures de ce
+  tour et renvoie `used_llm: false`, `error: llm_unavailable`. Une erreur métier ordinaire annule
+  l'opération concernée. La planification et le worker fonctionnent indépendamment de Gemini.
 - Durée : l'assistant ne lance plus d'appel au modèle après 60 s (chaque appel borné par le
   temps restant) ; Home Assistant attend jusqu'à 150 s, de sorte que l'utilisateur entend le
   résultat réel plutôt qu'une expiration côté client pendant qu'un changement s'applique.
@@ -236,7 +241,7 @@ Contrat (implémenté) :
 | Tâches et études | `create_task`, `update_task`, `log_work` (séance entière ou partielle, minutes, correction négative) |
 | Lieux et règles | `upsert_place` (dont point d'accès), `delete_place`, `update_settings`, `set_weekly_availability`, `set_category_windows`, `add_availability_exception`, `delete_availability_exception`, `set_planned_location`, `clear_planned_location`, `set_residence_alternation`, `set_residence_switch`, `clear_residence_alternation`, `get_residence_schedule`, `find_address`, `set_temporary_access`, `clear_temporary_access`, `set_exam` |
 | Rappels et validation | `create_reminder`, `cancel_reminder`, `decide_proposal`, `acknowledge_notification` |
-| Planning et transport | `plan_now` (local / global, simulation `dry_run`), `propose_alternatives`, `search_journey` |
+| Planning et transport | `plan_now` (local / global, simulation `dry_run`), `preview_plan_changes`, `propose_alternatives`, `search_journey` |
 
 ## 5. Modèle métier
 
@@ -621,6 +626,15 @@ Faits vérifiés par requêtes réelles (23 et 25/11/2026) :
 - Clé absente : le relais refuse de démarrer et la mise à jour des données s'arrête, chacun
   avec un message nommant le secret `tempo_bmc_partner_key` ; clé refusée (401/403) :
   journalisée et visible dans `/health` du relais, ou dans le rapport de la mise à jour.
+- `/health` distingue `operational`, `degraded`, `stale`, `unavailable` et `invalid` par flux.
+  Il publie la date de dernière récupération valide, le timestamp et l'âge du message, la
+  latence du portail, les échecs consécutifs, les compteurs des messages et les opérateurs ayant
+  seulement du statique. Les compteurs de rapprochement restent dans les journaux MOTIS.
+- Les étapes transmettent les heures et quais prévus, les quais indiqués par MOTIS, les arrêts
+  intermédiaires signalés supprimés et l'origine de chaque horaire quand MOTIS la publie.
+  Les correspondances exposent le temps restant après les étapes de transfert. Le planning
+  indique aussi le temps jusqu'au début de l'engagement. `get_schedule` présente les prévisions
+  comme des relevés du calcul et indique leur péremption après 90 s, comme le calendrier.
 - Interrogation : TripUpdates toutes les minutes (l'éditeur publie toutes les 30 s), alertes
   toutes les 5 min, pour les six flux : 5 184 requêtes/jour, soit 43 % du quota (54 % du
   plafond de 80 % que le relais s'impose) ; s'y ajoutent au plus 4 téléchargements statiques
@@ -633,16 +647,30 @@ Faits vérifiés par requêtes réelles (23 et 25/11/2026) :
 - Relais (`transport/rt_relay.py`, une seule réplique) : détient la clé, plafonne à 80 % du
   quota, recul exponentiel. Un 429 suspend **tous** les flux (le quota est par compte) jusqu'à
   `Retry-After` (secondes ou date HTTP, jamais raccourci, au moins 5 min) ; un 401/403 est
-  journalisé comme clé refusée. Les copies encore fraîches restent servies ; au-delà de 10 min
-  le relais répond 503 et MOTIS abandonne ce temps réel (vérifié) : le routage continue sur
-  les horaires statiques. Il retire `start_time` des TEC (décalage de 12 h en amont ;
-  résolution 50 % → 100 %).
+  journalisé comme clé refusée. Le relais sert les copies pendant 90 s pour les TripUpdates et
+  10 min pour les alertes. À expiration il répond 503, puis MOTIS revient au statique à sa
+  prochaine interrogation. Le relais rejette les instantanés incomplets ou différentiels, les
+  timestamps incohérents et les retours en arrière. Il retire `start_time` des TEC (décalage
+  de 12 h en amont, résolution 50 % → 100 %). [Recommandations GTFS Realtime](https://gtfs.org/documentation/realtime/realtime-best-practices/).
 - Alertes : consultatives, jamais d'exclusion de trajet ; signalées seulement si leur période
   d'impact chevauche le tronçon ET si leur texte nomme sa ligne ou l'un de ses arrêts (MOTIS
   attache aux tronçons d'un exploitant ses avis sur tout le réseau ; les avis sans période ne
   sont jamais signalés) ;
   annulations et retards viennent des TripUpdates. Un retard réel de +7 min a été observé.
 - MOTIS national : import 3 min 29 s, 1,8 Go, serveur 0,7–0,9 Go, requête médiane 100–130 ms.
+
+Le pipeline local garde le même téléchargement conditionnel, les identifiants publiés par les
+opérateurs et le basculement supervisé de MOTIS. Les archives sous contrôle comportent des
+fichiers essentiels alimentés, des chemins sûrs, une taille décompressée plafonnée et une
+date de fin de service à au moins sept jours. Un échec de validation est signalé même quand les autres
+sources ont été mises à jour. La validation complète du réseau reste celle de l'import MOTIS.
+Le catalogue belge de Transitous emploie des variantes de sources et, pour la SNCB, un script de
+transformation. Son pipeline `gtfsclean` sait réparer et minimiser des flux. Sa compatibilité
+avec les identifiants des quatre flux de Tempo demande une recette sur les archives réelles.
+Le validateur MobilityData apporterait des contrôles de conformité plus étendus avec un
+runtime Java supplémentaire. [Catalogue belge Transitous](https://github.com/public-transport/transitous/blob/main/feeds/be.json) ·
+[gtfsclean](https://github.com/public-transport/gtfsclean) ·
+[Validateur MobilityData](https://github.com/MobilityData/gtfs-validator).
 
 Contrat de recherche (`search_journey`) : origine et destination quelconques (`place:<id>`,
 `activity:<id>`, `event:<id>` pour un cours, `gps` pour un trajet immédiat) ; bornes : arrivée
@@ -725,14 +753,19 @@ du jour et présence (`route_outings`) → un seul solveur (`scheduler/solver.py
 et toutes les activités flexibles → trajets réels du plan final → corrections bornées →
 validateur indépendant (`scheduler/validate.py`) sur le plan final.
 
+La demande de recalcul porte une révision. Le service acquitte la révision lue avec
+les entrées dans la transaction qui publie le plan. Un calcul rejeté, une simulation
+ou un arrêt laisse la demande disponible. Une écriture concurrente est préservée.
+
 **Contraintes dures** (solveur et validateur, jamais relâchées) :
 - aucun chevauchement entre engagements, trajets, périodes incertaines, séances et activités ;
-- disponibilités d'étude (horaires seulement), fenêtres et plages autorisées des activités
+- chaque séance d'étude tient dans une plage de disponibilité continue. Les fenêtres et plages
+  autorisées des activités restent obligatoires
   (fenêtres de catégorie, indisponibilités générales ou par catégorie, séjour ailleurs ou période
   incertaine pour un entraînement sans lieu) ;
 - toutes les échéances (souples et strictes) : aucun travail après sans accord ;
 - éléments verrouillés, en cours et épinglés gardés tels quels ;
-- ordre de la semaine du coach ; récupération explicite (`rest_days` de la séance ou réglage
+- ordre de la semaine du coach entre toutes les séances placées ; récupération explicite (`rest_days` de la séance ou réglage
   `training_preferences.rest_days`, jamais déduite) ;
 - trajets faisables (MOTIS, ou itinéraire précédent conservé pendant une panne) ;
 - séquence physiquement possible (`validate_journeys`, sur le plan final) : jamais deux
@@ -794,7 +827,10 @@ un avertissement est notifié.
 **Stabilité** : déplacer un élément publié coûte d'autant plus qu'il est proche (nombre
 d'éléments déplacés, amplitude du décalage, temps restant) ; le jour même, il est épinglé.
 Mode `global` uniquement sur demande explicite (stabilité ignorée, verrouillé et en cours
-protégés). `dry_run` simule sans publier.
+protégés). Les blocs d'étude précédents encore admissibles alimentent les indications de
+démarrage de CP-SAT avec les créneaux gloutons. Chaque bloc ne peut tenir lieu que d'un seul
+bloc antérieur dans le coût de stabilité. Le diff distingue ajouts, retraits, mouvements et
+changements de durée des blocs, ainsi que l'évolution des trajets et échéances.
 
 **Opérations automatiques** : synchronisation iCal (immédiate), réoptimisation à partir du
 lendemain, nouvelles placements dans le temps libre du jour, rafraîchissement des trajets non
@@ -845,7 +881,12 @@ Exemple vérifié par test : « 50 h de chimie avant demain, stricte » ⇒ stat
 minutes non planifiées par tâche, échéance stricte signalée comme manquée, jamais comme
 réussie. `explain_plan` donne pour chaque échéance stricte manquée la cause chiffrée
 (`deadline_capacity` : minutes nécessaires et minutes d'étude libres avant l'échéance, après
-engagements, trajets et entraînements). `propose_alternatives` simule ensuite, sans rien publier ni modifier, des alternatives
+engagements, trajets et entraînements). Il distingue les minutes déjà réservées pour cette
+tâche de la borne minimale de manque dans l'horizon courant, calculée sans compter les
+activités flexibles. Les noyaux CP-SAT nécessiteraient de rendre obligatoires des contraintes
+que le modèle optimise aujourd'hui avec le reliquat. Le diagnostic garde la distinction entre
+capacité prouvée et résultat partiel, avec un seul modèle. [Assumptions CP-SAT](https://github.com/google/or-tools/blob/v9.15/ortools/sat/docs/troubleshooting.md).
+`propose_alternatives` simule ensuite, sans rien publier ni modifier, des alternatives
 déterministes par tâche touchée (au plus 3) : reporter l'échéance (plus petit report essayé
 parmi +2, +7, +14, +28 jours qui résout), rendre souple une échéance stricte, réduire le volume
 à ce qui tient. Chaque alternative donne le résultat réel de sa simulation (reliquat, retard,
@@ -950,6 +991,13 @@ flowchart TD
   remise, sans en fabriquer d'autres ; informatives uniquement (aucune action).
 - Aucun job ne dépend du LLM ; l'import d'e-mails par LLM (texte libre) passe par une
   proposition à approuver.
+- Le worker décide la replanification sous le verrou transactionnel partagé avec l'API et
+  enregistre la tentative dans une courte transaction séparée. Une interruption conserve la
+  demande et le délai de retry. Les cycles qui n'exécutent aucun calcul ne remplacent pas le
+  dernier résultat dans `job_run`. Procrastinate fournit file persistante, exécutions
+  périodiques, verrous, retries et récupération des jobs interrompus via une tâche de reprise.
+  Les jobs Tempo recalculent principalement depuis l'état métier PostgreSQL. Une migration
+  ajouterait un schéma de file et sa supervision pour cette charge. [Procrastinate](https://procrastinate.readthedocs.io/en/stable/).
 
 ## 11. Déploiement et exigences non fonctionnelles
 
@@ -997,6 +1045,12 @@ flowchart TD
   placement `node.role == manager`).
 - Performance : horizon glissant (14 jours par défaut, cibles lointaines conservées en part
   proportionnelle), séries matérialisées sur 60 jours, solveur limité à 10 s.
+- Observabilité : `/health` reste le contrôle de vie pour Docker et Uptime Kuma.
+  `/v1/diagnostics` authentifié combine les statistiques PostgreSQL, l'historique `job_run`,
+  l'état de MOTIS et `/health` du relais. Les journaux donnent les durées et les statuts de
+  l'API et de MOTIS sans les paramètres des requêtes. Gemini journalise la durée de ses appels
+  réussis et l'API signale ses pannes. Docker et Glances restent les sources pour les ressources
+  de l'hôte. Une collecte OpenTelemetry exigerait une destination de télémétrie adaptée.
 - Pas de dépendance à Claude Code en production.
 
 ## 12. État réel et recette
@@ -1048,6 +1102,64 @@ soir), question « base ou obligation », contrôle de la séquence des trajets 
 et cohérence calendrier publié / plan validé testée sur PostgreSQL ; scénario Docker et vrai
 Home Assistant relancés (15/15, 14/14). Le vrai Gemini n'a pas été relancé (aucun changement
 de la conversation).
+
+### Améliorations du 27/11/2026
+
+Recette finale locale : 610 tests réussis, 3 ignorés et 94 % de couverture. PostgreSQL 16,
+MOTIS Bruxelles et national, GreenMail et le contrat avec le client Home Assistant ont été
+utilisés. Les trois tests ignorés requièrent la clé du portail Belgian Mobility. Ruff,
+mypy strict et la validation de la configuration Compose et Swarm sont passés.
+
+Le point de comparaison est le code indexé au début de la mission. Les lignes physiques
+suivent les répertoires des composants et incluent commentaires et lignes vides. Les écritures
+de simulation, les diagnostics et les extensions des réponses utilisent les services existants.
+
+| Composant | Avant | Après | Ajouts | Retraits |
+|---|---:|---:|---:|---:|
+| Transport et calendrier iCal | 2 729 | 2 883 | 254 | 100 |
+| Planification et CP-SAT | 4 096 | 4 194 | 188 | 90 |
+| Worker | 894 | 899 | 13 | 8 |
+| Assistant et API conversationnelle | 3 474 | 3 559 | 158 | 73 |
+| Infrastructure et composants partagés | 5 352 | 5 484 | 152 | 20 |
+| Tests | 11 161 | 11 328 | 190 | 23 |
+
+Les piles Compose et Swarm ajoutent chacune une variable d'accès au relais. Le benchmark retire
+deux lignes et en ajoute une. Même modèle CP-SAT, même pipeline GTFS et mêmes tables du worker.
+La contrainte native `NoOverlap` mutualise les trous des disponibilités entre tâches. La
+transformation d'une étape d'itinéraire est partagée entre recherche et planification.
+
+Mesures locales avec le budget CP-SAT de 2 s par cas (`benchmarks.scheduler_bench`). Les deux
+premiers résultats avant et après couvrent toute la charge et passent le validateur. Le grand cas
+dépasse ce budget à chaque essai. Les temps incluent la construction du modèle.
+
+| Jeu synthétique | Avant | Après | Résultat |
+|---|---:|---:|---|
+| 2 semaines, 4 matières | 1,01 s | 0,83 s | Optimal |
+| 4 semaines, 6 matières | 2,30 s | 2,29 s | Faisable |
+| 8 semaines, 8 matières | 2,05 s | 2,11 s | Inconclusif |
+
+Avec `EXPLAIN (ANALYZE, BUFFERS)`, 5 000 cours fictifs et un horizon de 14 jours,
+le planning a supprimé l'une des deux lectures des cours (0,51 ms et 87 blocs PostgreSQL
+en cache pour la lecture retirée, 0,45 ms pour la lecture des cours suivis). La lecture de
+l'historique prenait 0,26 ms sur 3 000 tours synthétiques. Aucun index ajouté sur cette base.
+Sur 40 requêtes `TestClient` à `/health`, p50/p95 à 2,05/3,06 ms avant et 2,21/3,32 ms avec la
+journalisation. Sur 20 requêtes de routage identiques, p50/p95 de 67,85/88,75 ms à Bruxelles et de
+95,25/218,36 ms sur le graphe national. Au repos en local, la mémoire utilisée était d'environ
+68 Mio PostgreSQL, 243 Mio MOTIS Bruxelles et 646 Mio MOTIS national. Ces échantillons ne
+mesurent pas la charge du serveur cible.
+
+Le géocodeur MOTIS v2.11.4 a été vérifié localement en important l'extrait public OSM de
+Bruxelles dans un graphe isolé. Les recherches ont renvoyé une adresse pour la Grand-Place,
+plusieurs sites universitaires et plusieurs lieux nommés Bruxelles-Midi. Les anciens graphes
+de routage utilisés pour les tests avaient été importés avec le géocodage désactivé.
+
+Restent à vérifier sur les services sources et le déploiement cible : fraîcheur au niveau de
+chaque prévision individuelle, rapprochement d'identifiants après nettoyage GTFS, positions
+de véhicules, et suivi des alertes pendant un incident opérateur réel. La couverture des
+nouveaux comportements conversationnels repose sur les simulations Gemini et PostgreSQL.
+Les chiffres d'usage MOTIS et PostgreSQL de production nécessitent les journaux et statistiques
+du serveur. Le cache MOTIS reste limité à un calcul de planning, où les requêtes identiques
+partagent le même résultat.
 
 Bloquants nécessitant l'utilisateur : quota Vertex AI suffisant pour la conversation, installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de

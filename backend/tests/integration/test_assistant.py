@@ -269,6 +269,10 @@ def test_operations_api_catalogue_and_idempotency(
         one = api.post("/v1/operations/create_task", headers=headers, json=body)
         two = api.post("/v1/operations/create_task", headers=headers, json=body)
         assert one.status_code == 200 and one.json() == two.json()
+        conflict = api.post(
+            "/v1/operations/create_task", headers=headers, json={**body, "title": "Autre"}
+        )
+        assert conflict.status_code == 409
         bad = api.post("/v1/operations/create_task", headers=AUTH, json={"title": ""})
         assert bad.status_code == 422
         assert api.post("/v1/operations/nope", headers=AUTH, json={}).status_code == 404
@@ -311,22 +315,35 @@ def test_concurrent_replans_never_overwrite_each_other(sessions: sessionmaker[Se
     assert states.count("active") == 1 and states.count("superseded") == 2
 
 
-def test_llm_outage_after_a_change_never_replays_the_request(session: Session) -> None:
-    """The deterministic path must not run the same text again over applied changes."""
+def test_llm_outage_after_a_change_rolls_back_the_turn(session: Session) -> None:
+    """An interrupted Gemini turn leaves no business change or replan request."""
     seed(session)
     llm = ScriptedModels(
-        response(
-            tool_use(
-                "create_task", {"title": "Chimie", "estimated_minutes": 60, "splittable": True}
-            )
-        ),
+        response(tool_use("create_task", {"title": "Économie", "estimated_minutes": 60})),
         outage(),
     )
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
-    reply = assistant(llm).reply(ctx, "ajoute 1 h de chimie", [])
-    assert "indisponible" in reply.text and "create_task" in reply.text
-    # Never replayed; what was applied is still planned (deterministic re-plan request).
-    assert ctx.changed == ["create_task", "plan_now"]
+    with pytest.raises(LLMUnavailableError):
+        assistant(llm).reply(ctx, "ajoute 1 h d'économie", [])
+    assert ctx.changed == []
+    assert session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Économie")) is None
+
+
+def test_conversation_replays_only_the_same_idempotent_request(
+    sessions: sessionmaker[Session], database_url: str
+) -> None:
+    scripted = ScriptedModels(response(say("Bonjour.")))
+    app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    app.state.assistant = assistant(scripted)
+    headers = {**AUTH, "Idempotency-Key": "same-voice-message"}
+    with TestClient(app) as api:
+        first = api.post("/v1/conversation", headers=headers, json={"text": "Bonjour"})
+        retry = api.post("/v1/conversation", headers=headers, json={"text": "Bonjour"})
+        other = api.post("/v1/conversation", headers=headers, json={"text": "Au revoir"})
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json()
+    assert other.status_code == 409
+    assert len(scripted.requests) == 1
 
 
 def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:

@@ -46,7 +46,9 @@ def calendar_router(token: bytes, limiter: FailureLimiter, tz: ZoneInfo) -> APIR
         now = clock()
         items = [
             item
-            for item in schedule_items(session, now - CALENDAR_PAST, now + CALENDAR_FUTURE)
+            for item in schedule_items(
+                session, now - CALENDAR_PAST, now + CALENDAR_FUTURE, as_of=now
+            )
             if item["type"] != "class"  # already on the phone through the university calendar
         ]
         return Response(
@@ -99,7 +101,10 @@ def _description(item: dict[str, Any], tz: ZoneInfo) -> str:
             return "Aucun trajet possible à temps."
         if item.get("status") != "routed":
             return "Trajet non calculé."
-        return "\n".join(_leg_line(leg, tz) for leg in item.get("legs") or [])
+        lines = [_leg_line(leg, tz) for leg in item.get("legs") or []]
+        if item.get("stale_snapshot"):
+            lines.insert(0, "Horaires et quais à vérifier (prévisions du planning périmées).")
+        return "\n".join(lines)
     notes: str = item.get("notes") or ""
     return notes
 
@@ -127,7 +132,17 @@ def _leg_line(leg: dict[str, Any], tz: ZoneInfo) -> str:
         return f"À pied {minutes} min"
     if leg["mode"] == "ACCESS":
         return f"Dépôt {minutes} min"
+    departure = leg["from"]
+    arrival = leg["to"]
+    if track := leg.get("departure_track"):
+        departure = f"{departure} (quai {track})"
+    elif track := leg.get("scheduled_departure_track"):
+        departure = f"{departure} (quai prévu {track})"
+    if track := leg.get("arrival_track"):
+        arrival = f"{arrival} (quai {track})"
+    elif track := leg.get("scheduled_arrival_track"):
+        arrival = f"{arrival} (quai prévu {track})"
     return (
-        f"{leg.get('line') or leg['mode']} {start.astimezone(tz):%H:%M} {leg['from']} → "
-        f"{end.astimezone(tz):%H:%M} {leg['to']}"
+        f"{leg.get('line') or leg['mode']} {start.astimezone(tz):%H:%M} {departure} → "
+        f"{end.astimezone(tz):%H:%M} {arrival}"
     )

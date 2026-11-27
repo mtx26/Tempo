@@ -64,6 +64,28 @@ def test_itineraries_are_parsed_with_realtime_flags() -> None:
     assert transit.uses_realtime is True
 
 
+def test_reported_platform_change_and_missing_arrival_track() -> None:
+    response = json.loads(json.dumps(FIXTURE))
+    rail = response["itineraries"][0]["legs"][1]
+    rail["from"].update(track="4", scheduledTrack="2", departureTimestampReason="OBSERVED")
+    rail["to"]["scheduledTrack"] = "8"
+    rail["to"]["arrivalTimestampReason"] = "PREDICTED"
+    rail["intermediateStops"] = [{"name": "Halte supprimée", "cancelled": True}]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=response)
+
+    journeys = client(handler).plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True)
+    parsed = next(j for j in journeys if j.transfers == 1).legs[1]
+    assert parsed.departure_track == "4"
+    assert parsed.scheduled_departure_track == "2"
+    assert parsed.arrival_track is None
+    assert parsed.scheduled_arrival_track == "8"
+    assert parsed.departure_time_reason == "OBSERVED"
+    assert parsed.arrival_time_reason == "PREDICTED"
+    assert parsed.skipped_stops == ("Halte supprimée",)
+
+
 def test_direct_walking_route_is_kept_as_a_valid_option() -> None:
     journeys = client(ok).plan(ORIGIN, DESTINATION, ARRIVE_BY, arrive_by=True)
     walk = next(j for j in journeys if all(leg.mode == "WALK" for leg in j.legs))

@@ -21,12 +21,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
+from itertools import pairwise
 from typing import Any
 
 from tempo.const import SEARCH_SPAN
 from tempo.timeutil import utc
 from tempo.transport.places import Coordinates
-from tempo.transport.routing import Journey, RoutingProvider, RoutingUnavailableError
+from tempo.transport.routing import Journey, Leg, RoutingProvider, RoutingUnavailableError
 
 MIN_PAGES = 5
 MAX_PAGES = 20
@@ -213,13 +214,14 @@ class JourneyNotes:
         return [*self.specific, *self.general]
 
 
-def journey_notes(journey: Journey) -> JourneyNotes:
+def journey_notes(journey: Journey, *, planning_snapshot: bool = False) -> JourneyNotes:
     specific: list[str] = []
     for leg in journey.legs:
         late = max(leg.delay, leg.arrival_delay)
         if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
             minutes = int(late.total_seconds() // 60)
-            specific.append(f"retard en temps réel +{minutes} min sur {leg.line or leg.mode}")
+            source = "indiqué à la planification" if planning_snapshot else "en temps réel"
+            specific.append(f"retard {source} +{minutes} min sur {leg.line or leg.mode}")
     specific += [
         f"perturbation {alert.effect} : {alert.header}"
         for alert in journey.timed_disruptions
@@ -240,6 +242,68 @@ def journey_notes(journey: Journey) -> JourneyNotes:
             "pour les trajets prévus"
         )
     return JourneyNotes(tuple(dict.fromkeys(specific)), tuple(general))
+
+
+TIMESTAMP_STATUS = {
+    "OBSERVED": "observed",
+    "PREDICTED": "estimated",
+    "PROPAGATED": "estimated",
+    "INCONSISTENT_RT": "estimated",
+    "NO_RT_DATA": "scheduled",
+}
+
+
+def leg_payload(leg: Leg, *, operator_key: str, stale: bool = False) -> dict[str, Any]:
+    """Common itinerary fields, preserving the two public names for the operator."""
+    default = "unknown" if leg.realtime else "scheduled"
+    return {
+        "mode": leg.mode,
+        "line": leg.line,
+        operator_key: leg.agency,
+        "from": leg.origin_name,
+        "to": leg.destination_name,
+        "start": leg.start.isoformat(),
+        "end": leg.end.isoformat(),
+        "realtime": leg.realtime,
+        "cancelled": leg.cancelled,
+        "scheduled_start": leg.scheduled_start.isoformat(),
+        "scheduled_end": leg.scheduled_end.isoformat(),
+        "departure_track": leg.departure_track,
+        "arrival_track": leg.arrival_track,
+        "scheduled_departure_track": leg.scheduled_departure_track,
+        "scheduled_arrival_track": leg.scheduled_arrival_track,
+        "departure_time_reason": leg.departure_time_reason,
+        "arrival_time_reason": leg.arrival_time_reason,
+        "departure_time_status": "stale"
+        if stale
+        else TIMESTAMP_STATUS.get(leg.departure_time_reason or "", default),
+        "arrival_time_status": "stale"
+        if stale
+        else TIMESTAMP_STATUS.get(leg.arrival_time_reason or "", default),
+        "skipped_stops": list(leg.skipped_stops),
+    }
+
+
+def connection_margins(journey: Journey) -> list[dict[str, Any]]:
+    """Time left between vehicles after subtracting the transfer legs known to MOTIS."""
+    transit = [i for i, leg in enumerate(journey.legs) if leg.is_transit]
+    margins = []
+    for inbound, outbound in pairwise(transit):
+        legs = journey.legs[inbound : outbound + 1]
+        wait = sum((utc(b.start) - utc(a.end)).total_seconds() for a, b in pairwise(legs))
+        scheduled = sum(
+            (utc(b.scheduled_start) - utc(a.scheduled_end)).total_seconds()
+            for a, b in pairwise(legs)
+        )
+        margins.append(
+            {
+                "arrival_stop": legs[0].destination_name,
+                "departure_stop": legs[-1].origin_name,
+                "margin_seconds": int(wait),
+                "scheduled_margin_seconds": int(scheduled),
+            }
+        )
+    return margins
 
 
 class CachedRouting:

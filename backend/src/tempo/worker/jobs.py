@@ -23,7 +23,7 @@ from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx2
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -62,8 +62,16 @@ from tempo.db.models import (
     SettingRow,
     StudyBlockRow,
 )
-from tempo.db.store import access_routing, active_version, get_setting, notify, set_setting
-from tempo.planning.service import PlanningNotConfiguredError, replan
+from tempo.db.store import (
+    access_routing,
+    active_version,
+    get_setting,
+    notify,
+    request_replan,
+    set_setting,
+)
+from tempo.domain.ops import DomainError, recurrence_starts
+from tempo.planning.service import REPLAN_LOCK, PlanningNotConfiguredError, replan
 from tempo.sync.ics import IcsParseError, parse_ics
 from tempo.sync.ics_repository import apply_ics_sync, get_or_create_source
 from tempo.sync.training_mail import MailSource, import_messages
@@ -113,17 +121,31 @@ def record_run(sessions: Sessions, name: str, started: datetime, error: str | No
         session.commit()
 
 
-def run_job(sessions: Sessions, name: str, job: Callable[[], Any]) -> bool:
+def run_job(
+    sessions: Sessions,
+    name: str,
+    job: Callable[[], Any],
+    *,
+    due: Callable[[], bool] | None = None,
+    skip_empty: bool = False,
+) -> bool:
     started = datetime.now(UTC)
+    error = None
     try:
-        job()
+        if due is not None and not due():
+            return False
+        if job() is None and skip_empty:
+            return False
     except Exception as exc:
         logger.error("job %s failed: %s", name, exc)
         logger.debug("%s", traceback.format_exc())
-        record_run(sessions, name, started, f"{type(exc).__name__}: {exc}")
+        error = f"{type(exc).__name__}: {exc}"
+    try:
+        record_run(sessions, name, started, error)
+    except Exception:
+        logger.exception("could not record run for job %s", name)
         return False
-    record_run(sessions, name, started, None)
-    return True
+    return error is None
 
 
 # --- iCal ---
@@ -228,7 +250,7 @@ def ics_sync(
                     "bougent qu'après votre accord.",
                     f"ics_changed:{run.id}",
                 )
-            set_setting(session, "replan_requested", now.isoformat())
+            request_replan(session, now)
         for warning in [*imported.warnings, *imported.skipped]:
             # Skipped items (all-day or invalid events) are never dropped silently.
             notify(
@@ -249,12 +271,18 @@ def replan_due(session: Session, now: datetime, tz: ZoneInfo) -> str | None:
     """Why a re-plan is due now, or None."""
     version = active_version(session)
     last = None if version is None else datetime.fromisoformat(version.summary["planned_at"])
-    requested = get_setting(session, "replan_requested")
-    if requested is not None and (last is None or datetime.fromisoformat(requested) > last):
-        return "requested"
-    attempt = get_setting(session, "last_replan_attempt")
-    if attempt is not None and now - datetime.fromisoformat(attempt) < REPLAN_RETRY_AFTER:
+    request_at = get_setting(session, "replan_requested")
+    attempt_at = get_setting(session, "last_replan_attempt")
+    requested = None if request_at is None else datetime.fromisoformat(request_at)
+    attempt = None if attempt_at is None else datetime.fromisoformat(attempt_at)
+    if (
+        attempt is not None
+        and (requested is None or requested <= attempt)
+        and (now - attempt < REPLAN_RETRY_AFTER)
+    ):
         return None
+    if requested is not None:
+        return "requested"
     if last is None:
         return "first plan"
     nightly = datetime.combine(now.astimezone(tz).date(), NIGHTLY_REPLAN, tzinfo=tz)
@@ -270,14 +298,16 @@ def replan_due(session: Session, now: datetime, tz: ZoneInfo) -> str | None:
 def replan_job(
     sessions: Sessions, routing: RoutingProvider, now: datetime, tz: ZoneInfo
 ) -> str | None:
-    with sessions() as session:
+    with sessions.begin() as session:
+        # Decide whether work is due under the same lock used by the publisher.
+        # Another API or worker invocation already holding it can finish on its own.
+        if not session.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": REPLAN_LOCK}):
+            return None
         reason = replan_due(session, now, tz)
         if reason is None:
             return None
-        set_setting(session, "last_replan_attempt", now.isoformat())
-        if reason == "requested":
-            set_setting(session, "replan_requested", None)
-        session.commit()  # the attempt is recorded even if planning crashes below
+        with sessions.begin() as attempt:
+            set_setting(attempt, "last_replan_attempt", now.isoformat())
         try:
             replan(session, routing, now, tz, reason=reason)
         except PlanningNotConfiguredError as exc:
@@ -289,7 +319,6 @@ def replan_job(
                 "et leur alternance).",
                 "setup:home",
             )
-        session.commit()
         return reason
 
 
@@ -510,18 +539,16 @@ def _deleted(session: Session, statement: Any) -> int:
     return int(getattr(result, "rowcount", 0) or 0)
 
 
-def retention_due(sessions: Sessions, now: datetime, tz: ZoneInfo) -> bool:
-    """True once per local day, at or after ``RETENTION_HOUR``: the day is claimed in a
-    setting, so a restart or an irregular tick never skips nor repeats the purge."""
+def retention_due(sessions: Sessions, now: datetime, tz: ZoneInfo, job: str = "retention") -> bool:
+    """Retry after the local retention hour until this day's purge has committed."""
     local = now.astimezone(tz)
     if local.hour < RETENTION_HOUR:
         return False
     with sessions() as session:
-        if get_setting(session, "retention_day") == local.date().isoformat():
-            return False
-        set_setting(session, "retention_day", local.date().isoformat())
-        session.commit()
-    return True
+        success = get_setting(session, f"{job}_success_at")
+        return (
+            success is None or datetime.fromisoformat(success).astimezone(tz).date() != local.date()
+        )
 
 
 def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
@@ -558,6 +585,7 @@ def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
                 delete(ActivityRow).where(ActivityRow.latest_end_at < now - ACTIVITY_RETENTION),
             ),
         }
+        set_setting(session, "retention_success_at", now.isoformat())
         session.commit()
         return counts
 
@@ -572,13 +600,9 @@ def _reminder_due(session: Session, row: Any, now: datetime, tz: ZoneInfo) -> li
             return []
         if row.rrule is None:
             return [row.remind_at] if row.remind_at <= now else []
-        from dateutil.rrule import rrulestr
-
-        local = row.remind_at.astimezone(tz).replace(tzinfo=None)
-        rule = rrulestr(row.rrule, dtstart=local)
-        lower = (now - REMINDER_GRACE).astimezone(tz).replace(tzinfo=None)
-        upper = now.astimezone(tz).replace(tzinfo=None)
-        return [naive.replace(tzinfo=tz) for naive in rule.between(lower, upper, inc=True)]
+        return recurrence_starts(
+            row.rrule, row.remind_at, tz, now - REMINDER_GRACE, now + timedelta(microseconds=1)
+        )
     start = _reminder_target_start(session, row)
     if start is None:
         return []
@@ -615,7 +639,12 @@ def reminders_job(sessions: Sessions, now: datetime, tz: ZoneInfo) -> int:
     fired = 0
     with sessions() as session:
         for row in session.scalars(select(ReminderRow).where(ReminderRow.status == "active")):
-            for due in _reminder_due(session, row, now, tz):
+            try:
+                due_times = _reminder_due(session, row, now, tz)
+            except DomainError as exc:
+                logger.warning("could not expand reminder %s: %s", row.id, exc)
+                continue
+            for due in due_times:
                 if now - due > REMINDER_GRACE:
                     continue
                 late = now - due > timedelta(minutes=5)
@@ -641,7 +670,7 @@ def series_job(sessions: Sessions, now: datetime) -> int:
     with sessions() as session:
         created = expand_all_series(session, now)
         if created:
-            set_setting(session, "replan_requested", now.isoformat())
+            request_replan(session, now)
         session.commit()
         return created
 
@@ -663,5 +692,6 @@ def conversation_retention_job(sessions: Sessions, now: datetime) -> int:
                 < (now - IDEMPOTENCY_RETENTION).astimezone(UTC).isoformat(),
             ),
         )
+        set_setting(session, "conversation_retention_success_at", now.isoformat())
         session.commit()
         return turns + keys

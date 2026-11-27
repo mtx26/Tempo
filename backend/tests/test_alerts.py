@@ -162,7 +162,8 @@ def test_live_delay_is_reported_and_travel_uses_live_times() -> None:
     block = plan.blocks[0]
     assert block.start == DAY.replace(hour=8, minute=7)
     assert plan.warnings == [
-        "retard en temps réel +7 min sur E69 (Kot -> Campus (2026-12-01T08:50:00+00:00))"
+        "retard indiqué à la planification +7 min sur E69 "
+        "(Kot -> Campus (2026-12-01T08:50:00+00:00))"
     ]
 
 
@@ -231,7 +232,8 @@ def test_arrival_delay_is_reported() -> None:
     assert max(leg.arrival_delay for leg in late_arrival.legs) == timedelta(minutes=6)
     plan = plan_day_travel([lecture()], Fixed([late_arrival]), start_place=HOME)
     assert plan.warnings == [
-        "retard en temps réel +6 min sur E69 (Kot -> Campus (2026-12-01T08:50:00+00:00))"
+        "retard indiqué à la planification +6 min sur E69 "
+        "(Kot -> Campus (2026-12-01T08:50:00+00:00))"
     ]
 
 

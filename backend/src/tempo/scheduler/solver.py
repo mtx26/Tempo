@@ -163,6 +163,7 @@ class _Builder:
         self.unplanned: dict[str, cp_model.IntVar] = {}
         self.to_plan: dict[str, int] = {}
         self.global_intervals: list[cp_model.IntervalVar] = []
+        self.study_gaps: dict[int, list[cp_model.IntervalVar]] = {}
         self.break_intervals: list[cp_model.IntervalVar] = []
         self.subject_intervals: dict[str, list[cp_model.IntervalVar]] = {}
         last = problem.horizon.end.astimezone(tz).date()
@@ -227,6 +228,15 @@ class _Builder:
             ]
         )
         self.study_free = _subtract(allowed, busy)
+        # Busy time is already excluded by the global constraint. Only the internal
+        # gaps of study availability need their own constraint, shared across tasks.
+        for index, (left, right) in enumerate(itertools.pairwise(allowed)):
+            start, end = left[1], right[0]
+            day = self._day_of(start)
+            if self._day_of(end) == day:
+                self.study_gaps.setdefault(day, []).append(
+                    self.model.new_fixed_size_interval_var(start, end - start, f"study_gap_{index}")
+                )
         for demand in self.p.demands:
             self._add_demand(demand)
         self._add_fixed_block_zones()
@@ -237,6 +247,8 @@ class _Builder:
         self._add_stability()
         model = self.model
         model.add_no_overlap(self.global_intervals)
+        for intervals in self.study_gaps.values():
+            model.add_no_overlap(intervals)
         model.add_no_overlap(self.break_intervals)
         for intervals in self.subject_intervals.values():
             model.add_no_overlap(intervals)
@@ -287,10 +299,8 @@ class _Builder:
         self, demand: StudyDemand, day: int, free: list[Span], need: int
     ) -> list[_Block]:
         prefs, g, model = self.prefs, self.prefs.granularity_minutes, self.model
-        domain = [
-            [math.ceil(s / g), (e - prefs.min_block_minutes) // g]
-            for s, e in free
-            if (e - prefs.min_block_minutes) // g >= math.ceil(s / g)
+        windows = [
+            (s, e) for s, e in free if (e - prefs.min_block_minutes) // g >= math.ceil(s / g)
         ]
         capacity = sum(e - s for s, e in free)
         count = min(
@@ -298,23 +308,27 @@ class _Builder:
             math.ceil(min(need, capacity) / prefs.preferred_block_minutes) + 1,
             capacity // prefs.min_block_minutes,
         )
-        if not domain or count <= 0:
+        if not windows or count <= 0:
             return []
-        latest = max(e for _, e in free)
+        domain = cp_model.Domain.from_intervals(
+            [[math.ceil(s / g), (e - prefs.min_block_minutes) // g] for s, e in windows]
+        )
+        latest = windows[-1][1]
         family: list[_Block] = []
         for k in range(count):
             tag = f"{demand.task_id}_{day}_{k}"
-            slot = model.new_int_var_from_domain(cp_model.Domain.from_intervals(domain), f"s_{tag}")
+            slot = model.new_int_var_from_domain(domain, f"s_{tag}")
             size = model.new_int_var(
                 prefs.min_block_minutes // g, prefs.max_block_minutes // g, f"n_{tag}"
             )
             present = model.new_bool_var(f"p_{tag}")
             start = g * slot
-            end = model.new_int_var(domain[0][0] * g, latest, f"e_{tag}")
+            end = model.new_int_var(windows[0][0], latest, f"e_{tag}")
             model.add(end == start + g * size)
-            self.global_intervals.append(
-                model.new_optional_interval_var(start, g * size, end, present, f"iv_{tag}")
-            )
+            interval = model.new_optional_interval_var(start, g * size, end, present, f"iv_{tag}")
+            self.global_intervals.append(interval)
+            if day in self.study_gaps:
+                self.study_gaps[day].append(interval)
             effective = model.new_int_var(0, prefs.max_block_minutes, f"eff_{tag}")
             model.add(effective == g * size).only_enforce_if(present)
             model.add(effective == 0).only_enforce_if(~present)
@@ -504,7 +518,8 @@ class _Builder:
                 groups.setdefault(act.item.sequence_group, []).append(i)
         for members in groups.values():
             members.sort(key=lambda i: self.activities[i].item.sequence_index)
-            for a, b in itertools.pairwise(members):
+            # Adjacent pairs alone lose the precedence when a middle session is absent.
+            for a, b in itertools.combinations(members, 2):
                 both = [self.activities[a].present, self.activities[b].present]
                 model.add(self.activities[b].start >= ends(a)).only_enforce_if(both)
         trainings = [i for i, a in enumerate(self.activities) if a.item.training]
@@ -526,13 +541,14 @@ class _Builder:
         """Previous blocks: kept, shifted (cost grows with the shift) or dropped (full cost),
         the cost decreasing with the distance in time."""
         model, tz = self.model, self.p.timezone
+        families: dict[tuple[str, int], list[_Block]] = {}
+        for block in self.blocks:
+            families.setdefault((block.demand.task_id, block.day), []).append(block)
+        by_block: dict[int, list[cp_model.IntVar]] = {}
         for index, previous in enumerate(self.p.previous_blocks):
             start = self.clock.floor(previous.start)
             size = self.clock.floor(previous.end) - start
-            day = next((i for i, (s, e) in enumerate(self.days) if s <= start < e), None)
-            candidates = [
-                b for b in self.blocks if b.day == day and b.demand.task_id == previous.task_id
-            ]
+            candidates = families.get((previous.task_id, self._day_of(start)), [])
             if not candidates or size <= 0:
                 continue  # cannot be kept (task done, day past...): a constant
             weight = stability_weight((previous.start.astimezone(tz).date() - self.first_day).days)
@@ -548,8 +564,12 @@ class _Builder:
                 model.add(shift >= per_minute * distance).only_enforce_if(match)
                 self.penalties.append(shift)
                 matches.append(match)
-            model.add(sum(matches) <= 1)
+                by_block.setdefault(id(block), []).append(match)
+            model.add_at_most_one(matches)
             self.penalties.append(weight * (1 - sum(matches)))
+        for matches in by_block.values():
+            if len(matches) > 1:
+                model.add_at_most_one(matches)
 
     # -- warm start ---------------------------------------------------------------------------
     def warm_start(self) -> None:
@@ -560,6 +580,32 @@ class _Builder:
         families: dict[tuple[str, int], list[_Block]] = {}
         for block in self.blocks:
             families.setdefault((block.demand.task_id, block.day), []).append(block)
+        preserved: dict[tuple[str, int], list[tuple[int, int]]] = {}
+        for previous in sorted(self.p.previous_blocks, key=lambda b: utc(b.start)):
+            start, end = self.clock.ceil(previous.start), self.clock.floor(previous.end)
+            length = end - start
+            day = self._day_of(start)
+            key = (previous.task_id, day)
+            family = families.get(key)
+            if not family or not (prefs.min_block_minutes <= length <= prefs.max_block_minutes):
+                continue
+            demand = family[0].demand
+            hints = preserved.setdefault(key, [])
+            if (
+                start % g
+                or length % g
+                or len(hints) >= len(family)
+                or remaining[previous.task_id] < length
+                or end > self.days[day][1]
+                or (demand.target is not None and end > self.clock.floor(demand.target))
+                or (demand.not_before is not None and start < self.clock.ceil(demand.not_before))
+                or not any(s <= start and end <= e for s, e in self.study_free)
+                or any(start < e and s < end for s, e in placed)
+            ):
+                continue
+            hints.append((start, length))
+            placed.append((start, end + prefs.break_minutes))
+            remaining[previous.task_id] -= length
         days_of: dict[str, int] = {}
         for task, _ in families:
             days_of[task] = days_of.get(task, 0) + 1
@@ -580,8 +626,9 @@ class _Builder:
                     math.ceil(self.to_plan[demand.task_id] / days_of[demand.task_id] / g) * g,
                     prefs.preferred_block_minutes,
                 )
-                used = 0
-                for block in family:
+                slots = preserved.get((demand.task_id, day), [])
+                used = sum(length for _, length in slots)
+                for _ in range(len(family) - len(slots)):
                     need = remaining.get(demand.task_id, 0)
                     if need <= 0 or used >= share:
                         break
@@ -589,17 +636,21 @@ class _Builder:
                     length = math.ceil(length / g) * g
                     d_start, d_end = self.days[day]
                     free = _subtract(self.study_free, [(-(10**9), d_start), (d_end, 10**9)])
-                    spot = _first_fit(free, placed, length, g, prefs.break_minutes)
+                    if demand.not_before is not None:
+                        free = _subtract(free, [(-(10**9), self.clock.ceil(demand.not_before))])
+                    spot = _first_fit(free, placed, length, g)
                     if spot is None:
                         break
                     if demand.target is not None and spot + length > self.clock.floor(
                         demand.target
                     ):
                         break
-                    chosen[id(block)] = (spot // g, length // g)
+                    slots.append((spot, length))
                     placed.append((spot, spot + length + prefs.break_minutes))
                     used += length
                     remaining[demand.task_id] = need - length
+                for block, (spot, length) in zip(family, sorted(slots), strict=False):
+                    chosen[id(block)] = (spot // g, length // g)
         for block in self.blocks:
             hint = chosen.get(id(block))
             self.model.add_hint(block.present, 1 if hint else 0)
@@ -608,7 +659,7 @@ class _Builder:
                 self.model.add_hint(block.size, hint[1])
 
 
-def _first_fit(free: list[Span], placed: list[Span], length: int, g: int, gap: int) -> int | None:
+def _first_fit(free: list[Span], placed: list[Span], length: int, g: int) -> int | None:
     for start, end in _subtract(free, _merge(placed)):
         candidate = math.ceil(start / g) * g
         if candidate + length <= end:

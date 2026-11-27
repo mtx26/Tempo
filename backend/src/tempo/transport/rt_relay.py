@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from time import monotonic
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Response
@@ -50,7 +51,15 @@ from tempo.transport.feeds import (
     check_budget,
     feed,
 )
-from tempo.transport.gtfsrt import FeedSummary, InvalidFeedError, check_fresh, prepare
+from tempo.transport.gtfsrt import (
+    MAX_FEED_AGE,
+    TRIP_UPDATE_MAX_AGE,
+    FeedSummary,
+    InvalidFeedError,
+    StaleFeedError,
+    check_fresh,
+    prepare,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +68,10 @@ DEFAULT_BACKOFF = timedelta(minutes=5)
 MAX_BACKOFF = timedelta(hours=1)
 WINDOW = timedelta(hours=24)
 KIND_PATHS = {"trip-updates": FeedKind.TRIP_UPDATES, "alerts": FeedKind.SERVICE_ALERTS}
+
+
+def _max_age(kind: FeedKind) -> timedelta:
+    return TRIP_UPDATE_MAX_AGE if kind is FeedKind.TRIP_UPDATES else MAX_FEED_AGE
 
 
 class RelaySettings(BaseSettings):
@@ -119,6 +132,9 @@ class _Entry:
     retry_at: datetime | None = None
     failures: int = 0
     last_error: str | None = None
+    response_ms: float | None = None
+    validation: str = "unchecked"
+    rejected_produced_at: datetime | None = None
 
 
 class FeedRelay:
@@ -173,7 +189,11 @@ class FeedRelay:
 
     @property
     def requests_last_24h(self) -> int:
-        return len(self._sent)
+        now = self._clock()
+        with self._counter_lock:
+            while self._sent and now - self._sent[0] >= WINDOW:
+                self._sent.popleft()
+            return len(self._sent)
 
     @property
     def allowed_per_day(self) -> int:
@@ -224,11 +244,16 @@ class FeedRelay:
         if refused is not None:
             entry.last_error = refused
             return
+        started = monotonic()
+        entry.validation = "unchecked"
+        entry.rejected_produced_at = None
         try:
-            response = self._http.get(item.url, headers=self._headers)
+            response = self._http.get(item.url, headers=self._headers, follow_redirects=False)
         except httpx2.HTTPError as exc:
             self._backoff(entry, now, f"{item.name}: {type(exc).__name__}")
             return
+        finally:
+            entry.response_ms = round((monotonic() - started) * 1000, 2)
         if response.status_code == 429:
             wait = retry_after(response.headers.get("Retry-After", ""), now)
             self._backoff(entry, now, f"{item.name}: HTTP 429 (quota)", wait)
@@ -242,12 +267,27 @@ class FeedRelay:
         if response.status_code != 200:
             self._backoff(entry, now, f"{item.name}: HTTP {response.status_code}")
             return
+        received_at = self._clock()
         try:
-            result = prepare(response.content, repair=item.needs_repair, now=now)
-        except InvalidFeedError as exc:
+            result = prepare(
+                response.content,
+                repair=item.needs_repair,
+                now=received_at,
+                max_age=_max_age(item.kind),
+            )
+            if entry.summary is not None and result.summary.produced_at < entry.summary.produced_at:
+                raise InvalidFeedError("feed timestamp regressed")
+        except StaleFeedError as exc:
+            entry.validation = "stale"
+            entry.rejected_produced_at = exc.produced_at
             self._backoff(entry, now, f"{item.name}: {exc}")
             return
-        entry.payload, entry.summary, entry.fetched_at = result.payload, result.summary, now
+        except InvalidFeedError as exc:
+            entry.validation = "invalid"
+            self._backoff(entry, now, f"{item.name}: {exc}")
+            return
+        entry.payload, entry.summary, entry.fetched_at = result.payload, result.summary, received_at
+        entry.validation = "valid"
         entry.retry_at, entry.failures, entry.last_error = None, 0, None
         logger.info(
             "fetched %s: %d entities, %d start_time repairs",
@@ -270,7 +310,7 @@ class FeedRelay:
             if entry.payload is None or entry.summary is None:
                 raise RelayUnavailableError(entry.last_error or "feed not fetched yet")
             try:
-                check_fresh(entry.summary, now)
+                check_fresh(entry.summary, self._clock(), _max_age(kind))
             except InvalidFeedError as exc:
                 raise RelayUnavailableError(f"{exc}; last error: {entry.last_error}") from exc
             return entry.payload
@@ -278,19 +318,58 @@ class FeedRelay:
     def status(self) -> dict[str, object]:
         now = self._clock()
         feeds: dict[str, object] = {}
-        for (operator, kind), entry in self._entries.items():
-            age = None if entry.summary is None else (now - entry.summary.produced_at)
-            feeds[f"{operator.value}/{kind.value}"] = {
-                "age_seconds": None if age is None else int(age.total_seconds()),
-                "entities": None if entry.summary is None else entry.summary.entities,
-                "last_error": entry.last_error,
-            }
+        for key, entry in self._entries.items():
+            feeds[self._feeds[key].name] = self._feed_status(
+                entry, now, self._feeds[key], self._plan.interval(key[1])
+            )
         paused = self._paused_until
         return {
             "paused_until": None if paused is None or paused <= now else paused.isoformat(),
             "requests_last_24h": self.requests_last_24h,
             "allowed_per_day": self._budget.allowed_per_day,
+            "static_only_operators": sorted(
+                set(Operator) - {item.operator for item in FEEDS if item.is_realtime}
+            ),
             "feeds": feeds,
+        }
+
+    @staticmethod
+    def _feed_status(
+        entry: _Entry, now: datetime, item: Feed, interval: timedelta
+    ) -> dict[str, object]:
+        summary = entry.summary
+        produced_at = entry.rejected_produced_at if summary is None else summary.produced_at
+        age = None if produced_at is None else now - produced_at
+        state = "unavailable"
+        if summary is None:
+            if entry.validation in ("stale", "invalid"):
+                state = entry.validation
+        else:
+            try:
+                check_fresh(summary, now, _max_age(item.kind))
+            except StaleFeedError:
+                state = "stale"
+            except InvalidFeedError:
+                state = "invalid"
+            else:
+                state = (
+                    "degraded"
+                    if entry.last_error or (age and age > interval + item.publisher_interval)
+                    else "operational"
+                )
+        return {
+            "state": state,
+            "validation": entry.validation,
+            "last_success_at": None if entry.fetched_at is None else entry.fetched_at.isoformat(),
+            "produced_at": None if produced_at is None else produced_at.isoformat(),
+            "age_seconds": None if age is None else int(age.total_seconds()),
+            "entities": None if summary is None else summary.entities,
+            "trip_updates": None if summary is None else summary.trip_updates,
+            "cancelled_trips": None if summary is None else summary.cancelled_trips,
+            "alerts": None if summary is None else summary.alerts,
+            "response_ms": entry.response_ms,
+            "consecutive_errors": entry.failures,
+            "last_error": entry.last_error,
         }
 
 

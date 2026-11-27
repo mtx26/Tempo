@@ -11,6 +11,7 @@ from tempo.transport.itinerary import (
     CachedRouting,
     Objective,
     TripQuery,
+    connection_margins,
     find_trips,
 )
 from tempo.transport.places import Coordinates
@@ -67,6 +68,21 @@ class Timetable:
         if arrive_by:
             return [j for j in self.slots if j.arrival <= time][-3:]
         return [j for j in self.slots if j.departure >= time][:3]
+
+
+def test_connection_margin_excludes_walking_and_reflects_the_delay() -> None:
+    inbound = Leg("RAIL", "A", "B", at(8), at(8, 35), at(8), at(8, 30), realtime=True)
+    transfer = Leg("WALK", "B", "C", at(8, 35), at(8, 39), at(8, 30), at(8, 34), realtime=False)
+    outbound = Leg("BUS", "C", "D", at(8, 40), at(9), at(8, 40), at(9), realtime=False)
+    result = Journey((inbound, transfer, outbound), at(8), at(9), 1, "mock")
+    assert connection_margins(result) == [
+        {
+            "arrival_stop": "B",
+            "departure_stop": "C",
+            "margin_seconds": 60,
+            "scheduled_margin_seconds": 360,
+        }
+    ]
 
 
 def test_latest_departure_for_an_appointment_needs_one_request() -> None:

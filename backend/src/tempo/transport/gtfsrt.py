@@ -18,12 +18,22 @@ from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
 MAX_FEED_AGE = timedelta(minutes=10)
-"""A feed whose header timestamp is older than this is stale: never presented as live."""
+"""Age limit for service alerts and generic validator calls."""
+TRIP_UPDATE_MAX_AGE = timedelta(seconds=90)
+"""GTFS Realtime best practices, for feeds published every 30 seconds."""
 MAX_CLOCK_SKEW = timedelta(minutes=2)
 
 
 class InvalidFeedError(ValueError):
     """Bytes are not a usable GTFS-RT FeedMessage (HTML error page, truncated, stale...)."""
+
+
+class StaleFeedError(InvalidFeedError):
+    """A valid message whose timestamp is too old."""
+
+    def __init__(self, produced_at: datetime, age: timedelta) -> None:
+        super().__init__(f"stale feed: produced {int(age.total_seconds())} s ago")
+        self.produced_at = produced_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +64,10 @@ def decode(raw: bytes) -> gtfs_realtime_pb2.FeedMessage:
         raise InvalidFeedError("missing gtfs_realtime_version")
     if not message.header.timestamp:
         raise InvalidFeedError("missing header timestamp")
+    if not message.IsInitialized():
+        raise InvalidFeedError("missing required protobuf fields")
+    if message.header.incrementality == gtfs_realtime_pb2.FeedHeader.DIFFERENTIAL:
+        raise InvalidFeedError("differential feed cannot replace a complete snapshot")
     return message
 
 
@@ -66,8 +80,12 @@ def summarize(message: gtfs_realtime_pb2.FeedMessage) -> FeedSummary:
             cancelled += entity.trip_update.trip.schedule_relationship == canceled
         if entity.HasField("alert"):
             alerts += 1
+    try:
+        produced_at = datetime.fromtimestamp(message.header.timestamp, UTC)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise InvalidFeedError("invalid header timestamp") from exc
     return FeedSummary(
-        produced_at=datetime.fromtimestamp(message.header.timestamp, UTC),
+        produced_at=produced_at,
         entities=len(message.entity),
         trip_updates=trip_updates,
         cancelled_trips=cancelled,
@@ -75,12 +93,12 @@ def summarize(message: gtfs_realtime_pb2.FeedMessage) -> FeedSummary:
     )
 
 
-def check_fresh(summary: FeedSummary, now: datetime) -> None:
+def check_fresh(summary: FeedSummary, now: datetime, max_age: timedelta = MAX_FEED_AGE) -> None:
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     age = now.astimezone(UTC) - summary.produced_at
-    if age > MAX_FEED_AGE:
-        raise InvalidFeedError(f"stale feed: produced {int(age.total_seconds())} s ago")
+    if age > max_age:
+        raise StaleFeedError(summary.produced_at, age)
     if age < -MAX_CLOCK_SKEW:
         raise InvalidFeedError("feed timestamp is in the future")
 
@@ -123,11 +141,13 @@ def drop_start_times(message: gtfs_realtime_pb2.FeedMessage) -> int:
     return removed
 
 
-def prepare(raw: bytes, *, repair: bool, now: datetime) -> RepairResult:
+def prepare(
+    raw: bytes, *, repair: bool, now: datetime, max_age: timedelta = MAX_FEED_AGE
+) -> RepairResult:
     """Validate a downloaded feed (decodable, fresh) and repair it when required."""
     message = decode(raw)
     summary = summarize(message)
-    check_fresh(summary, now)
+    check_fresh(summary, now, max_age)
     if not repair:
         return RepairResult(raw, summary, 0)
     removed = drop_start_times(message)

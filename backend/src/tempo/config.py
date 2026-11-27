@@ -6,7 +6,7 @@ Secrets are typed ``SecretStr`` so they never appear in ``repr`` or logs.
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tempo.const import DOCKER_SECRETS_DIR
@@ -57,6 +57,8 @@ class Settings(LlmSettings):
 
     motis_url: str | None = None
     """MOTIS base URL: lets the assistant search journeys and re-plan synchronously."""
+    rt_relay_url: AnyHttpUrl | None = None
+    """Internal GTFS-RT relay base URL, used only by the authenticated diagnostics."""
 
     timezone: str = "Europe/Brussels"
     """IANA timezone used to interpret local wall-clock planning rules."""
