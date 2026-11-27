@@ -11,12 +11,12 @@ accepts the plan. Deterministic inputs (no randomness).
 import json
 import sys
 import time as clock
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from tempo.domain.models import TargetKind
-from tempo.scheduler.model import PlanningProblem, StudyDemand
+from tempo.scheduler.model import FlexibleActivity, PlanningProblem, StudyDemand
 from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import validate_plan
 from tempo.timeutil import Interval
@@ -103,8 +103,63 @@ def run(limit: float) -> list[dict[str, object]]:
     return rows
 
 
+def compare_hints(limit: float) -> list[dict[str, object]]:
+    base = problem(CASES[0])
+    prior = solve(base, time_limit_seconds=max(5, limit), workers=1)
+    if not prior.blocks:
+        raise RuntimeError("benchmark needs a previously published plan")
+    first = prior.blocks[0]
+    unavailable = [*base.busy, first.interval]
+    disjoint = [
+        part
+        for span in base.availability
+        for part in (
+            Interval(span.start, span.start + timedelta(hours=3)),
+            Interval(span.end - timedelta(hours=4), span.end),
+        )
+    ]
+    flexible = FlexibleActivity(
+        activity_id="training",
+        title="Training",
+        duration=timedelta(minutes=60),
+        earliest_start=base.availability[1].start,
+        latest_end=base.availability[1].end,
+        previous_start=base.availability[1].start + timedelta(hours=3),
+    )
+    previous = replace(base, previous_blocks=prior.blocks)
+    cases = {
+        "ancien planning": previous,
+        "nouvelle indisponibilite": replace(previous, busy=unavailable),
+        "fenetres disjointes": replace(previous, busy=unavailable, availability=disjoint),
+        "activite flexible": replace(previous, busy=unavailable, activities=[flexible]),
+    }
+    rows = []
+    for name, case in cases.items():
+        for hints in (True, False):
+            for _ in range(3):
+                began = clock.perf_counter()
+                result = solve(case, time_limit_seconds=limit, warm_start=hints)
+                rows.append(
+                    {
+                        "case": name,
+                        "hints": hints,
+                        "seconds": round(clock.perf_counter() - began, 3),
+                        "solver": result.solver_status,
+                        "objective": result.objective,
+                        "valid": validate_plan(case, result) == [],
+                        "unplanned": sum(result.unplanned_minutes.values()),
+                        "kept": len(
+                            {(b.task_id, b.start, b.end) for b in prior.blocks}
+                            & {(b.task_id, b.start, b.end) for b in result.blocks}
+                        ),
+                    }
+                )
+    return rows
+
+
 if __name__ == "__main__":
-    results = run(float(next((a for a in sys.argv[1:] if a.replace(".", "").isdigit()), "10")))
+    limit = float(next((a for a in sys.argv[1:] if a.replace(".", "").isdigit()), "10"))
+    results = compare_hints(limit) if "--compare-hints" in sys.argv else run(limit)
     if "--json" in sys.argv:
         print(json.dumps(results, indent=2))
     else:

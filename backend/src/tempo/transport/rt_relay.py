@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import threading
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -34,6 +34,7 @@ from time import monotonic
 
 import httpx2
 from fastapi import FastAPI, HTTPException, Response
+from google.transit.gtfs_realtime_pb2 import FeedMessage
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -58,6 +59,7 @@ from tempo.transport.gtfsrt import (
     InvalidFeedError,
     StaleFeedError,
     check_fresh,
+    entity_freshness,
     prepare,
 )
 
@@ -126,7 +128,7 @@ class RelayUnavailableError(RuntimeError):
 
 @dataclass(slots=True)
 class _Entry:
-    payload: bytes | None = None
+    message: FeedMessage | None = None
     summary: FeedSummary | None = None
     fetched_at: datetime | None = None
     retry_at: datetime | None = None
@@ -286,7 +288,7 @@ class FeedRelay:
             entry.validation = "invalid"
             self._backoff(entry, now, f"{item.name}: {exc}")
             return
-        entry.payload, entry.summary, entry.fetched_at = result.payload, result.summary, received_at
+        entry.message, entry.summary, entry.fetched_at = result.message, result.summary, received_at
         entry.validation = "valid"
         entry.retry_at, entry.failures, entry.last_error = None, 0, None
         logger.info(
@@ -307,13 +309,22 @@ class FeedRelay:
             waiting = entry.retry_at is not None and now < entry.retry_at
             if due and not waiting:
                 self._fetch(item, entry, now)
-            if entry.payload is None or entry.summary is None:
+            if entry.message is None or entry.summary is None:
                 raise RelayUnavailableError(entry.last_error or "feed not fetched yet")
+            served_at = self._clock()
             try:
-                check_fresh(entry.summary, self._clock(), _max_age(kind))
+                check_fresh(entry.summary, served_at, _max_age(kind))
             except InvalidFeedError as exc:
                 raise RelayUnavailableError(f"{exc}; last error: {entry.last_error}") from exc
-            return entry.payload
+            if kind is not FeedKind.TRIP_UPDATES:
+                return entry.message.SerializeToString()
+            outgoing = FeedMessage(header=entry.message.header)
+            outgoing.entity.extend(
+                entity
+                for entity in entry.message.entity
+                if entity_freshness(entity, served_at, _max_age(kind)) == "fresh"
+            )
+            return outgoing.SerializeToString()
 
     def status(self) -> dict[str, object]:
         now = self._clock()
@@ -338,6 +349,10 @@ class FeedRelay:
         entry: _Entry, now: datetime, item: Feed, interval: timedelta
     ) -> dict[str, object]:
         summary = entry.summary
+        entities = Counter(
+            entity_freshness(entity, now, _max_age(item.kind))
+            for entity in (() if entry.message is None else entry.message.entity)
+        )
         produced_at = entry.rejected_produced_at if summary is None else summary.produced_at
         age = None if produced_at is None else now - produced_at
         state = "unavailable"
@@ -357,6 +372,11 @@ class FeedRelay:
                     if entry.last_error or (age and age > interval + item.publisher_interval)
                     else "operational"
                 )
+                if item.kind is FeedKind.TRIP_UPDATES and entities:
+                    if not entities["fresh"] and entities["stale"]:
+                        state = "stale"
+                    elif entities["fresh"] < sum(entities.values()):
+                        state = "degraded"
         return {
             "state": state,
             "validation": entry.validation,
@@ -370,6 +390,9 @@ class FeedRelay:
             "response_ms": entry.response_ms,
             "consecutive_errors": entry.failures,
             "last_error": entry.last_error,
+            "entity_freshness": {
+                name: entities[name] for name in ("fresh", "stale", "missing_timestamp", "future")
+            },
         }
 
 

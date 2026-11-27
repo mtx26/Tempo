@@ -218,18 +218,28 @@ Contrat (implémenté) :
   Les retries simultanés avec la même clé sont sérialisés, la réponse est rejouée pendant
   2 jours et une nouvelle charge utile avec cette clé reçoit `409`. Le journal de travail a
   aussi sa propre clé de déduplication.
-- `preview_plan_changes` exécute jusqu'à cinq opérations du catalogue sur les événements,
-  tâches, présences ou disponibilités dans une transaction annulée après le calcul. Il renvoie
-  les résultats simulés, le même diff que `plan_now` et les approbations éventuelles. Le prompt
-  demande une prévisualisation et un accord pour une annulation, une demande composée ou un
-  changement durable de disponibilité. Les règles de protection restent dans le domaine.
+- `preview_plan_changes` exécute jusqu'à cinq opérations de sa liste blanche dans un point
+  de sauvegarde annulé après le calcul. Il renvoie les résultats simulés, le diff de
+  `plan_now` et les approbations éventuelles. Les opérations autorisées utilisent des
+  écritures PostgreSQL transactionnelles et le routage en lecture. Notifications, versions,
+  propositions du solveur et demandes de recalcul simulées sont annulées.
+- La conversation enregistre une proposition `plan_changes` pour les modifications sensibles
+  ou composées. Elle contient les opérations et arguments, le diff, l'identité fournie par
+  le client authentifié et l'expiration de 15 min. Home Assistant transmet son identifiant
+  utilisateur quand il est disponible. Les clients sans identifiant partagent le profil
+  Tempo unique. Le jeton d'API identifie un client de confiance.
+- La commande « confirme CODE » ou « refuse CODE » correspond au code de la proposition.
+  Le backend l'interprète directement, y compris pendant une panne Gemini. Il relit la
+  proposition sous le verrou du planificateur, vérifie l'identité, l'expiration, la version
+  active et la révision de recalcul, puis exécute les arguments mémorisés en bloc. En cas
+  d'échec, la décision et les écritures du lot sont annulées ensemble.
 - Contexte LLM : prompt système stable, 12 derniers tours de toutes les conversations Assist
   (24 h ; un seul utilisateur), la question ouverte la plus urgente, date et
   fuseau Europe/Brussels dans le message ; données métier lues à la demande. Aucun accès SQL,
   shell, Docker ou secret.
-- Si Gemini est indisponible ou refuse le tour, le backend annule toutes les écritures de ce
-  tour et renvoie `used_llm: false`, `error: llm_unavailable`. Une erreur métier ordinaire annule
-  l'opération concernée. La planification et le worker fonctionnent indépendamment de Gemini.
+- Une panne ou un refus Gemini annule le tour et retourne `llm_unavailable`. Une sortie
+  tronquée, une limite d'appels atteinte ou un échec après le début d'un lot annule aussi
+  le tour. La planification et le worker fonctionnent indépendamment de Gemini.
 - Durée : l'assistant ne lance plus d'appel au modèle après 60 s (chaque appel borné par le
   temps restant) ; Home Assistant attend jusqu'à 150 s, de sorte que l'utilisateur entend le
   résultat réel plutôt qu'une expiration côté client pendant qu'un changement s'applique.
@@ -633,8 +643,13 @@ Faits vérifiés par requêtes réelles (23 et 25/11/2026) :
 - Les étapes transmettent les heures et quais prévus, les quais indiqués par MOTIS, les arrêts
   intermédiaires signalés supprimés et l'origine de chaque horaire quand MOTIS la publie.
   Les correspondances exposent le temps restant après les étapes de transfert. Le planning
-  indique aussi le temps jusqu'au début de l'engagement. `get_schedule` présente les prévisions
-  comme des relevés du calcul et indique leur péremption après 90 s, comme le calendrier.
+  indique aussi le temps jusqu'au début de l'engagement. iCal et Home Assistant utilisent le
+  même rendu, y compris pour un itinéraire de secours, des arrêts supprimés et des marges
+  de correspondance. Une marge calculée ne garantit pas la correspondance.
+  MOTIS v2.11.4 expose la provenance de la prévision mais ne transmet pas le timestamp
+  de l'entité GTFS-RT. Tempo qualifie donc la fraîcheur individuelle de ces prévisions
+  d'inconnue dès le calcul et de périmée après 90 s au plus. Ce traitement couvre également
+  les prévisions dans les anciennes versions.
 - Interrogation : TripUpdates toutes les minutes (l'éditeur publie toutes les 30 s), alertes
   toutes les 5 min, pour les six flux : 5 184 requêtes/jour, soit 43 % du quota (54 % du
   plafond de 80 % que le relais s'impose) ; s'y ajoutent au plus 4 téléchargements statiques
@@ -648,8 +663,10 @@ Faits vérifiés par requêtes réelles (23 et 25/11/2026) :
   quota, recul exponentiel. Un 429 suspend **tous** les flux (le quota est par compte) jusqu'à
   `Retry-After` (secondes ou date HTTP, jamais raccourci, au moins 5 min) ; un 401/403 est
   journalisé comme clé refusée. Le relais sert les copies pendant 90 s pour les TripUpdates et
-  10 min pour les alertes. À expiration il répond 503, puis MOTIS revient au statique à sa
-  prochaine interrogation. Le relais rejette les instantanés incomplets ou différentiels, les
+  10 min pour les alertes. Il vérifie aussi chaque timestamp de TripUpdate au moment du
+  service et filtre les entités anciennes, futures ou non datées. Les alertes sans timestamp
+  restent consultatives. À expiration de l'en-tête, le relais répond 503, puis MOTIS revient
+  au statique à sa prochaine interrogation. Le relais rejette les instantanés incomplets ou différentiels, les
   timestamps incohérents et les retours en arrière. Il retire `start_time` des TEC (décalage
   de 12 h en amont, résolution 50 % → 100 %). [Recommandations GTFS Realtime](https://gtfs.org/documentation/realtime/realtime-best-practices/).
 - Alertes : consultatives, jamais d'exclusion de trajet ; signalées seulement si leur période
@@ -659,11 +676,14 @@ Faits vérifiés par requêtes réelles (23 et 25/11/2026) :
   annulations et retards viennent des TripUpdates. Un retard réel de +7 min a été observé.
 - MOTIS national : import 3 min 29 s, 1,8 Go, serveur 0,7–0,9 Go, requête médiane 100–130 ms.
 
-Le pipeline local garde le même téléchargement conditionnel, les identifiants publiés par les
-opérateurs et le basculement supervisé de MOTIS. Les archives sous contrôle comportent des
-fichiers essentiels alimentés, des chemins sûrs, une taille décompressée plafonnée et une
-date de fin de service à au moins sept jours. Un échec de validation est signalé même quand les autres
-sources ont été mises à jour. La validation complète du réseau reste celle de l'import MOTIS.
+Le pipeline conserve le téléchargement conditionnel et les identifiants des opérateurs.
+Il vérifie les colonnes des archives et les références `trip_id`, `stop_id` et
+`service_id`, en plus de l'intégrité, de la taille et de la couverture des dates.
+Il publie par remplacement de `READY` un lot versionné contenant toutes les sources
+requises. Un échec laisse le lot précédent en service. Le superviseur importe le lot exact,
+démarre le candidat sur la boucle locale et vérifie santé, itinéraire de référence, arrêts
+des opérateurs et routage piéton. Il essaie ensuite le port de service et restaure le
+lien précédent en cas d'échec.
 Le catalogue belge de Transitous emploie des variantes de sources et, pour la SNCB, un script de
 transformation. Son pipeline `gtfsclean` sait réparer et minimiser des flux. Sa compatibilité
 avec les identifiants des quatre flux de Tempo demande une recette sur les archives réelles.
@@ -829,8 +849,10 @@ d'éléments déplacés, amplitude du décalage, temps restant) ; le jour même,
 Mode `global` uniquement sur demande explicite (stabilité ignorée, verrouillé et en cours
 protégés). Les blocs d'étude précédents encore admissibles alimentent les indications de
 démarrage de CP-SAT avec les créneaux gloutons. Chaque bloc ne peut tenir lieu que d'un seul
-bloc antérieur dans le coût de stabilité. Le diff distingue ajouts, retraits, mouvements et
-changements de durée des blocs, ainsi que l'évolution des trajets et échéances.
+bloc antérieur dans le coût de stabilité. Le diff compare les activités par identifiant
+persisté, y compris les annulations, et les trajets par champs métier. Les séances d'étude
+ambiguës restent des ajouts et retraits distincts. Les déplacements et changements de durée
+sont comptés séparément.
 
 **Opérations automatiques** : synchronisation iCal (immédiate), réoptimisation à partir du
 lendemain, nouvelles placements dans le temps libre du jour, rafraîchissement des trajets non
@@ -881,9 +903,12 @@ Exemple vérifié par test : « 50 h de chimie avant demain, stricte » ⇒ stat
 minutes non planifiées par tâche, échéance stricte signalée comme manquée, jamais comme
 réussie. `explain_plan` donne pour chaque échéance stricte manquée la cause chiffrée
 (`deadline_capacity` : minutes nécessaires et minutes d'étude libres avant l'échéance, après
-engagements, trajets et entraînements). Il distingue les minutes déjà réservées pour cette
-tâche de la borne minimale de manque dans l'horizon courant, calculée sans compter les
-activités flexibles. Les noyaux CP-SAT nécessiteraient de rendre obligatoires des contraintes
+engagements, trajets et entraînements). Le calcul de capacité représente l'union des fenêtres
+libres et s'arrête aux limites de la tâche et de l'horizon. L'effort distingue les minutes
+réservées, avant et après l'échéance, les minutes restant à faire ou à placer et le travail
+enregistré. Un bloc verrouillé tardif reste réservé et laisse l'échéance non couverte.
+La capacité optimiste ignore les activités flexibles. Elle donne un manque minimal chiffré
+dans l'horizon courant. Les noyaux CP-SAT nécessiteraient de rendre obligatoires des contraintes
 que le modèle optimise aujourd'hui avec le reliquat. Le diagnostic garde la distinction entre
 capacité prouvée et résultat partiel, avec un seul modèle. [Assumptions CP-SAT](https://github.com/google/or-tools/blob/v9.15/ortools/sat/docs/troubleshooting.md).
 `propose_alternatives` simule ensuite, sans rien publier ni modifier, des alternatives
@@ -991,10 +1016,11 @@ flowchart TD
   remise, sans en fabriquer d'autres ; informatives uniquement (aucune action).
 - Aucun job ne dépend du LLM ; l'import d'e-mails par LLM (texte libre) passe par une
   proposition à approuver.
-- Le worker décide la replanification sous le verrou transactionnel partagé avec l'API et
-  enregistre la tentative dans une courte transaction séparée. Une interruption conserve la
-  demande et le délai de retry. Les cycles qui n'exécutent aucun calcul ne remplacent pas le
-  dernier résultat dans `job_run`. Procrastinate fournit file persistante, exécutions
+- Le worker et les écrivains des entrées du planning prennent le verrou consultatif avant
+  les verrous de lignes. Le worker enregistre la tentative et la révision dans une courte
+  transaction. La publication du plan, l'acquittement et l'historique de succès partagent
+  ensuite une transaction. Une interruption conserve la demande. Le délai de retry s'applique
+  à la même révision. Les cycles sans calcul préservent `job_run`. Procrastinate fournit file persistante, exécutions
   périodiques, verrous, retries et récupération des jobs interrompus via une tâche de reprise.
   Les jobs Tempo recalculent principalement depuis l'état métier PostgreSQL. Une migration
   ajouterait un schéma de file et sa supervision pour cette charge. [Procrastinate](https://procrastinate.readthedocs.io/en/stable/).
@@ -1047,7 +1073,8 @@ flowchart TD
   proportionnelle), séries matérialisées sur 60 jours, solveur limité à 10 s.
 - Observabilité : `/health` reste le contrôle de vie pour Docker et Uptime Kuma.
   `/v1/diagnostics` authentifié combine les statistiques PostgreSQL, l'historique `job_run`,
-  l'état de MOTIS et `/health` du relais. Les journaux donnent les durées et les statuts de
+  le dernier succès des jobs, le dernier signal du worker et les états de MOTIS et du relais.
+  La projection autorise des champs et types précis, avec un code d'erreur public. Les journaux donnent les durées et les statuts de
   l'API et de MOTIS sans les paramètres des requêtes. Gemini journalise la durée de ses appels
   réussis et l'API signale ses pannes. Docker et Glances restent les sources pour les ressources
   de l'hôte. Une collecte OpenTelemetry exigerait une destination de télémétrie adaptée.
@@ -1153,13 +1180,54 @@ Bruxelles dans un graphe isolé. Les recherches ont renvoyé une adresse pour la
 plusieurs sites universitaires et plusieurs lieux nommés Bruxelles-Midi. Les anciens graphes
 de routage utilisés pour les tests avaient été importés avec le géocodage désactivé.
 
-Restent à vérifier sur les services sources et le déploiement cible : fraîcheur au niveau de
-chaque prévision individuelle, rapprochement d'identifiants après nettoyage GTFS, positions
-de véhicules, et suivi des alertes pendant un incident opérateur réel. La couverture des
-nouveaux comportements conversationnels repose sur les simulations Gemini et PostgreSQL.
-Les chiffres d'usage MOTIS et PostgreSQL de production nécessitent les journaux et statistiques
-du serveur. Le cache MOTIS reste limité à un calcul de planning, où les requêtes identiques
-partagent le même résultat.
+### Corrections de l'audit du 27/11/2026
+
+Recette locale : 637 tests backend réussis, trois ignorés faute de clé Belgian Mobility
+et 94 % de couverture. PostgreSQL 16, les graphes MOTIS Bruxelles et national, GreenMail
+et le contrat du client Home Assistant ont servi aux tests. Ruff, mypy strict, la montée
+et la descente Alembic, la construction de l'image routage, Compose et Swarm sont validés.
+
+Le backend vérifie l'accord et l'atomicité des lots sur PostgreSQL. Les scénarios couvrent
+la concurrence, l'expiration, une révision nouvelle, la coupure avant commit et un refus en
+cours de lot. Les tests du worker tuent un processus pendant le calcul et entre la préparation
+de la version et l'écriture de l'historique. Le test de redémarrage vérifie la reprise avec
+le pool de connexions du worker. Les tests Home Assistant sous WSL couvrent le retry du
+client et le rendu du calendrier avec une prévision périmée. La suite Home Assistant compte
+70 tests réussis.
+
+Le [test du superviseur](routing/tests/supervisor.sh) utilise le binaire MOTIS v2.11.4 et
+un graphe Bruxelles de référence. Il rejette un candidat dont le fichier `tt.bin` est
+illisible, vérifie le maintien du graphe actif, puis vérifie l'activation d'un candidat
+valide. Un second essai local a exécuté l'ensemble du chemin, du lot GTFS synthétique et de
+l'extrait OSM de Bruxelles jusqu'à l'import, au trajet de référence et au port de service.
+
+Le benchmark `--compare-hints` utilise trois répétitions par variante, avec un budget de 2 s
+par calcul CP-SAT. Les 24 résultats ont placé tout le travail et ont passé le validateur.
+L'objectif est minimisé. Les indications sont conservées avec la stabilité un-à-un.
+
+| Scénario | Objectif médian avec indications | Sans indications |
+|---|---:|---:|
+| Ancien planning | 5 626 | 6 293 |
+| Nouvelle indisponibilité | 7 540 | 7 720 |
+| Fenêtres disjointes | 16 043 | 19 057 |
+| Activité flexible | 12 760 | 8 620 |
+
+Le validateur MobilityData est un outil de recette local Apache 2.0, disponible en CLI Java
+ou en conteneur. Il couvre davantage de règles de conformité que le contrôle en ligne du
+pipeline. Le pipeline conserve le contrôle ciblé et la vérification réelle du graphe. Le
+validateur complet peut être exécuté sur une archive autorisée avec la CLI du projet.
+[Documentation MobilityData](https://github.com/MobilityData/gtfs-validator#using-the-command-line).
+
+La qualification individuelle est testée avec des instantanés GTFS-RT capturés et des
+horodatages contrôlés. La capture De Lijn comprend cinq prévisions datées de 24 à 237 s
+par rapport à l'en-tête. Les huit entités de la capture TEC ont un timestamp absent ou
+nul. Le filtre à 90 s distingue ces cas, qui requièrent une nouvelle mesure en recette.
+MOTIS v2.11.4 ne donne pas l'horodatage de la prévision par étape.
+Les sorties Tempo conservent la provenance et indiquent une fraîcheur individuelle inconnue
+jusqu'à la péremption de l'instantané. Restent à vérifier avec les services sources, les
+horodatages actuellement publiés par opérateur, les trois tests Belgian Mobility et le
+nouveau dialogue de confirmation avec le vrai Gemini. Les chiffres d'usage de production
+dépendent des journaux du serveur cible.
 
 Bloquants nécessitant l'utilisateur : quota Vertex AI suffisant pour la conversation, installation de
 l'intégration dans le vrai Home Assistant (le `device_tracker` s'y choisit), adresse de

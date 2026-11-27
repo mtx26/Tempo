@@ -21,6 +21,7 @@ from tempo.api.auth import FailureLimiter, token_matches
 from tempo.api.location import SessionDep
 from tempo.const import CALENDAR_FUTURE, CALENDAR_PAST
 from tempo.planning.views import schedule_items
+from tempo.transport.itinerary import describe_travel
 
 REFRESH = "PT15M"
 
@@ -97,14 +98,7 @@ def to_ical(items: list[dict[str, Any]], now: datetime, tz: ZoneInfo) -> bytes:
 
 def _description(item: dict[str, Any], tz: ZoneInfo) -> str:
     if item["type"] == "travel":
-        if item.get("status") == "impossible":
-            return "Aucun trajet possible à temps."
-        if item.get("status") != "routed":
-            return "Trajet non calculé."
-        lines = [_leg_line(leg, tz) for leg in item.get("legs") or []]
-        if item.get("stale_snapshot"):
-            lines.insert(0, "Horaires et quais à vérifier (prévisions du planning périmées).")
-        return "\n".join(lines)
+        return describe_travel(item, tz)
     notes: str = item.get("notes") or ""
     return notes
 
@@ -114,7 +108,7 @@ NOT_RIDDEN = frozenset({"WALK", "ACCESS"})
 
 def _title(item: dict[str, Any]) -> str:
     """A routed journey is titled by the lines to take only (e.g. ``E110 → 18``)."""
-    if item["type"] != "travel" or item.get("status") != "routed":
+    if item["type"] != "travel" or not item.get("legs") or item.get("status") == "impossible":
         return str(item["title"])
     lines = [
         str(leg.get("line") or leg["mode"])
@@ -122,27 +116,3 @@ def _title(item: dict[str, Any]) -> str:
         if leg["mode"] not in NOT_RIDDEN
     ]
     return " → ".join(lines) if lines else "À pied"
-
-
-def _leg_line(leg: dict[str, Any], tz: ZoneInfo) -> str:
-    """One journey leg, local times: the line to take, or the walk / drop-off."""
-    start, end = datetime.fromisoformat(leg["start"]), datetime.fromisoformat(leg["end"])
-    minutes = round((end - start).total_seconds() / 60)
-    if leg["mode"] == "WALK":
-        return f"À pied {minutes} min"
-    if leg["mode"] == "ACCESS":
-        return f"Dépôt {minutes} min"
-    departure = leg["from"]
-    arrival = leg["to"]
-    if track := leg.get("departure_track"):
-        departure = f"{departure} (quai {track})"
-    elif track := leg.get("scheduled_departure_track"):
-        departure = f"{departure} (quai prévu {track})"
-    if track := leg.get("arrival_track"):
-        arrival = f"{arrival} (quai {track})"
-    elif track := leg.get("scheduled_arrival_track"):
-        arrival = f"{arrival} (quai prévu {track})"
-    return (
-        f"{leg.get('line') or leg['mode']} {start.astimezone(tz):%H:%M} {departure} → "
-        f"{end.astimezone(tz):%H:%M} {arrival}"
-    )

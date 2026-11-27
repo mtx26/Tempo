@@ -7,7 +7,9 @@ the model answers, and falls back to the deterministic parser when the LLM is un
 import logging
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,9 +21,10 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from tempo.api import assistant as conversation_routes
 from tempo.api.app import create_app
 from tempo.assistant.agent import SYSTEM, GeminiChat, LLMUnavailableError, ToolLoopAssistant
-from tempo.assistant.catalog import OpContext
+from tempo.assistant.catalog import CATALOG, NoInput, OpContext, Operation, OpError, run_operation
 from tempo.config import Settings
 from tempo.db.models import (
     ActivityRow,
@@ -29,8 +32,11 @@ from tempo.db.models import (
     ConversationTurnRow,
     FixedEventRow,
     NotificationRow,
+    ProposalRow,
+    SettingRow,
     StudyTaskRow,
 )
+from tempo.db.store import replan_request
 from tests.integration.test_planning_service import NOW, TZ, seed
 from tests.test_engine import FakeRouting
 
@@ -92,7 +98,7 @@ def outage() -> httpx.ConnectError:
     return httpx.ConnectError("Vertex AI unreachable")
 
 
-def test_compound_request_runs_operations_and_reports_real_results(session: Session) -> None:
+def test_compound_request_previews_real_results_before_applying(session: Session) -> None:
     seed(session)
     llm = ScriptedModels(
         response(say("Je regarde."), tool_use("get_context", {})),
@@ -120,9 +126,11 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
         response(tool_use("plan_now", {})),
         response(say("C'est noté : 15 h de physique et le dentiste jeudi.")),
     )
-    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
+    ctx = OpContext(
+        session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting(), user_id="student"
+    )
     reply = assistant(llm).reply(ctx, "15 h de physique avant vendredi et dentiste jeudi 21h", [])
-    assert reply.text.startswith("C'est noté")
+    assert reply.text.startswith("Aperçu à confirmer")
     assert [o["name"] for o in reply.operations] == [
         "get_context",
         "create_task",
@@ -135,6 +143,14 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
     assert len(results) == 2 and all(r["ok"] for r in results)
     plan = tool_results(llm.requests[3])[0]
     assert plan["result"]["published"] is True
+    assert session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Physique")) is None
+    assert replan_request(session) is None
+    assert reply.proposal_id is not None
+    assert ctx.changed == []
+    decision = run_operation(
+        ctx, "decide_proposal", {"proposal_id": reply.proposal_id, "approve": True}
+    )
+    assert decision["result"]["proposal"]["status"] == "approved"
     assert session.scalars(select(StudyTaskRow).where(StudyTaskRow.subject == "Physique")).one()
     # the request carries the stable cached system prompt, tools and today's date
     first = llm.requests[0]
@@ -147,7 +163,7 @@ def test_compound_request_runs_operations_and_reports_real_results(session: Sess
         assert later["config"].system_instruction == first["config"].system_instruction
         assert later["config"].tools == first["config"].tools
     assert "2026" in first["contents"][-1].parts[0].text
-    assert ctx.changed == ["create_task", "create_event", "plan_now"]
+    assert ctx.changed == ["create_task", "create_event", "decide_proposal"]
 
 
 def test_failed_operation_is_reported_to_the_model_and_rolled_back(
@@ -346,7 +362,7 @@ def test_conversation_replays_only_the_same_idempotent_request(
     assert len(scripted.requests) == 1
 
 
-def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
+def test_time_budget_rolls_back_the_whole_turn(session: Session) -> None:
     seed(session)
     ticks = iter([0.0, 0.0, 58.0, 58.0])
     llm = ScriptedModels(
@@ -358,9 +374,222 @@ def test_time_budget_ends_with_the_real_outcome(session: Session) -> None:
     ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
     agent = assistant(llm, budget_seconds=60, clock=lambda: next(ticks))
     reply = agent.reply(ctx, "ajoute bio", [])
-    assert "manque de temps" in reply.text and "create_task" in reply.text
+    assert "manque de temps" in reply.text and "Aucune modification" in reply.text
+    assert ctx.changed == [] and replan_request(session) is None
+    assert session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Bio")) is None
     assert len(llm.requests) == 1
     assert llm.requests[0]["config"].http_options.timeout == 60_000
+
+
+@pytest.mark.parametrize("failure", ["invalid", "truncated", "limit"])
+def test_interrupted_compound_turn_never_commits_a_prefix(session: Session, failure: str) -> None:
+    seed(session)
+    first = response(
+        tool_use("create_task", {"title": "Lot A", "estimated_minutes": 45, "splittable": True})
+    )
+    following = {
+        "invalid": [response(tool_use("update_task", {"task_id": "faux"}))],
+        "truncated": [response(tool_use("create_task", {"title": "Lot B"}), finish="MAX_TOKENS")],
+        "limit": [response(tool_use("get_summary", {}))] * 15,
+    }
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant")
+    result = assistant(ScriptedModels(first, *following[failure])).reply(ctx, "modifie le lot", [])
+    assert "Aucune modification" in result.text
+    assert session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Lot A")) is None
+    assert ctx.changed == [] and replan_request(session) is None
+
+
+@pytest.mark.parametrize("decision", ["approved", "rejected", "expired", "stale"])
+def test_proposal_api_binds_user_revision_arguments_and_expiry(
+    sessions: sessionmaker[Session], database_url: str, decision: str
+) -> None:
+    with sessions.begin() as session:
+        seed(session)
+    changes = {
+        "changes": [
+            {
+                "name": "create_task",
+                "arguments": {"title": "Lot approuvé", "estimated_minutes": 60, "splittable": True},
+            },
+        ]
+    }
+    script = ScriptedModels(response(tool_use("preview_plan_changes", changes)))
+    app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    app.state.assistant = assistant(script)
+    app.state.routing = FakeRouting()
+    app.state.clock = lambda: NOW
+    approval_key = {**AUTH, "Idempotency-Key": "same-approval"}
+    with TestClient(app) as api:
+        preview = api.post(
+            "/v1/conversation", headers=AUTH, json={"text": "simule", "user_id": "a"}
+        )
+        assert preview.status_code == 200 and not preview.json()["changed"]
+        proposal_id = preview.json()["proposal_id"]
+        assert proposal_id[:8] in preview.json()["reply"]
+        with sessions() as session:
+            row = session.get(ProposalRow, uuid.UUID(proposal_id))
+            assert row is not None and row.details["plan_changes"] == changes["changes"]
+            assert (
+                session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Lot approuvé"))
+                is None
+            )
+            assert replan_request(session) is None
+        app.state.assistant = None
+        response_other = api.post(
+            "/v1/conversation",
+            headers=AUTH,
+            json={"text": f"confirme {proposal_id[:8]}", "user_id": "b"},
+        )
+        assert not response_other.json()["changed"]
+        if decision == "expired":
+            app.state.clock = lambda: NOW + timedelta(minutes=16)
+        if decision == "stale":
+            assert (
+                api.post(
+                    "/v1/operations/create_task",
+                    headers=AUTH,
+                    json={"title": "Autre tâche", "estimated_minutes": 60, "splittable": True},
+                ).status_code
+                == 200
+            )
+        command = "refuse" if decision == "rejected" else "confirme"
+        payload = {"text": f"{command} {proposal_id[:8]}", "user_id": "a"}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            calls = [
+                pool.submit(api.post, "/v1/conversation", headers=approval_key, json=payload)
+                for _ in range(2)
+            ]
+            first, retry = [call.result(timeout=20) for call in calls]
+        assert first.json() == retry.json()
+        assert first.json()["used_llm"] is False
+        assert first.json()["changed"] == (decision in {"approved", "rejected"})
+    with sessions() as session:
+        tasks = list(
+            session.scalars(select(StudyTaskRow).where(StudyTaskRow.subject == "Lot approuvé"))
+        )
+        assert len(tasks) == int(decision == "approved")
+        row = session.get(ProposalRow, uuid.UUID(proposal_id))
+        assert row is not None
+        assert row.status == ("obsolete" if decision in {"expired", "stale"} else decision)
+    assert len(script.requests) == 1
+
+
+def test_simulator_cannot_call_a_new_external_mutation(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes: list[str] = []
+
+    def external_write(ctx: OpContext, arguments: NoInput) -> dict[str, Any]:
+        writes.append("sent")
+        return {}
+
+    op = Operation("external_write", "External", NoInput, external_write, True)
+    monkeypatch.setitem(CATALOG, op.name, op)
+    ctx = OpContext(session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting())
+    outcome = run_operation(
+        ctx, "preview_plan_changes", {"changes": [{"name": op.name, "arguments": {}}]}
+    )
+    assert not outcome["ok"] and "arguments invalides" in outcome["error"]
+    assert writes == []
+
+
+def test_approval_rolls_back_the_prefix_on_a_business_failure(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(session)
+    changes = [
+        {
+            "name": "create_task",
+            "arguments": {"title": "Préfixe", "estimated_minutes": 60, "splittable": True},
+        },
+        {
+            "name": "create_event",
+            "arguments": {
+                "title": "Dernière étape",
+                "scheduling": "fixed",
+                "start": "2026-12-11T21:00",
+                "duration_minutes": 30,
+                "remote": True,
+            },
+        },
+    ]
+    ctx = OpContext(
+        session=session, now=NOW, tz=TZ, actor="assistant", routing=FakeRouting(), user_id="a"
+    )
+    agent = assistant(
+        ScriptedModels(response(tool_use("preview_plan_changes", {"changes": changes})))
+    )
+    proposal = agent.reply(ctx, "Prépare le lot", []).proposal_id
+    assert proposal is not None
+
+    def invalid(ctx: OpContext, body: Any) -> dict[str, Any]:
+        raise OpError("La deuxième étape n'est plus faisable")
+
+    monkeypatch.setitem(CATALOG, "create_event", replace(CATALOG["create_event"], handler=invalid))
+    outcome = run_operation(ctx, "decide_proposal", {"proposal_id": proposal, "approve": True})
+    assert not outcome["ok"] and "étape 2" in outcome["error"]
+    assert session.scalar(select(StudyTaskRow).where(StudyTaskRow.subject == "Préfixe")) is None
+    row = session.get(ProposalRow, uuid.UUID(proposal))
+    assert row is not None and row.status == "pending"
+    assert ctx.changed == [] and replan_request(session) is None
+
+
+def test_idempotent_retry_after_a_failure_before_commit(
+    sessions: sessionmaker[Session], database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = {"title": "Unique", "estimated_minutes": 60, "splittable": True}
+    cycle = [response(tool_use("create_task", payload)), response(say("Tâche enregistrée."))]
+    script = ScriptedModels(*cycle, *cycle)
+    app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    app.state.assistant = assistant(script)
+    save = conversation_routes._remember_response
+    attempts = 0
+
+    def failed_once(*args: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("interruption avant le commit")
+        save(*args)
+
+    monkeypatch.setattr(conversation_routes, "_remember_response", failed_once)
+    headers = {**AUTH, "Idempotency-Key": "once"}
+    body = {"text": "Enregistre une heure pour Unique."}
+    with TestClient(app, raise_server_exceptions=False) as api:
+        assert api.post("/v1/conversation", headers=headers, json=body).status_code == 500
+        with sessions() as session:
+            assert session.scalar(select(StudyTaskRow)) is None
+            assert replan_request(session) is None
+        successful = api.post("/v1/conversation", headers=headers, json=body)
+        replay = api.post("/v1/conversation", headers=headers, json=body)
+        assert successful.status_code == replay.status_code == 200
+        assert successful.json() == replay.json() and successful.json()["changed"]
+    with sessions() as session:
+        assert len(list(session.scalars(select(StudyTaskRow)))) == 1
+
+
+def test_expired_idempotency_record_can_be_reused_before_the_worker_purge(
+    sessions: sessionmaker[Session], database_url: str
+) -> None:
+    script = ScriptedModels(response(say("Premier.")), response(say("Second.")))
+    app = create_app(Settings(api_token=TOKEN, database_url=database_url))
+    app.state.assistant = assistant(script)
+    headers = {**AUTH, "Idempotency-Key": "expired"}
+    with TestClient(app) as api:
+        assert (
+            api.post("/v1/conversation", headers=headers, json={"text": "Premier"}).status_code
+            == 200
+        )
+        with sessions.begin() as session:
+            row = session.scalar(select(SettingRow).where(SettingRow.key.like("idem:%")))
+            assert row is not None
+            record = {
+                **row.value["value"],
+                "at": (datetime.now(UTC) - timedelta(days=3)).isoformat(),
+            }
+            row.value = {"value": record}
+        second = api.post("/v1/conversation", headers=headers, json={"text": "Second"})
+        assert second.status_code == 200 and second.json()["reply"] == "Second."
 
 
 def test_model_chosen_in_home_assistant_is_used_without_restart(session: Session) -> None:

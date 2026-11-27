@@ -149,7 +149,7 @@ def test_warnings_report_delay_and_timed_disruption() -> None:
     journey = trip(NOW.replace(hour=7, minute=50), delay=4, alerts=[alert])
     advice = check_departure(LECTURE, fresh(), Provider([journey]), now=NOW)
     assert advice.warnings == [
-        "retard en temps réel +4 min sur IC",
+        "retard indiqué par MOTIS +4 min sur IC",
         "perturbation DETOUR : Travaux IC",
     ]
 

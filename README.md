@@ -56,10 +56,14 @@ Synchronisations, planification, trajets, rappels et contrôle de départ ne dé
 LLM et restent automatiques. Les éléments déjà prévus aujourd'hui ne bougent qu'avec votre
 accord (propositions visibles dans le capteur « Approbations en attente »).
 
-Pour examiner une demande composée, demandez par exemple « Simule l'annulation de mon cours
-de sport et le déplacement de ma séance de physique ». Tempo calcule un aperçu avec les
-opérations et règles habituelles. Les clients HTTP peuvent fournir `Idempotency-Key` sur
-`POST /v1/conversation` pour reprendre la même requête après une coupure.
+Pour examiner une demande composée, demandez par exemple « Simule l'annulation de mon
+rendez-vous de sport et le déplacement de ma séance de physique ». Tempo enregistre le lot
+après la simulation et donne un code. Dites « confirme CODE » ou « refuse CODE » dans les
+15 minutes. Si le planning ou une de ses entrées a changé, demandez un nouvel aperçu.
+Home Assistant envoie une clé `Idempotency-Key` par tour et réutilise la même clé après une
+coupure de la connexion. Les autres clients HTTP peuvent également fournir cette clé.
+Mettez à jour le backend avant l'intégration Home Assistant pour que l'API accepte le champ
+`user_id` envoyé par Assist.
 
 ## Développement local
 
@@ -82,6 +86,8 @@ jamais réussis en silence) : `TEMPO_TEST_MOTIS_URL` (MOTIS Bruxelles),
 `TEMPO_TEST_MOTIS_BE_URL` (MOTIS national), `TEMPO_TEST_HA_REPO=../../tempo-homeassistant`
 (contrat avec le vrai client HA), `TEMPO_TEST_IMAP=127.0.0.1` (serveur IMAP GreenMail),
 `TEMPO_TEST_BMC_KEY` (passerelle Belgian Mobility réelle, 3 requêtes).
+Le test de redémarrage PostgreSQL utilise `TEMPO_TEST_POSTGRES_CONTAINER` avec un conteneur
+Docker jetable nommé `tempo-audit-…`, publié sur un port local fixe. Il redémarre ce conteneur.
 
 Si `dev_postgres.py` expire après un arrêt brutal, PostgreSQL démarre souvent quand même sur le
 port affiché (voir `.pgdata/log`). Serveur IMAP de test :
@@ -98,8 +104,9 @@ export TEMPO_BMC_PARTNER_KEY="$(cat deploy/secrets/tempo_bmc_partner_key)"  # cl
 (cd backend && uv run python -m tempo.transport.gtfs_update ../routing/data/brussels brussels)  # ou belgium
 docker build -t tempo-routing:v2.11.4 routing
 W="$(cygpath -w "$PWD/routing")"
+V="$(cat routing/data/brussels/READY)"
 MSYS_NO_PATHCONV=1 docker run --rm --memory 6g \
-  -v "$W\data\brussels:/input:ro" -v "$W\config\brussels.yml:/config/config.yml:ro" \
+  -v "$W\data\brussels\snapshots\$V:/input:ro" -v "$W\config\brussels.yml:/config/config.yml:ro" \
   -v tempo-routing-brussels:/data tempo-routing:v2.11.4 import -c /config/config.yml -d /data/brussels
 MSYS_NO_PATHCONV=1 docker run -d --name tempo-motis-brussels --memory 4g \
   -p 127.0.0.1:18080:8080 -v tempo-routing-brussels:/data tempo-routing:v2.11.4 server -d /data/brussels
@@ -112,14 +119,18 @@ indisponible ». Pour le national, `config/belgium.yml` lit le temps réel via l
 (`python -m tempo.transport.rt_relay`, port 8090, à ne jamais publier : il consomme le quota du
 portail).
 
-Le relais rejette les TripUpdates âgés de plus de 90 s et les alertes âgées de plus de 10 min.
-Les horaires et quais précédemment enregistrés dans un planning restent visibles avec une
-indication de péremption. Une recherche d'itinéraire relance MOTIS. Les lieux et alias
+Le relais rejette les messages TripUpdates âgés de plus de 90 s et les alertes âgées de plus
+de 10 min. Il retire les prévisions individuelles dépourvues d'horodatage ou expirées avant
+ingestion. Les horaires et quais précédemment enregistrés restent visibles dans iCal et
+Home Assistant avec la qualification des prévisions. Une recherche d'itinéraire relance
+MOTIS. Les lieux et alias
 enregistrés sont recherchés avant le géocodeur local, qui permet aussi de retrouver des
 adresses, établissements et arrêts. Un homonyme demande une clarification.
 
 Le benchmark CP-SAT s'exécute depuis `backend/` avec
 `uv run python -m benchmarks.scheduler_bench 2 --json` (budget de 2 s par scénario).
+Ajoutez `--compare-hints` pour comparer les deux modes avec un ancien planning et des
+contraintes nouvelles.
 
 ### Pile de développement
 
@@ -179,7 +190,9 @@ coordonnées d'un lieu sont fournies par l'utilisateur, jamais devinées.
 
 - Uptime Kuma peut vérifier `GET /health`. `GET /v1/diagnostics`, protégé par le jeton API,
   rassemble les connexions, la taille et les attentes de verrous PostgreSQL, les derniers
-  jobs, la replanification en attente, l'état HTTP de MOTIS et les états GTFS-RT.
+  jobs et leur dernier succès, la replanification en attente et le dernier signal du worker.
+  MOTIS et le relais exposent séparément leur joignabilité et leur état opérationnel.
+  Le relais publie par flux les compteurs d'entités fraîches, périmées ou sans horodatage.
 - Les journaux Docker indiquent la latence et le résultat de l'API, de MOTIS et de Gemini,
   ainsi que les imports GTFS, les basculements de graphe et les rapprochements GTFS-RT.
   Glances et Docker fournissent le CPU, la mémoire et l'espace libre. Tempo utilise le cache
@@ -248,6 +261,10 @@ Exploitation :
   du dernier message analysé, le dernier succès, l'âge des données, la latence et les
   erreurs consécutives. Les compteurs de trajets et d'alertes décrivent le dernier message
   accepté par le relais. Une copie périmée reste visible dans le diagnostic et n'est plus servie.
+- Mise à jour routage : `READY` désigne un lot sous `snapshots/`. Le superviseur vérifie le
+  démarrage du candidat sur un port de boucle locale, le jeu d'arrêts attendu et un trajet de
+  référence. Le graphe précédent reste disponible dans le volume `routing-data` pour une
+  restauration. Le journal `import-<version>.log` contient la cause d'un échec.
 - Santé : health checks `api` et `rt-relay` ; table `job_run` (exposée par `get_sources_status`
   et les capteurs HA).
 - Sauvegarde quotidienne (14 jours) dans le volume `backups` ; la copier hors du nœud.

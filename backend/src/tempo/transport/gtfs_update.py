@@ -8,9 +8,8 @@ stack) writing into the volume shared with the routing service:
 - every GTFS is validated before use (zip integrity, required files, calendar still covering the
   coming week, size not collapsing vs the previous copy); an invalid download is discarded and
   the previous file stays in place (reported, never used);
-- files are replaced atomically; ``READY`` is rewritten with a new version only when something
-  changed, which the routing supervisor (``routing/scripts/supervisor.sh``) turns into a MOTIS
-  re-import + switch-over, keeping the previous graph on failure.
+- ``READY`` points to a complete, versioned snapshot. The supervisor imports that exact
+  set while the previous graph continues serving.
 """
 
 import csv
@@ -18,9 +17,13 @@ import hashlib
 import io
 import json
 import logging
+import os
+import re
+import shutil
 import sys
+import tempfile
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -44,10 +47,17 @@ logger = logging.getLogger(__name__)
 
 OSM_URL = "https://download.geofabrik.de/europe/belgium/belgium-latest.osm.pbf"
 OSM_REFRESH = timedelta(days=7)
-REQUIRED_GTFS = ("agency.txt", "stops.txt", "routes.txt", "trips.txt", "stop_times.txt")
+REQUIRED_GTFS = {
+    "agency.txt": {"agency_name", "agency_url", "agency_timezone"},
+    "stops.txt": {"stop_id", "stop_name", "stop_lat", "stop_lon"},
+    "routes.txt": {"route_id", "route_type"},
+    "trips.txt": {"route_id", "trip_id", "service_id"},
+    "stop_times.txt": {"trip_id", "stop_id", "stop_sequence", "arrival_time", "departure_time"},
+}
 MIN_SIZE_RATIO = 0.5
 MAX_DOWNLOAD = 2_000_000_000
 COVERAGE = timedelta(days=7)
+SNAPSHOT_VERSION = re.compile(r"\d{8}T\d{6}Z")
 
 
 class InvalidGtfsError(ValueError):
@@ -124,15 +134,33 @@ def validate_gtfs(
                     "frequencies.txt present: the realtime start_time repair is no longer valid "
                     "(disable needs_repair in transport/feeds.py and re-check realtime resolution)"
                 )
-            for name in REQUIRED_GTFS:
-                with io.TextIOWrapper(
-                    archive.open(name), encoding="utf-8-sig", newline=""
-                ) as csv_file:
-                    if next(csv.DictReader(csv_file), None) is None:
-                        raise InvalidGtfsError(f"empty {name}")
+            for name in ("agency.txt", "routes.txt"):
+                rows = _rows(archive, name, REQUIRED_GTFS[name])
+                if next(rows, None) is None:
+                    raise InvalidGtfsError(f"empty {name}")
+                rows.close()
+            stops = {
+                row["stop_id"] for row in _rows(archive, "stops.txt", REQUIRED_GTFS["stops.txt"])
+            }
+            last, services = _service_dates(archive, names)
+            trips = set()
+            for row in _rows(archive, "trips.txt", REQUIRED_GTFS["trips.txt"]):
+                if not row.get("trip_id") or row.get("service_id") not in services:
+                    raise InvalidGtfsError("invalid trip_id or unknown service_id in trips.txt")
+                trips.add(row["trip_id"])
+            seen = set()
+            for row in _rows(archive, "stop_times.txt", REQUIRED_GTFS["stop_times.txt"]):
+                if not row.get("trip_id") or row["trip_id"] not in trips:
+                    raise InvalidGtfsError("unknown trip_id in stop_times.txt")
+                if not row.get("stop_id") or row["stop_id"] not in stops:
+                    raise InvalidGtfsError("unknown stop_id in stop_times.txt")
+                seen.add(row["trip_id"])
+            if not seen:
+                raise InvalidGtfsError("empty stop_times.txt")
+            if trips != seen:
+                raise InvalidGtfsError("trips without stop times")
             if archive.testzip() is not None:
                 raise InvalidGtfsError("corrupt zip member")
-            last = _last_service_date(archive, names)
     except (zipfile.BadZipFile, UnicodeError, csv.Error, RuntimeError, EOFError) as exc:
         raise InvalidGtfsError(f"unreadable GTFS zip: {type(exc).__name__}") from exc
     if last is None:
@@ -142,24 +170,41 @@ def validate_gtfs(
     return last
 
 
-def _last_service_date(archive: zipfile.ZipFile, names: set[str]) -> date | None:
+def _rows(archive: zipfile.ZipFile, name: str, required: set[str]) -> Generator[dict[str, str]]:
+    with io.TextIOWrapper(archive.open(name), encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise InvalidGtfsError(f"missing columns in {name}: {sorted(missing)}")
+        yield from reader
+
+
+def _service_dates(archive: zipfile.ZipFile, names: set[str]) -> tuple[date | None, set[str]]:
     last: date | None = None
+    services = set()
     for name, column in (("calendar.txt", "end_date"), ("calendar_dates.txt", "date")):
         if name not in names:
             continue
-        with archive.open(name) as handle:
-            for row in csv.DictReader(io.TextIOWrapper(handle, "utf-8-sig")):
-                if name == "calendar_dates.txt" and row.get("exception_type") == "2":
-                    continue  # a service removal does not extend coverage
-                value = (row.get(column) or "").strip()
-                try:
-                    if len(value) != 8 or not value.isascii() or not value.isdecimal():
-                        raise ValueError(value)
-                    end = date.fromisoformat(value)
-                except ValueError as exc:
-                    raise InvalidGtfsError(f"invalid date in {name}: {value}") from exc
-                last = end if last is None else max(last, end)
-    return last
+        required = {
+            "service_id",
+            column,
+            "exception_type" if name == "calendar_dates.txt" else "start_date",
+        }
+        for row in _rows(archive, name, required):
+            if name == "calendar_dates.txt" and row.get("exception_type") == "2":
+                continue  # a service removal does not extend coverage
+            if not row.get("service_id"):
+                raise InvalidGtfsError(f"missing service_id in {name}")
+            services.add(row["service_id"])
+            value = (row.get(column) or "").strip()
+            try:
+                if len(value) != 8 or not value.isascii() or not value.isdecimal():
+                    raise ValueError(value)
+                end = date.fromisoformat(value)
+            except ValueError as exc:
+                raise InvalidGtfsError(f"invalid date in {name}: {value}") from exc
+            last = end if last is None else max(last, end)
+    return last, services
 
 
 @dataclass(slots=True)
@@ -173,16 +218,28 @@ class UpdateReport:
 
 def _load(path: Path) -> dict[str, Any]:
     try:
-        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-        return data
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return dict(data) if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    tmp = path.with_suffix(path.suffix + ".part")
-    tmp.write_bytes(data)
-    tmp.replace(path)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
+        tmp = Path(file.name)
+        file.write(data)
+    try:
+        tmp.chmod(0o644)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _valid_osm_header(path: Path) -> bool:
+    with path.open("rb") as handle:
+        size = int.from_bytes(handle.read(4), byteorder="big")
+        header = handle.read(size) if 0 < size < 64 * 1024 else b""
+        return b"OSMHeader" in header and bool(handle.read(1))
 
 
 @dataclass(slots=True)
@@ -239,21 +296,88 @@ def update_inputs(
     region: str = "belgium",
 ) -> UpdateReport:
     folder.mkdir(parents=True, exist_ok=True)
-    state_path = folder / "update-state.json"
-    state = _load(state_path)
     now = clock()
     report = UpdateReport([], [], [], {}, None)
-    for source in only or sources(region):
+    required = only if only is not None else sources(region)
+    ready = folder / "READY"
+    previous = ready.read_text(encoding="ascii").strip() if ready.is_file() else ""
+    snapshots = folder / "snapshots"
+    snapshots.mkdir(exist_ok=True)
+    current = snapshots / previous if SNAPSHOT_VERSION.fullmatch(previous) else folder
+    published = current != folder and current.is_dir()
+    if not published:
+        current = folder  # legacy installations keep serving until a full snapshot exists
+    state = _load(current / "update-state.json")
+    with tempfile.TemporaryDirectory(dir=snapshots, prefix=".staging-") as temp:
+        staged = Path(temp)
+        _prepare_snapshot(current, staged, client, key, now, required, state, report, published)
+        if report.failed:
+            report.changed.clear()
+            return report
+        if not report.changed and published:
+            _atomic_write(current / "update-state.json", json.dumps(state, indent=2).encode())
+            return report
+        if not required or not all((staged / source.name).is_file() for source in required):
+            report.failed["snapshot"] = "missing required inputs"
+            report.changed.clear()
+            return report
+        _atomic_write(staged / "update-state.json", json.dumps(state, indent=2).encode())
+        version = now.strftime("%Y%m%dT%H%M%SZ")
+        candidate = snapshots / version
+        if candidate.exists():
+            report.failed["snapshot"] = "a snapshot already uses this version"
+            report.changed.clear()
+            return report
+        staged.chmod(0o755)
+        staged.rename(candidate)
+        _atomic_write(ready, version.encode("ascii"))
+        report.version = version
+    # Keep the prior publication and recent snapshots a supervisor may still be importing.
+    cutoff = (now - timedelta(days=2)).strftime("%Y%m%dT%H%M%SZ")
+    for path in snapshots.iterdir():
+        if (
+            SNAPSHOT_VERSION.fullmatch(path.name)
+            and path.name < cutoff
+            and path.name != previous
+            and path.is_dir()
+        ):
+            shutil.rmtree(path)
+    return report
+
+
+def _prepare_snapshot(
+    current: Path,
+    staged: Path,
+    client: httpx2.Client,
+    key: str,
+    now: datetime,
+    required: list[Source],
+    state: dict[str, Any],
+    report: UpdateReport,
+    published: bool,
+) -> None:
+    for source in required:
         entry = state.get(source.name, {})
+        destination = current / source.name
         last_check = entry.get("checked_at")
-        if last_check and now - datetime.fromisoformat(last_check) < source.min_interval:
+        if (
+            published
+            and not source.gtfs
+            and destination.is_file()
+            and destination.stat().st_size > 0
+            and last_check
+            and now - datetime.fromisoformat(last_check) < source.min_interval
+        ):
+            if not _valid_osm_header(destination):
+                report.failed[source.name] = "invalid OSM PBF header"
+                continue
+            os.link(destination, staged / source.name)
             report.skipped.append(source.name)
             continue
         headers = {"User-Agent": "tempo-routing-update"}
-        destination = folder / source.name
         if entry.get("etag") and destination.is_file():
             headers["If-None-Match"] = entry["etag"]
-        part = folder / (source.name + ".part")
+        part = staged / (source.name + ".part")
         result = _download(client, source.url, headers, key if source.gtfs else None, part)
         try:
             if result.error or result.status not in (200, 304):
@@ -263,12 +387,22 @@ def update_inputs(
             if result.status == 200 and result.size == 0:
                 report.failed[source.name] = "empty download"
                 continue
+            if result.status == 304 and (
+                not destination.is_file() or destination.stat().st_size == 0
+            ):
+                report.failed[source.name] = "304 without a usable local copy"
+                continue
             unchanged = result.status == 304 or (
                 result.sha256 == entry.get("sha256") and destination.is_file()
             )
             if source.gtfs:
                 try:
-                    if unchanged and entry.get("valid_until"):
+                    if unchanged and published and entry.get("valid_until"):
+                        with destination.open("rb") as handle:
+                            if hashlib.file_digest(handle, "sha256").hexdigest() != entry.get(
+                                "sha256"
+                            ):
+                                raise InvalidGtfsError("local archive checksum changed")
                         last = date.fromisoformat(entry["valid_until"])
                         if last < now.date() + COVERAGE:
                             raise InvalidGtfsError(
@@ -285,14 +419,18 @@ def update_inputs(
                     report.failed[source.name] = f"rejected: {exc}"
                     continue
                 entry["valid_until"] = last.isoformat()
+            elif not _valid_osm_header(destination if unchanged else part):
+                report.failed[source.name] = "invalid OSM PBF header"
+                continue
             if unchanged:
                 entry["checked_at"] = now.isoformat()
                 if result.status == 200:
                     entry["etag"] = result.etag
                 state[source.name] = entry
+                os.link(destination, staged / source.name)
                 report.unchanged.append(source.name)
                 continue
-            part.replace(destination)
+            part.replace(staged / source.name)
             entry.update(
                 sha256=result.sha256,
                 bytes=result.size,
@@ -305,16 +443,9 @@ def update_inputs(
             report.changed.append(source.name)
         finally:
             part.unlink(missing_ok=True)
-    if report.changed:
-        report.version = now.strftime("%Y%m%dT%H%M%SZ")
-        _atomic_write(folder / "READY", report.version.encode())
-    _atomic_write(state_path, json.dumps(state, indent=2).encode())
-    return report
 
 
 def main(argv: list[str]) -> int:
-    import os
-
     from tempo.logs import configure_logging
 
     configure_logging()

@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from itertools import pairwise
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from tempo.const import SEARCH_SPAN
 from tempo.timeutil import utc
@@ -220,7 +221,7 @@ def journey_notes(journey: Journey, *, planning_snapshot: bool = False) -> Journ
         late = max(leg.delay, leg.arrival_delay)
         if leg.is_transit and leg.realtime and late >= REPORTED_DELAY:
             minutes = int(late.total_seconds() // 60)
-            source = "indiqué à la planification" if planning_snapshot else "en temps réel"
+            source = "indiqué à la planification" if planning_snapshot else "indiqué par MOTIS"
             specific.append(f"retard {source} +{minutes} min sur {leg.line or leg.mode}")
     specific += [
         f"perturbation {alert.effect} : {alert.header}"
@@ -264,7 +265,11 @@ def leg_payload(leg: Leg, *, operator_key: str, stale: bool = False) -> dict[str
         "to": leg.destination_name,
         "start": leg.start.isoformat(),
         "end": leg.end.isoformat(),
-        "realtime": leg.realtime,
+        # MOTIS reports the origin of a prediction, but v2.11.4 does not return the
+        # entity publication timestamp. The relay filters by age before ingest.
+        "realtime": False,
+        "realtime_reported": leg.realtime,
+        "prediction_freshness": "stale" if stale else "unverified" if leg.realtime else "scheduled",
         "cancelled": leg.cancelled,
         "scheduled_start": leg.scheduled_start.isoformat(),
         "scheduled_end": leg.scheduled_end.isoformat(),
@@ -304,6 +309,67 @@ def connection_margins(journey: Journey) -> list[dict[str, Any]]:
             }
         )
     return margins
+
+
+def describe_travel(item: dict[str, Any], tz: ZoneInfo) -> str:
+    """Shared passenger information for iCal and Home Assistant."""
+    legs = item.get("legs") or []
+    if not legs:
+        return (
+            "Aucun trajet possible à temps."
+            if item.get("status") == "impossible"
+            else "Trajet non calculé."
+        )
+    lines = []
+    if item.get("status") == "stale":
+        lines.append("Itinéraire précédent conservé, non revalidé (routage indisponible).")
+    if item.get("stale_snapshot"):
+        lines.append("Horaires et quais à vérifier (prévisions du planning périmées).")
+    elif any(leg.get("prediction_freshness") == "unverified" for leg in legs):
+        lines.append("Prévisions relevées lors du calcul. Fraîcheur individuelle non vérifiée.")
+    for leg in legs:
+        if not all(leg.get(field) for field in ("start", "end", "mode")):
+            continue
+        lines.append(_passenger_leg(leg, tz))
+        if stops := leg.get("skipped_stops"):
+            lines.append(f"Arrêts signalés supprimés — {', '.join(stops)}")
+    for connection in item.get("connections", []):
+        minutes = connection["margin_seconds"] // 60
+        lines.append(
+            f"Correspondance {connection['arrival_stop']} → {connection['departure_stop']} "
+            f"— marge calculée {minutes} min, correspondance non garantie."
+        )
+    if (margin := item.get("arrival_margin_seconds")) is not None:
+        lines.append(f"Marge calculée avant le début de l'engagement — {margin // 60} min.")
+    for alternative in item.get("alternatives", []):
+        start = datetime.fromisoformat(alternative["departure"]).astimezone(tz)
+        end = datetime.fromisoformat(alternative["arrival"]).astimezone(tz)
+        lines.append(f"Itinéraire de secours — {start:%H:%M} → {end:%H:%M}.")
+    lines.extend(item.get("warnings") or ())
+    return "\n".join(lines)
+
+
+def _passenger_leg(leg: dict[str, Any], tz: ZoneInfo) -> str:
+    start, end = datetime.fromisoformat(leg["start"]), datetime.fromisoformat(leg["end"])
+    minutes = round((utc(end) - utc(start)).total_seconds() / 60)
+    if leg["mode"] == "WALK":
+        return f"À pied {minutes} min"
+    if leg["mode"] == "ACCESS":
+        return f"Dépôt {minutes} min"
+    departure = leg.get("from") or "?"
+    arrival = leg.get("to") or "?"
+    if track := leg.get("departure_track"):
+        departure = f"{departure} (quai {track})"
+    elif track := leg.get("scheduled_departure_track"):
+        departure = f"{departure} (quai prévu {track})"
+    if track := leg.get("arrival_track"):
+        arrival = f"{arrival} (quai {track})"
+    elif track := leg.get("scheduled_arrival_track"):
+        arrival = f"{arrival} (quai prévu {track})"
+    return (
+        f"{leg.get('line') or leg['mode']} {start.astimezone(tz):%H:%M} {departure} → "
+        f"{end.astimezone(tz):%H:%M} {arrival}"
+    )
 
 
 class CachedRouting:

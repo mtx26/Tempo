@@ -21,7 +21,7 @@ def proposal_out(row: ProposalRow) -> dict[str, Any]:
         "id": str(row.id),
         "kind": row.kind,
         "title": row.title,
-        "details": row.details,
+        "details": {key: value for key, value in row.details.items() if key != "user_id"},
         "status": row.status,
         "created_at": row.created_at.isoformat(),
     }
@@ -130,7 +130,14 @@ PROPOSAL_HANDLERS: dict[str, Callable[[Session, ProposalRow], None]] = {
 
 
 def decide(
-    session: Session, proposal_id: uuid.UUID, approve: bool, *, actor: str, now: datetime
+    session: Session,
+    proposal_id: uuid.UUID,
+    approve: bool,
+    *,
+    actor: str,
+    now: datetime,
+    user_id: str | None = None,
+    apply_plan_changes: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Approve or reject a pending proposal. Approval re-checks the input revision: changed
     inputs make the proposal ``obsolete`` and nothing is applied (a re-plan is requested)."""
@@ -139,13 +146,18 @@ def decide(
         raise DomainError("proposition introuvable")
     if row.status != "pending":
         raise DomainError(f"proposition déjà {row.status}")
-    if (
+    compound = row.kind == "plan_changes"
+    if compound and (apply_plan_changes is None or user_id != row.details["user_id"]):
+        raise DomainError("proposition introuvable")
+    expired = compound and now >= datetime.fromisoformat(row.details["expires_at"])
+    if expired or (
         approve
         and row.input_revision is not None
         and proposal_revision(session, row.details) != row.input_revision
     ):
         row.status, row.decided_at = "obsolete", now
-        request_replan(session, now)
+        if not compound:
+            request_replan(session, now)
         audit(session, actor, "proposal_obsolete", "proposal", str(row.id), kind=row.kind)
         return proposal_out(row)
     row.status, row.decided_at = ("approved" if approve else "rejected"), now
@@ -162,9 +174,12 @@ def decide(
                 activity.planned_start_at = None
         request_replan(session, now)
     if approve:
-        handler = PROPOSAL_HANDLERS.get(row.kind)
-        if handler is not None:
-            handler(session, row)
-        request_replan(session, now)
+        if compound and apply_plan_changes is not None:
+            apply_plan_changes(row.details)
+        else:
+            handler = PROPOSAL_HANDLERS.get(row.kind)
+            if handler is not None:
+                handler(session, row)
+            request_replan(session, now)
     audit(session, actor, "proposal_" + row.status, "proposal", str(row.id), kind=row.kind)
     return proposal_out(row)

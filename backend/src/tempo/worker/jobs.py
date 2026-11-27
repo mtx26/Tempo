@@ -42,6 +42,7 @@ from tempo.const import (
     NEAR_TERM_CHANGE,
     NIGHTLY_REPLAN,
     NOTIFICATION_RETENTION,
+    PLAN_PROPOSAL_VALIDITY,
     PROPOSAL_RETENTION,
     REDIRECTS,
     REMINDER_GRACE,
@@ -67,11 +68,14 @@ from tempo.db.store import (
     active_version,
     get_setting,
     notify,
+    record_replan_attempt,
+    replan_attempt,
+    replan_request,
     request_replan,
     set_setting,
 )
 from tempo.domain.ops import DomainError, recurrence_starts
-from tempo.planning.service import REPLAN_LOCK, PlanningNotConfiguredError, replan
+from tempo.planning.service import REPLAN_LOCK, PlanningNotConfiguredError, lock_replan, replan
 from tempo.sync.ics import IcsParseError, parse_ics
 from tempo.sync.ics_repository import apply_ics_sync, get_or_create_source
 from tempo.sync.training_mail import MailSource, import_messages
@@ -102,23 +106,23 @@ class JobError(RuntimeError):
     pass
 
 
-def record_run(sessions: Sessions, name: str, started: datetime, error: str | None) -> None:
-    """Separate transaction: the job's own transaction may have been rolled back."""
-    with sessions() as session:
-        values = {
-            "name": name,
-            "last_started_at": started,
-            "last_finished_at": datetime.now(UTC),
-            "last_status": "error" if error else "ok",
-            "last_error": None if error is None else error[:2000],
-        }
-        stmt = insert(JobRunRow).values(**values)
-        session.execute(
-            stmt.on_conflict_do_update(
-                index_elements=["name"], set_={k: stmt.excluded[k] for k in values if k != "name"}
-            )
+def record_run(session: Session, name: str, started: datetime, error: str | None) -> None:
+    finished = datetime.now(UTC)
+    values = {
+        "name": name,
+        "last_started_at": started,
+        "last_finished_at": finished,
+        "last_status": "error" if error else "ok",
+        "last_error": None if error is None else error[:2000],
+    }
+    if error is None:
+        values["last_success_at"] = finished
+    stmt = insert(JobRunRow).values(**values)
+    session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["name"], set_={k: stmt.excluded[k] for k in values if k != "name"}
         )
-        session.commit()
+    )
 
 
 def run_job(
@@ -127,21 +131,23 @@ def run_job(
     job: Callable[[], Any],
     *,
     due: Callable[[], bool] | None = None,
-    skip_empty: bool = False,
+    records_success: bool = False,
 ) -> bool:
     started = datetime.now(UTC)
     error = None
     try:
         if due is not None and not due():
             return False
-        if job() is None and skip_empty:
-            return False
+        result = job()
+        if records_success:
+            return result is not None
     except Exception as exc:
         logger.error("job %s failed: %s", name, exc)
         logger.debug("%s", traceback.format_exc())
         error = f"{type(exc).__name__}: {exc}"
     try:
-        record_run(sessions, name, started, error)
+        with sessions.begin() as session:
+            record_run(session, name, started, error)
     except Exception:
         logger.exception("could not record run for job %s", name)
         return False
@@ -212,6 +218,7 @@ def ics_sync(
     except IcsParseError as exc:
         raise JobError(str(exc)) from None
     with sessions() as session:
+        lock_replan(session)
         source = get_or_create_source(session, source_name)
         run = apply_ics_sync(session, source, imported, window, now=now)
         counts = {
@@ -270,16 +277,20 @@ def ics_sync(
 def replan_due(session: Session, now: datetime, tz: ZoneInfo) -> str | None:
     """Why a re-plan is due now, or None."""
     version = active_version(session)
-    last = None if version is None else datetime.fromisoformat(version.summary["planned_at"])
-    request_at = get_setting(session, "replan_requested")
-    attempt_at = get_setting(session, "last_replan_attempt")
-    requested = None if request_at is None else datetime.fromisoformat(request_at)
+    planned_at = None if version is None else version.summary.get("planned_at")
+    last = None if planned_at is None else datetime.fromisoformat(planned_at)
+    request = replan_request(session)
+    attempt_data = replan_attempt(session) or {}
+    attempt_at = attempt_data.get("value")
     attempt = None if attempt_at is None else datetime.fromisoformat(attempt_at)
-    if (
-        attempt is not None
-        and (requested is None or requested <= attempt)
-        and (now - attempt < REPLAN_RETRY_AFTER)
-    ):
+    requested = None if request is None else datetime.fromisoformat(request["value"])
+    revision = None if request is None else request.get("revision")
+    already_attempted = (
+        requested is None
+        or (revision is not None and revision == attempt_data.get("revision"))
+        or (revision is None and attempt is not None and requested <= attempt)
+    )
+    if attempt is not None and already_attempted and (now - attempt < REPLAN_RETRY_AFTER):
         return None
     if requested is not None:
         return "requested"
@@ -306,11 +317,17 @@ def replan_job(
         reason = replan_due(session, now, tz)
         if reason is None:
             return None
+        started = datetime.now(UTC)
+        request = replan_request(session)
         with sessions.begin() as attempt:
-            set_setting(attempt, "last_replan_attempt", now.isoformat())
+            record_replan_attempt(attempt, now, request)
+        error = None
         try:
-            replan(session, routing, now, tz, reason=reason)
+            version = replan(session, routing, now, tz, reason=reason)
+            if version.state != "active":
+                error = f"PlanRejected: {version.solver_status}"
         except PlanningNotConfiguredError as exc:
+            error = "PlanningNotConfiguredError: missing planning inputs"
             notify(
                 session,
                 "setup",
@@ -319,6 +336,7 @@ def replan_job(
                 "et leur alternance).",
                 "setup:home",
             )
+        record_run(session, "replan", started, error)
         return reason
 
 
@@ -526,6 +544,7 @@ def training_mail_job(
     today = now.astimezone(tz).date()
     messages = source.fetch(today - MAIL_LOOKBACK)
     with sessions() as session:
+        lock_replan(session)
         stats = import_messages(session, messages, tz=tz, today=today, interpreter=interpreter)
         session.commit()
         return stats
@@ -555,6 +574,7 @@ def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
     """Purge personal data that is no longer useful. ``audit_entry`` is append-only for the
     runtime role and is pruned only by the owner role (README.md)."""
     with sessions() as session:
+        lock_replan(session)
         old_versions = select(ScheduleVersion.id).where(
             ScheduleVersion.state.in_(("superseded", "rejected")),
             ScheduleVersion.created_at < now - VERSION_RETENTION,
@@ -576,8 +596,18 @@ def retention_job(sessions: Sessions, now: datetime) -> dict[str, int]:
             "proposals": _deleted(
                 session,
                 delete(ProposalRow).where(
-                    ProposalRow.status != "pending",
-                    ProposalRow.decided_at < now - PROPOSAL_RETENTION,
+                    (
+                        (ProposalRow.status != "pending")
+                        & (ProposalRow.decided_at < now - PROPOSAL_RETENTION)
+                    )
+                    | (
+                        (ProposalRow.status == "pending")
+                        & (ProposalRow.kind == "plan_changes")
+                        & (
+                            ProposalRow.created_at
+                            < now - PLAN_PROPOSAL_VALIDITY - PROPOSAL_RETENTION
+                        )
+                    ),
                 ),
             ),
             "activities": _deleted(
@@ -668,6 +698,7 @@ def series_job(sessions: Sessions, now: datetime) -> int:
     from tempo.assistant.catalog import expand_all_series
 
     with sessions() as session:
+        lock_replan(session)
         created = expand_all_series(session, now)
         if created:
             request_replan(session, now)

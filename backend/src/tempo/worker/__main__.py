@@ -98,7 +98,9 @@ def tick(
         run_job(sessions, "ics_sync", lambda: ics_sync(sessions, fetch_ics(http, url), now, tz))
     if due_ics:
         run_job(sessions, "series", lambda: series_job(sessions, now))
-    run_job(sessions, "replan", lambda: replan_job(sessions, routing, now, tz), skip_empty=True)
+    run_job(
+        sessions, "replan", lambda: replan_job(sessions, routing, now, tz), records_success=True
+    )
     run_job(sessions, "reminders", lambda: reminders_job(sessions, now, tz))
     if due_departure:
         run_job(sessions, "departure_check", lambda: departure_job(sessions, routing, now, tz))

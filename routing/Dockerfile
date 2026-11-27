@@ -5,7 +5,7 @@ ARG MOTIS_VERSION=v2.11.4
 ARG MOTIS_SHA256=b521bb29c961a3b994ff4dac663778ba64fee7b4cfaf3f2b20ff1d5e1d15e0dc
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl bzip2 \
+ && apt-get install -y --no-install-recommends ca-certificates curl bzip2 jq \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL -o /tmp/motis.tar.bz2 \
       "https://github.com/motis-project/motis/releases/download/${MOTIS_VERSION}/motis-linux-amd64.tar.bz2" \

@@ -56,3 +56,25 @@ def test_description_uses_reported_tracks() -> None:
     assert _description({**TRIP, "legs": [rail]}, TZ) == (
         "IC 07:00 Mons (quai 4) → 07:45 Bruxelles (quai prévu 8)"
     )
+
+
+def test_stale_fallback_keeps_its_steps_and_marks_estimates() -> None:
+    rail = leg("RAIL", "06:00", "06:45", "Mons", "Bruxelles", "IC")
+    rail.update(departure_track="4", skipped_stops=["Jurbise"])
+    trip = {
+        **TRIP,
+        "status": "stale",
+        "stale_snapshot": True,
+        "legs": [rail],
+        "connections": [
+            {"arrival_stop": "Bruxelles", "departure_stop": "Gare Centrale", "margin_seconds": 240}
+        ],
+        "warnings": ["Alerte au moment du calcul"],
+    }
+    text = _description(trip, TZ)
+    assert "prévisions du planning périmées" in text
+    assert "IC 07:00 Mons (quai 4)" in text
+    assert "Arrêts signalés supprimés — Jurbise" in text
+    assert "marge calculée 4 min, correspondance non garantie" in text
+    assert "Alerte au moment du calcul" in text
+    assert "Trajet non calculé" not in text

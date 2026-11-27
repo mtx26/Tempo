@@ -20,13 +20,15 @@ from tempo.transport.gtfs_update import (
 NOW = datetime(2026, 11, 24, 2, tzinfo=UTC)
 
 
-def gtfs(end: str = "20270131", extra: dict[str, str] | None = None, pad: int = 0) -> bytes:
+def gtfs(end: str = "20270131", extra: dict[str, str] | None = None) -> bytes:
     files = {
-        "agency.txt": "agency_id,agency_name\nA,Agency\n",
-        "stops.txt": "stop_id,stop_name\nS1,Stop\n",
-        "routes.txt": "route_id,agency_id\nR1,A\n",
+        "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\nA,Agency,https://example.test,Europe/Brussels\n",
+        "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nS1,Stop,50,4\n",
+        "routes.txt": "route_id,agency_id,route_type\nR1,A,3\n",
         "trips.txt": "route_id,service_id,trip_id\nR1,C1,T1\n",
-        "stop_times.txt": "trip_id,stop_id,stop_sequence\nT1,S1,1\n" + "x" * pad,
+        "stop_times.txt": (
+            "trip_id,stop_id,stop_sequence,arrival_time,departure_time\nT1,S1,1,08:00:00,08:00:00\n"
+        ),
         "calendar.txt": f"service_id,start_date,end_date\nC1,20261101,{end}\n",
         **(extra or {}),
     }
@@ -56,7 +58,7 @@ class Portal:
     def __init__(self) -> None:
         self.files: dict[str, tuple[bytes, str]] = {
             "/stib": (gtfs(), '"v1"'),
-            "/osm": (b"pbf", '"o1"'),
+            "/osm": (b"\x00\x00\x00\x0b\x0a\x09OSMHeader\x01", '"o1"'),
         }
         self.requests: list[httpx2.Request] = []
 
@@ -80,6 +82,10 @@ def run(folder: Path, portal: Portal, now: datetime, key: str = "k") -> object:
     return update_inputs(folder, client, key=key, clock=lambda: now, only=SOURCES)
 
 
+def published(folder: Path) -> Path:
+    return folder / "snapshots" / (folder / "READY").read_text()
+
+
 def test_future_removal_does_not_extend_gtfs_coverage() -> None:
     data = gtfs(
         end="20261126",
@@ -97,9 +103,32 @@ def test_invalid_gtfs_date_is_reported_as_validation_failure() -> None:
 @pytest.mark.parametrize(
     ("extra", "reason"),
     [
-        ({"stop_times.txt": "trip_id,stop_id,stop_sequence\n"}, "empty stop_times"),
-        ({"calendar.txt": "service_id,start_date,end_date\n"}, "no service date"),
+        (
+            {"stop_times.txt": "trip_id,stop_id,stop_sequence,arrival_time,departure_time\n"},
+            "empty stop_times",
+        ),
+        ({"calendar.txt": "service_id,start_date,end_date\n"}, "service_id"),
         ({"../stops.txt": "unexpected"}, "unsafe zip member"),
+        ({"trips.txt": "route_id,service_id\nR1,C1\n"}, "missing columns.*trip_id"),
+        ({"trips.txt": "route_id,service_id,trip_id\nR1,C2,T1\n"}, "unknown service_id"),
+        (
+            {
+                "stop_times.txt": (
+                    "trip_id,stop_id,stop_sequence,arrival_time,departure_time\n"
+                    "T2,S1,1,08:00:00,08:00:00\n"
+                )
+            },
+            "unknown trip_id",
+        ),
+        (
+            {
+                "stop_times.txt": (
+                    "trip_id,stop_id,stop_sequence,arrival_time,departure_time\n"
+                    "T1,S2,1,08:00:00,08:00:00\n"
+                )
+            },
+            "unknown stop_id",
+        ),
     ],
 )
 def test_incomplete_or_unsafe_archive_is_rejected(extra: dict[str, str], reason: str) -> None:
@@ -112,7 +141,7 @@ def test_first_run_downloads_validates_and_signals(tmp_path: Path) -> None:
     report = run(tmp_path, portal, NOW, key="secret-key")
     assert report.changed == ["stib.gtfs.zip", "osm.pbf"]  # type: ignore[attr-defined]
     assert (tmp_path / "READY").read_text() == "20261124T020000Z"
-    state = json.loads((tmp_path / "update-state.json").read_text())
+    state = json.loads((published(tmp_path) / "update-state.json").read_text())
     assert state["stib.gtfs.zip"]["valid_until"] == "2027-01-31"
     stib, osm = portal.requests
     assert stib.headers[KEY_HEADER] == "secret-key"
@@ -147,11 +176,11 @@ def test_expired_unchanged_feed_is_reported(tmp_path: Path, same_etag: bool) -> 
 def test_invalid_update_keeps_the_previous_file(tmp_path: Path) -> None:
     portal = Portal()
     run(tmp_path, portal, NOW)
-    good = (tmp_path / "stib.gtfs.zip").read_bytes()
+    good = (published(tmp_path) / "stib.gtfs.zip").read_bytes()
     portal.files["/stib"] = (gtfs(end="20261125"), '"v2"')
     report = run(tmp_path, portal, NOW + timedelta(days=1))
     assert "stib.gtfs.zip" in report.failed  # type: ignore[attr-defined]
-    assert (tmp_path / "stib.gtfs.zip").read_bytes() == good
+    assert (published(tmp_path) / "stib.gtfs.zip").read_bytes() == good
     assert report.version is None  # type: ignore[attr-defined]
 
 
@@ -172,6 +201,42 @@ def test_server_errors_are_reported(tmp_path: Path) -> None:
     client = httpx2.Client(transport=httpx2.MockTransport(down))
     report = update_inputs(tmp_path, client, key="k", clock=lambda: NOW, only=SOURCES)
     assert report.failed == {"stib.gtfs.zip": "HTTP 503", "osm.pbf": "HTTP 503"}
+    assert not (tmp_path / "READY").exists()
+
+
+def test_one_failed_operator_prevents_the_entire_publication(tmp_path: Path) -> None:
+    portal = Portal()
+    sources = [*SOURCES, Source("sncb.gtfs.zip", f"https://{GATEWAY}/sncb", True)]
+    invalid = True
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/sncb" and invalid:
+            return httpx2.Response(503)
+        return portal(request)
+
+    portal.files["/sncb"] = (gtfs(), '"sncb"')
+    client = httpx2.Client(transport=httpx2.MockTransport(handler))
+    first = update_inputs(tmp_path, client, key="k", clock=lambda: NOW, only=sources)
+    assert first.changed == [] and first.version is None
+    assert not (tmp_path / "READY").exists()
+    invalid = False
+    update_inputs(tmp_path, client, key="k", clock=lambda: NOW, only=sources)
+    previous = published(tmp_path)
+    invalid = True
+    portal.files["/stib"] = (gtfs(end="20270228"), '"new-stib"')
+    report = update_inputs(
+        tmp_path, client, key="k", clock=lambda: NOW + timedelta(days=1), only=sources
+    )
+    assert report.changed == [] and report.version is None
+    assert published(tmp_path) == previous
+    assert (previous / "stib.gtfs.zip").read_bytes() == gtfs()
+
+
+def test_invalid_osm_payload_prevents_publication(tmp_path: Path) -> None:
+    portal = Portal()
+    portal.files["/osm"] = (b"<html>upstream error</html>", '"bad"')
+    report = run(tmp_path, portal, NOW)
+    assert report.failed == {"osm.pbf": "invalid OSM PBF header"}  # type: ignore[attr-defined]
     assert not (tmp_path / "READY").exists()
 
 

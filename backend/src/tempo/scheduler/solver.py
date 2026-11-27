@@ -59,6 +59,7 @@ from tempo.scheduler.model import (
     PlanResult,
     PlanStatus,
     StudyDemand,
+    study_effort,
 )
 from tempo.timeutil import Interval, utc
 
@@ -160,7 +161,6 @@ class _Builder:
         self.penalties: list[cp_model.LinearExprT] = []
         self.blocks: list[_Block] = []
         self.activities: list[_Activity] = []
-        self.unplanned: dict[str, cp_model.IntVar] = {}
         self.to_plan: dict[str, int] = {}
         self.global_intervals: list[cp_model.IntervalVar] = []
         self.study_gaps: dict[int, list[cp_model.IntervalVar]] = {}
@@ -290,7 +290,6 @@ class _Builder:
         unplanned = model.new_int_var(0, need, f"unplanned_{demand.task_id}")
         overshoot = model.new_int_var(0, prefs.min_block_minutes, f"over_{demand.task_id}")
         model.add(sum(b.effective for b in mine) + unplanned - overshoot == need)
-        self.unplanned[demand.task_id] = unplanned
         weight = NO_DEADLINE_PER_MINUTE if demand.target is None else UNPLANNED_PER_MINUTE
         self.penalties.append(weight * demand.priority * unplanned)
         self.penalties.append(OVERSHOOT_PER_MINUTE * overshoot)
@@ -705,6 +704,8 @@ def solve(
     builder.build()
     if warm_start:
         builder.warm_start()
+    else:
+        builder.model.clear_hints()  # type: ignore[no-untyped-call]
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_seconds
     solver.parameters.num_workers = workers
@@ -760,13 +761,21 @@ def solve(
             datetime.combine(begins.date(), closes, tzinfo=problem.timezone)
         ):
             outside.append(item.activity_id)
-    unplanned = {t: solver.value(v) for t, v in builder.unplanned.items() if solver.value(v) > 0}
-    demands = {d.task_id: d for d in problem.demands}
-    misses = [t for t in unplanned if demands[t].target is not None]
-    hard = [t for t in misses if demands[t].target_kind is TargetKind.HARD]
     blocks = sorted([*problem.fixed_blocks, *planned], key=lambda b: utc(b.start))
+    effort = study_effort(problem.demands, blocks)
+    unplanned = {task: e.unplanned_minutes for task, e in effort.items() if e.unplanned_minutes}
+    misses = [
+        task
+        for task, e in effort.items()
+        if e.before_deadline_minutes is not None and e.before_deadline_minutes < e.remaining_minutes
+    ]
+    hard = [
+        d.task_id
+        for d in problem.demands
+        if d.target_kind is TargetKind.HARD and d.task_id in misses
+    ]
     return PlanResult(
-        status=PlanStatus.PARTIAL if unplanned or unplaced else PlanStatus.COMPLETE,
+        status=PlanStatus.PARTIAL if unplanned or unplaced or misses else PlanStatus.COMPLETE,
         blocks=blocks,
         activities=placed,
         unplaced=unplaced,
@@ -776,6 +785,7 @@ def solve(
         deadline_misses=misses,
         solver_status=status_name,
         objective=solver.objective_value,
+        study_effort=effort,
     )
 
 

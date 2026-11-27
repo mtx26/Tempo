@@ -1,18 +1,26 @@
 """Worker jobs on a REAL PostgreSQL (iCal sync, re-plan scheduling, departure check, job runs)."""
 
+import multiprocessing
+import os
+import shutil
+import subprocess
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from multiprocessing.synchronize import Event as ProcessEvent
+from threading import Event
 from zoneinfo import ZoneInfo
 
 import httpx2
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from tempo.assistant.catalog import OpContext, run_operation
 from tempo.const import MAX_ICS_BYTES
 from tempo.db.models import (
+    ActivityRow,
     Base,
     FixedEventRow,
     JobRunRow,
@@ -22,7 +30,7 @@ from tempo.db.models import (
     PlaceRow,
     ScheduleVersion,
 )
-from tempo.db.store import active_version, get_setting, request_replan, set_setting
+from tempo.db.store import active_version, get_setting, replan_request, request_replan, set_setting
 from tempo.planning import service
 from tempo.planning.engine import OutcomeStatus, PlanningInput, PlanningOutcome, run_planning
 from tempo.planning.service import replan
@@ -221,6 +229,154 @@ def test_busy_planner_leaves_the_worker_request_and_attempt_untouched(
         assert get_setting(api, "last_replan_attempt") is None
         assert get_setting(api, "replan_requested") == NOW.isoformat()
     assert replan_job(sessions, FakeRouting(), NOW, TZ) == "requested"
+
+
+def test_worker_and_api_wait_in_the_same_lock_order(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(sessions)
+    with sessions.begin() as session:
+        ctx = OpContext(session=session, now=NOW, tz=TZ, actor="api")
+        outcome = run_operation(
+            ctx,
+            "create_event",
+            {
+                "title": "Repos",
+                "scheduling": "fixed",
+                "start": "2026-12-07T22:00",
+                "duration_minutes": 30,
+                "remote": True,
+            },
+        )
+        activity_id = outcome["result"]["activity"]["id"]
+    started, release, api_started = Event(), Event(), Event()
+
+    def held(data: PlanningInput, routing: RoutingProvider) -> PlanningOutcome:
+        started.set()
+        assert release.wait(timeout=10)
+        return run_planning(data, routing)
+
+    def cancel() -> bool:
+        with sessions.begin() as session:
+            session.execute(text("SET LOCAL statement_timeout = '8s'"))
+            api_started.set()
+            ctx = OpContext(session=session, now=NOW, tz=TZ, actor="api")
+            result = run_operation(ctx, "cancel_event", {"activity_id": activity_id})
+            return result["ok"] is True
+
+    monkeypatch.setattr(service, "run_planning", held)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        worker = pool.submit(replan_job, sessions, FakeRouting(), NOW, TZ)
+        try:
+            assert started.wait(8)
+            api = pool.submit(cancel)
+            assert api_started.wait(8)
+            assert replan_job(sessions, FakeRouting(), NOW, TZ) is None
+            with sessions.begin() as witness:
+                assert witness.scalar(select(ActivityRow).with_for_update(nowait=True)) is not None
+            assert not api.done()
+        finally:
+            release.set()
+        assert worker.result(timeout=12) == "requested"
+        assert api.result(timeout=12)
+    # The API just recorded a fresh revision at exactly the previous attempt's timestamp.
+    assert replan_job(sessions, FakeRouting(), NOW, TZ) == "requested"
+
+
+def _worker_parked_before_commit(database_url: str, phase: str, ready: ProcessEvent) -> None:
+    engine = create_engine(database_url, pool_pre_ping=True)
+    stop = Event()
+
+    def park(*args: object, **kwargs: object) -> None:
+        ready.set()
+        stop.wait()
+
+    if phase == "calculation":
+        service.run_planning = park  # type: ignore[attr-defined, assignment]
+    else:
+        jobs.record_run = park
+    replan_job(sessionmaker(engine), FakeRouting(), NOW, TZ)
+
+
+@pytest.mark.parametrize("phase", ["calculation", "history"])
+def test_killed_worker_rolls_back_publication_and_history(
+    sessions: sessionmaker[Session], database_url: str, phase: str
+) -> None:
+    configure(sessions)
+    assert replan_job(sessions, FakeRouting(), NOW - timedelta(hours=1), TZ) == "first plan"
+    with sessions.begin() as session:
+        version = active_version(session)
+        assert version is not None
+        request_replan(session, NOW)
+        previous_id = version.id
+        previous_run = session.get(JobRunRow, "replan")
+        assert previous_run is not None
+        finished = previous_run.last_finished_at
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    process = context.Process(
+        target=_worker_parked_before_commit, args=(database_url, phase, ready)
+    )
+    process.start()
+    try:
+        assert ready.wait(timeout=20)
+        assert process.is_alive()
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=10)
+    assert process.exitcode not in (None, 0)
+    with sessions() as session:
+        version = active_version(session)
+        assert version is not None and version.id == previous_id
+        assert replan_request(session) is not None
+        latest_run = session.get(JobRunRow, "replan")
+        assert latest_run is not None and latest_run.last_finished_at == finished
+    assert replan_job(sessions, FakeRouting(), NOW + timedelta(minutes=1), TZ) is None
+    assert replan_job(sessions, FakeRouting(), NOW + timedelta(minutes=16), TZ) == "requested"
+    with sessions() as session:
+        version = active_version(session)
+        latest_run = session.get(JobRunRow, "replan")
+        assert version is not None and version.id != previous_id
+        assert latest_run is not None and latest_run.last_finished_at != finished
+        assert latest_run.last_success_at == latest_run.last_finished_at
+
+
+def test_worker_reconnects_after_a_postgres_restart(
+    sessions: sessionmaker[Session], engine: Engine, database_url: str
+) -> None:
+    container = os.environ.get("TEMPO_TEST_POSTGRES_CONTAINER", "")
+    docker = shutil.which("docker")
+    if not container.startswith("tempo-audit-") or docker is None:
+        pytest.skip("restart requires a dedicated tempo-audit-* PostgreSQL container")
+    configure(sessions)
+    worker_engine = create_engine(database_url, pool_pre_ping=True)
+    worker_sessions = sessionmaker(worker_engine)
+    try:
+        with worker_sessions.begin() as session:
+            request_replan(session, NOW)
+        subprocess.run(  # noqa: S603
+            [docker, "restart", "--time", "1", container], check=True, timeout=35
+        )
+        subprocess.run(  # noqa: S603
+            [
+                docker,
+                "exec",
+                container,
+                "sh",
+                "-c",
+                "for i in $(seq 1 10); do pg_isready -U postgres && exit 0; sleep 1; done; exit 1",
+            ],
+            check=True,
+            timeout=20,
+        )
+        assert replan_job(worker_sessions, FakeRouting(), NOW, TZ) == "requested"
+        with worker_sessions() as session:
+            assert replan_request(session) is None
+            assert active_version(session) is not None
+    finally:
+        worker_engine.dispose()
+        engine.dispose()
 
 
 def test_unknown_replan_does_not_acknowledge_request(

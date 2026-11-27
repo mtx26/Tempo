@@ -192,6 +192,8 @@ REMINDER_GRACE = timedelta(hours=6)
 RETENTION_HOUR = 4
 NOTIFICATION_RETENTION = timedelta(days=90)
 PROPOSAL_RETENTION = timedelta(days=180)
+PLAN_PROPOSAL_VALIDITY = timedelta(minutes=15)
+WORKER_HEARTBEAT_MAX_AGE = timedelta(minutes=5)
 VERSION_RETENTION = timedelta(days=30)
 ACTIVITY_RETENTION = timedelta(days=180)
 CONVERSATION_RETENTION = timedelta(days=7)

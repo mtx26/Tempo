@@ -31,7 +31,7 @@ pytestmark = pytest.mark.integration
 def database_url() -> Iterator[str]:
     if not BASE_URL:
         pytest.skip("TEMPO_TEST_DATABASE_URL not set: PostgreSQL integration tests not run")
-    admin = create_engine(BASE_URL, isolation_level="AUTOCOMMIT")
+    admin = create_engine(BASE_URL, isolation_level="AUTOCOMMIT", pool_pre_ping=True)
     name = f"tempo_test_{uuid.uuid4().hex[:12]}"
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE "{name}"'))

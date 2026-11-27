@@ -12,6 +12,7 @@
 import hashlib
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -23,7 +24,7 @@ from sqlalchemy.orm import Session
 from tempo.api.location import SessionDep
 from tempo.assistant.agent import Assistant, LLMUnavailableError
 from tempo.assistant.catalog import CATALOG, OpContext, run_operation
-from tempo.const import HISTORY_TURNS, HISTORY_WINDOW
+from tempo.const import HISTORY_TURNS, HISTORY_WINDOW, IDEMPOTENCY_RETENTION
 from tempo.db.models import ConversationTurnRow
 from tempo.db.store import get_setting, set_setting
 from tempo.transport.routing import RoutingProvider
@@ -31,13 +32,19 @@ from tempo.transport.routing import RoutingProvider
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
 IdempotencyKey = Annotated[str | None, Header(max_length=150)]
+PROPOSAL_DECISION = re.compile(
+    r"(confirme|accepte|refuse)\s+(?:la proposition\s+)?"
+    r"([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)"
+    r"[.!]?",
+    re.IGNORECASE,
+)
 
 
 def _context(request: Request, session: Any, actor: str) -> OpContext:
     routing: RoutingProvider | None = getattr(request.app.state, "routing", None)
     return OpContext(
         session=session,
-        now=datetime.now(UTC),
+        now=request.app.state.clock(),
         tz=request.app.state.timezone,
         actor=actor,
         routing=routing,
@@ -89,9 +96,11 @@ def _idempotency(
     # A retry waits for the response and writes to commit together.
     session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
     previous = get_setting(session, key)
-    if previous is None:
+    if previous is None or (
+        datetime.now(UTC) - datetime.fromisoformat(previous["at"]) >= IDEMPOTENCY_RETENTION
+    ):
         return key, fingerprint, None
-    if previous.get("fingerprint", fingerprint) != fingerprint:
+    if previous.get("fingerprint") != fingerprint:
         raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key already used")
     return key, fingerprint, dict(previous["response"])
 
@@ -107,6 +116,7 @@ class ConversationIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=4000)
     conversation_id: str = Field(default="default", min_length=1, max_length=100)
+    user_id: str = Field(default="tempo", min_length=1, max_length=100)
 
 
 def _history(session: Any, conversation_id: str, now: datetime) -> list[dict[str, str]]:
@@ -147,32 +157,59 @@ def conversation(
 ) -> dict[str, Any]:
     key = fingerprint = None
     if idempotency_key:
-        key, fingerprint, previous = _idempotency(
-            session, "conversation", idempotency_key, body.model_dump(mode="json")
-        )
+        payload = body.model_dump(mode="json")
+        if body.user_id == "tempo":
+            payload.pop("user_id")
+        key, fingerprint, previous = _idempotency(session, "conversation", idempotency_key, payload)
         if previous is not None:
             return previous
-    assistant: Assistant | None = getattr(request.app.state, "assistant", None)
-    if assistant is None:
-        return _unavailable("assistant Gemini non configuré (compte de service Vertex AI)")
     ctx = _context(request, session, "assistant")
-    history = _history(session, body.conversation_id, ctx.now)
-    try:
-        reply = assistant.reply(ctx, body.text, history)
-    except LLMUnavailableError as exc:
-        logger.warning("assistant unavailable: %s", exc)
-        return _unavailable(str(exc))
+    ctx.user_id = body.user_id
+    decision = PROPOSAL_DECISION.fullmatch(body.text.strip())
+    if decision:
+        response = _decide(ctx, decision[2].lower(), decision[1].lower() != "refuse")
+    else:
+        assistant: Assistant | None = getattr(request.app.state, "assistant", None)
+        if assistant is None:
+            return _unavailable("assistant Gemini non configuré (compte de service Vertex AI)")
+        history = _history(session, body.conversation_id, ctx.now)
+        try:
+            reply = assistant.reply(ctx, body.text, history)
+        except LLMUnavailableError as exc:
+            logger.warning("assistant unavailable: %s", exc)
+            return _unavailable(str(exc))
+        response = {
+            "reply": reply.text,
+            "used_llm": True,
+            "operations": reply.operations,
+            "changed": bool(ctx.changed),
+        }
+        if reply.proposal_id is not None:
+            response["proposal_id"] = reply.proposal_id
     _remember(session, body.conversation_id, "user", body.text)
-    _remember(session, body.conversation_id, "assistant", reply.text)
-    response = {
-        "reply": reply.text,
-        "used_llm": True,
-        "operations": reply.operations,
-        "changed": bool(ctx.changed),
-    }
+    _remember(session, body.conversation_id, "assistant", response["reply"])
     if key is not None:
         _remember_response(session, key, fingerprint, response)
     return response
+
+
+def _decide(ctx: OpContext, code: str, approve: bool) -> dict[str, Any]:
+    outcome = run_operation(ctx, "decide_proposal", {"proposal_id": code, "approve": approve})
+    result = outcome.get("result", {})
+    state = result.get("proposal", {}).get("status")
+    return {
+        "reply": {
+            "approved": "Proposition approuvée. Les changements confirmés ont été appliqués.",
+            "rejected": "Proposition refusée.",
+            "obsolete": "La proposition a expiré ou le planning a changé. "
+            "Demandez un nouvel aperçu.",
+        }.get(state, outcome.get("error", "Proposition indisponible.")),
+        "used_llm": False,
+        "operations": [
+            {"name": "decide_proposal", "ok": outcome["ok"], "error": outcome.get("error")}
+        ],
+        "changed": state in {"approved", "rejected"},
+    }
 
 
 def _unavailable(reason: str) -> dict[str, Any]:

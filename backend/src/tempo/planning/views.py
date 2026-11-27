@@ -17,7 +17,7 @@ from tempo.db.models import (
     StudyBlockRow,
     StudyTaskRow,
 )
-from tempo.db.store import active_version, get_setting, place_directory
+from tempo.db.store import active_version, get_setting, pending_proposals, place_directory
 from tempo.domain.models import EventStatus
 from tempo.domain.ops import remaining_minutes
 from tempo.timeutil import utc
@@ -144,21 +144,24 @@ def schedule_items(
             if t_end <= t_start or utc(t_end) <= utc(start) or utc(t_start) >= utc(end):
                 continue
             legs = trip.get("legs", [])
-            realtime_snapshot = any(leg.get("realtime") for leg in legs)
-            stale_snapshot = expired and realtime_snapshot
+            realtime_snapshot = any(
+                leg.get("realtime_reported", leg.get("realtime")) for leg in legs
+            )
+            stale_snapshot = (expired and realtime_snapshot) or trip["status"] == "stale"
             if realtime_snapshot:
                 legs = [
                     {
                         **leg,
                         "realtime": False,
                         "realtime_at_planning": True,
+                        "prediction_freshness": "stale" if stale_snapshot else "unverified",
                         **(
                             {"departure_time_status": "stale", "arrival_time_status": "stale"}
                             if stale_snapshot
                             else {}
                         ),
                     }
-                    if leg.get("realtime")
+                    if leg.get("realtime_reported", leg.get("realtime"))
                     else leg
                     for leg in legs
                 ]
@@ -174,10 +177,11 @@ def schedule_items(
                     "arrival": trip.get("arrival"),
                     "legs": legs,
                     "information_at": planned_at,
-                    "stale_snapshot": stale_snapshot or trip["status"] == "stale",
+                    "stale_snapshot": stale_snapshot,
                     "connections": trip.get("connections", []),
                     "arrival_margin_seconds": trip.get("arrival_margin_seconds"),
                     "warnings": trip.get("warnings", []),
+                    "alternatives": trip.get("alternatives", []),
                     "origin": trip["origin"],
                     "destination": trip["destination"],
                     "event_title": trip.get("event_title"),
@@ -225,7 +229,7 @@ def summary(session: Session, now: datetime, tz: ZoneInfo) -> dict[str, Any]:
     version = active_version(session)
     plan = version.summary if version is not None else {}
     pending = session.scalar(
-        select(func.count()).select_from(ProposalRow).where(ProposalRow.status == "pending")
+        select(func.count()).select_from(ProposalRow).where(pending_proposals(now))
     )
     unread = session.scalar(
         select(func.count())

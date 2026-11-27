@@ -16,7 +16,7 @@ Persistence rules:
 
 import math
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -65,6 +65,7 @@ from tempo.planning.engine import (
     PendingMove,
     PlanningInput,
     PlanningOutcome,
+    free_minutes,
     run_planning,
 )
 from tempo.scheduler.model import (
@@ -175,20 +176,6 @@ class LoadedInput:
     """Questions about the sources (e.g. is this an exam?), with when the answer is needed."""
 
 
-def _capacity(rules: Rules, busy: list[Interval], start: datetime, until: datetime) -> int:
-    """Free study minutes in ``[start, until)`` (study windows minus known busy time)."""
-    total = 0
-    for window in rules.study:
-        low, high = max(window.start, start, key=utc), min(window.end, until, key=utc)
-        if utc(low) >= utc(high):
-            continue
-        total += sum(
-            int((utc(p.end) - utc(p.start)).total_seconds() // 60)
-            for p in subtract(Interval(low, high), busy)
-        )
-    return total
-
-
 def _previous_travel(summary: dict[str, Any]) -> Previous:
     """Itineraries of the published plan by leg, reused (not revalidated) when MOTIS is down."""
     known: dict[tuple[str, str, str, bool], Journey] = {}
@@ -211,6 +198,7 @@ def _previous_travel(summary: dict[str, Any]) -> Previous:
                 arrival_track=leg.get("arrival_track"),
                 scheduled_departure_track=leg.get("scheduled_departure_track"),
                 scheduled_arrival_track=leg.get("scheduled_arrival_track"),
+                skipped_stops=tuple(leg.get("skipped_stops") or ()),
             )
             for leg in trip["legs"]
         )
@@ -451,12 +439,12 @@ def build_input(
                 )
             )
         ]
-        within = _capacity(far_rules, known, now, horizon_end)
+        within = free_minutes(far_rules.study, known, horizon_end, now)
         needed, planned_now = 0, 0
         for task in far:
             remaining = max(0, (remaining_minutes(task) or 0) - held_minutes.get(str(task.id), 0))
             deadline = end_of_day(task.target_date or last_day, tz)
-            total = _capacity(far_rules, known, now, deadline)
+            total = free_minutes(far_rules.study, known, deadline, now)
             needed += remaining
             if needed > total:
                 warnings.append(
@@ -466,7 +454,9 @@ def build_input(
                     "ne suffit plus, à revoir avec l'utilisateur"
                 )
             proportional = remaining if total <= 0 else remaining * within / total
-            unabsorbed = needed - _capacity(far_rules, known, horizon_end, deadline) - planned_now
+            unabsorbed = (
+                needed - free_minutes(far_rules.study, known, deadline, horizon_end) - planned_now
+            )
             share = math.ceil(max(proportional, unabsorbed, 15) / 15) * 15
             spread[str(task.id)] = min(remaining, share)
             planned_now += spread[str(task.id)]
@@ -489,6 +479,7 @@ def build_input(
                 task.target_kind,
                 priority=task.priority,
                 not_before=not_before,
+                completed_minutes=task.completed_minutes,
             )
         )
     subjects = {d.task_id: d.subject for d in demands}
@@ -646,7 +637,7 @@ def _travel_json(outcome: PlanningOutcome) -> list[dict[str, Any]]:
                         "departure": alt.departure.isoformat(),
                         "arrival": alt.arrival.isoformat(),
                         "transfers": alt.transfers,
-                        "realtime": alt.uses_realtime,
+                        "realtime_reported": alt.uses_realtime,
                     }
                     for alt in block.alternatives
                 ],
@@ -855,7 +846,12 @@ def mark_missed_blocks(session: Session, now: datetime) -> int:
 
 
 REPLAN_LOCK = 0x7E4D0
-"""PostgreSQL advisory lock: the API and the worker never re-plan concurrently."""
+"""PostgreSQL advisory lock shared by planning and its input writers."""
+
+
+def lock_replan(session: Session) -> None:
+    """Take the planner lock before locking or changing any of its input rows."""
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": REPLAN_LOCK})
 
 
 def _block_keys(session: Session, version: ScheduleVersion | None) -> set[tuple[str, str, str]]:
@@ -873,39 +869,87 @@ def _block_keys(session: Session, version: ScheduleVersion | None) -> set[tuple[
 
 
 def _schedule_diff(
-    before: set[tuple[str, str, str]], after: set[tuple[str, str, str]], moved_activities: list[str]
+    before: set[tuple[str, str, str]], after: set[tuple[str, str, str]]
 ) -> dict[str, Any]:
     removed, added = before - after, after - before
     shift = 0
     moved = 0
-    resized = 0
     previous_at = {(t, s): e for t, s, e in removed}
     current_at = {(t, s): e for t, s, e in added}
     stationary = previous_at.keys() & current_at.keys()
-    pending: dict[str, list[tuple[str, str]]] = {}
-    for task, start, end in sorted(added, reverse=True):
-        if (task, start) not in stationary:
-            pending.setdefault(task, []).append((start, end))
-    for task, start, end in sorted(removed):
-        if (task, start) not in stationary and (matches := pending.get(task)):
-            new_start, new_end = matches.pop()
-            begin, finish = datetime.fromisoformat(start), datetime.fromisoformat(end)
-            next_begin, next_finish = (
-                datetime.fromisoformat(new_start),
-                datetime.fromisoformat(new_end),
-            )
+    old: dict[tuple[str, timedelta], list[datetime]] = {}
+    new: dict[tuple[str, timedelta], list[datetime]] = {}
+    for blocks, index in ((removed, old), (added, new)):
+        for task, start, end in blocks:
+            if (task, start) in stationary:
+                continue
+            begin = datetime.fromisoformat(start)
+            length = datetime.fromisoformat(end) - begin
+            index.setdefault((task, length), []).append(begin)
+    # Blocks acquire new IDs when a plan is published. Only pair a unique same-duration
+    # block of the same task. Repeated lengths leave an explicit addition and removal.
+    for key in old.keys() & new.keys():
+        if len(old[key]) == len(new[key]) == 1:
             moved += 1
-            resized += (finish - begin) != (next_finish - next_begin)
-            shift += int(abs((next_begin - begin).total_seconds()) // 60)
+            shift += int(abs((new[key][0] - old[key][0]).total_seconds()) // 60)
     return {
         "added_blocks": len(added) - moved - len(stationary),
         "removed_blocks": len(removed) - moved - len(stationary),
         "moved_blocks": moved,
-        "resized_blocks": resized + len(stationary),
+        "resized_blocks": len(stationary),
         "kept_blocks": len(before & after),
         "total_shift_minutes": shift,
-        "moved_activities": moved_activities,
     }
+
+
+def _flexible_slots(session: Session, horizon: Interval) -> dict[str, tuple[str, int | None]]:
+    return {
+        str(row.id): (utc(row.planned_start_at).isoformat(), row.duration_minutes)
+        for row in session.scalars(
+            select(ActivityRow).where(
+                ActivityRow.scheduling == "flexible",
+                ActivityRow.status == "active",
+                ActivityRow.planned_start_at >= horizon.start,
+                ActivityRow.planned_start_at < horizon.end,
+            )
+        )
+        if row.planned_start_at is not None
+    }
+
+
+def _journey_signature(travel: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    return sorted(
+        (
+            (
+                *(trip.get(key) for key in ("status", "origin", "destination", "start", "end")),
+                tuple(
+                    tuple(
+                        leg.get(key)
+                        for key in (
+                            "mode",
+                            "line",
+                            "agency",
+                            "from",
+                            "to",
+                            "start",
+                            "end",
+                            "scheduled_start",
+                            "scheduled_end",
+                            "departure_track",
+                            "arrival_track",
+                            "scheduled_departure_track",
+                            "scheduled_arrival_track",
+                            "skipped_stops",
+                        )
+                    )
+                    for leg in trip.get("legs", [])
+                ),
+                tuple(trip.get("warnings", [])),
+            )
+            for trip in travel
+        ),
+        key=repr,
+    )
 
 
 def replan(
@@ -923,7 +967,7 @@ def replan(
     ``mode = "global"`` (explicit request only) drops stability; ``allow_today`` (explicit
     request to reorganise the current day, implied by global) lets today's placements move
     without a proposal. Locked and under-way items stay protected in every mode."""
-    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": REPLAN_LOCK})
+    lock_replan(session)
     requested = replan_request(session)
     routing = access_routing(session, routing)  # access points + realistic journeys only
     refresh_task_sessions(session, now, tz)
@@ -932,8 +976,17 @@ def replan(
     loaded = build_input(session, now, tz, allow_today=allow_today or mode == "global")
     previous = active_version(session)
     previous_summary = {} if previous is None else previous.summary
+    horizon = Interval(now, loaded.data.horizon_end)
     before_blocks = _block_keys(session, previous)
-    before_activities = {t.activity_id: t.previous_start for t in loaded.data.activities}
+    before_activities = previous_summary.get("flexible_slots")
+    if before_activities is None:
+        before_activities = _flexible_slots(session, horizon) if previous else {}
+    else:
+        before_activities = {
+            identifier: slot
+            for identifier, slot in before_activities.items()
+            if utc(horizon.start) <= datetime.fromisoformat(slot[0]) < utc(horizon.end)
+        }
     if mode == "global":
         loaded = replace(
             loaded,
@@ -973,6 +1026,9 @@ def replan(
         "unplanned_minutes": outcome.unplanned_minutes,
         "hard_deadline_misses": [t for t in outcome.hard_deadline_misses if t not in spread],
         "deadline_misses": misses,
+        "study_effort": {}
+        if result is None
+        else {task: asdict(effort) for task, effort in result.study_effort.items()},
         "behind_regular_pace": behind,
         "outside_hours": outcome.outside_hours,
         "deadline_capacity": {k: v for k, v in outcome.deadline_capacity.items() if k in misses},
@@ -1051,46 +1107,45 @@ def replan(
 
     if usable:
         session.flush()
-        moved = [
-            placed.activity_id
-            for placed in outcome.activities
-            if (before := before_activities.get(placed.activity_id)) is not None
-            and utc(before) != utc(placed.start)
-        ]
-        diff = _schedule_diff(before_blocks, _block_keys(session, version), moved)
+        after_activities = _flexible_slots(session, horizon)
+        shared = before_activities.keys() & after_activities.keys()
+        diff = _schedule_diff(before_blocks, _block_keys(session, version))
         diff.update(
-            added_activities=[
-                p.activity_id
-                for p in outcome.activities
-                if before_activities.get(p.activity_id) is None
-            ],
-            removed_activities=[
-                a for a in outcome.unplaced_activities if before_activities.get(a) is not None
-            ],
+            added_activities=sorted(after_activities.keys() - before_activities.keys()),
+            removed_activities=sorted(before_activities.keys() - after_activities.keys()),
+            moved_activities=sorted(
+                a for a in shared if before_activities[a][0] != after_activities[a][0]
+            ),
+            resized_activities=sorted(
+                a for a in shared if before_activities[a][1] != after_activities[a][1]
+            ),
             new_deadline_misses=sorted(
                 set(misses) - set(previous_summary.get("deadline_misses", []))
             ),
             resolved_deadline_misses=sorted(
                 set(previous_summary.get("deadline_misses", [])) - set(misses)
             ),
-            journeys_changed=summary["travel"] != previous_summary.get("travel", []),
+            journeys_changed=(
+                _journey_signature(summary["travel"])
+                != _journey_signature(previous_summary.get("travel", []))
+            ),
         )
-        summary["diff"] = diff
-        version.summary = dict(summary)
+        version.summary = {**summary, "flexible_slots": after_activities, "diff": diff}
     keep = _publish_conflicts(session, outcome.conflicts, tz)
     if usable:
         _publish_issues(session, outcome, now, tz, keep)
         subjects = {str(t.id): t.subject for t in session.scalars(select(StudyTaskRow))}
         for task in misses:
-            minutes = outcome.unplanned_minutes.get(task, 0)
+            minutes = outcome.deadline_capacity.get(task, {}).get(
+                "uncovered_at_deadline_minutes", outcome.unplanned_minutes.get(task, 0)
+            )
             strict = task in outcome.hard_deadline_misses
             notify(
                 session,
                 "deadline",
-                "Échéance impossible à tenir" + (" (stricte)" if strict else ""),
-                f"« {subjects.get(task, task)} » : {minutes} min ne tiennent pas avant "
-                "l'échéance. Le réalisable est planifié ; rien n'est placé après l'échéance sans "
-                "votre accord : demandez les alternatives à Tempo (reporter, réduire...).",
+                "Échéance non couverte par le planning" + (" (stricte)" if strict else ""),
+                f"« {subjects.get(task, task)} » : {minutes} min restent non couvertes avant "
+                "l'échéance dans ce calcul. Demandez les alternatives à Tempo.",
                 f"deadline:{task}:{now.astimezone(tz).date().isoformat()}",
             )
         for warning in loaded.warnings:

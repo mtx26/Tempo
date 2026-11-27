@@ -3,18 +3,21 @@
 Runs the real FastAPI app against the per-session PostgreSQL test database.
 """
 
+import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
-from sqlalchemy.engine import Engine
+from sqlalchemy import delete, text
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 
 from tempo.api.app import create_app
 from tempo.config import Settings
-from tempo.db.models import AuditEntry, PhonePositionRow, StudyTaskRow
+from tempo.db.models import AuditEntry, JobRunRow, PhonePositionRow, StudyTaskRow
 
 pytestmark = pytest.mark.integration
 
@@ -70,6 +73,81 @@ def test_diagnostics_is_private_and_reuses_postgresql_stats(api: TestClient) -> 
     assert body["postgresql"]["connections"] >= 1
     assert body["postgresql"]["waiting_locks"] >= 0
     assert body["motis"]["status"] == "unconfigured"
+    assert body["worker"]["status"] == "missing_heartbeat"
+
+
+def test_diagnostics_distinguishes_upstream_state_and_redacts_backend_details(
+    database_url: str, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 11, 27, 17, tzinfo=UTC)
+    old = now - timedelta(minutes=6)
+    private = "private-upstream-data"
+    feed_name = "tec/gtfs-rt-trip-updates"
+
+    def health(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "motis.test":
+            raise httpx2.ConnectError("unreachable", request=request)
+        return httpx2.Response(
+            200,
+            json={
+                "internal": private,
+                "feeds": {
+                    feed_name: {"state": "stale", "age_seconds": 91, "last_error": private},
+                    private: {"state": "operational"},
+                },
+            },
+        )
+
+    client = httpx2.Client
+    monkeypatch.setattr(
+        "tempo.api.app.httpx2.Client",
+        lambda **kw: client(**kw, transport=httpx2.MockTransport(health)),
+    )
+    role = f"tempo_diag_{uuid.uuid4().hex[:10]}"
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE ROLE {role} LOGIN"))
+        conn.execute(text(f"GRANT SELECT ON job_run, app_setting TO {role}"))
+        with Session(bind=conn) as session:
+            session.add(
+                JobRunRow(
+                    name="reminders",
+                    last_started_at=old,
+                    last_finished_at=old,
+                    last_status="error",
+                    last_error=f"JobError: {private}",
+                    last_success_at=old - timedelta(minutes=1),
+                )
+            )
+            session.flush()
+    restricted = make_url(database_url).set(username=role, password=None)
+    app = create_app(
+        Settings(
+            api_token=TOKEN,
+            database_url=restricted.render_as_string(hide_password=False),
+            motis_url="http://motis.test",
+            rt_relay_url="http://relay.test",
+        )
+    )
+    app.state.clock = lambda: now
+    try:
+        with TestClient(app) as api:
+            response = api.get("/v1/diagnostics", headers=AUTH)
+            assert response.status_code == 200
+            assert private not in response.text
+            body = response.json()
+            assert not body["motis"]["reachable"] and not body["motis"]["operational"]
+            relay = body["gtfs_realtime"]
+            assert relay["reachable"] and not relay["operational"] and relay["freshness"] == "stale"
+            assert list(relay["feeds"]) == [feed_name]
+            assert body["worker"]["status"] == "stale_heartbeat"
+            job = body["postgresql"]["jobs"][0]
+            assert job["last_error"] == "JobError" and job["last_success"]
+    finally:
+        with engine.begin() as conn:
+            conn.execute(delete(JobRunRow).where(JobRunRow.name == "reminders"))
+            # The role name is generated from a UUID above.
+            conn.execute(text(f"REVOKE SELECT ON job_run, app_setting FROM {role}"))  # noqa: S608
+            conn.execute(text(f"DROP ROLE {role}"))
 
 
 def test_created_task_has_soft_target_by_default(api: TestClient) -> None:

@@ -487,5 +487,6 @@ class JobRunRow(Base):
     name: Mapped[str] = mapped_column(String(50), primary_key=True)
     last_started_at: Mapped[datetime | None]
     last_finished_at: Mapped[datetime | None]
+    last_success_at: Mapped[datetime | None]
     last_status: Mapped[str] = mapped_column(String(20), default="never", server_default="never")
     last_error: Mapped[str | None] = mapped_column(Text)

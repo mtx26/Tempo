@@ -14,17 +14,22 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
+from pydantic import ValidationError
 
 from tempo.ai.llm import log_usage, selected_model
 from tempo.assistant.catalog import (
     CATALOG,
+    PREVIEWABLE_OPERATIONS,
     OpContext,
+    OpError,
+    PreviewIn,
     pending_question,
     run_operation,
+    stage_plan_changes,
     tool_definitions,
 )
 from tempo.const import (
@@ -100,15 +105,16 @@ mode global seulement s'il demande explicitement de tout réorganiser. Annonce c
 planifié, ce qui reste non planifié et pourquoi (explain_plan), les questions et les \
 propositions en attente, sans présenter un plan partiel comme complet.
 - Avant une annulation, une modification de plusieurs éléments ou un changement durable de \
-disponibilité, utilise preview_plan_changes après les clarifications. Dis quels déplacements, \
-durées, trajets ou échéances changeraient et demande l'accord sur la simulation avant de \
-l'appliquer. Les identifiants créés par une simulation ne sont pas réutilisables. Une simulation \
-rejetée ou inconclusive ne prédit aucun résultat publiable.
+disponibilité, appelle uniquement preview_plan_changes avec toutes les étapes après les \
+clarifications. Tempo affiche le résultat et le code d'accord. Les identifiants créés par \
+une simulation ne sont pas réutilisables.
 - Une demande explicite autorise son périmètre, pas ses conséquences protégées : les \
-propositions (list_proposals) ne sont acceptées ou refusées (decide_proposal) que sur réponse \
-explicite de l'utilisateur, en identifiant laquelle.
+propositions (list_proposals) sont acceptées ou refusées par « confirme » ou « refuse » suivi \
+du code de proposition (les huit premiers caractères de son identifiant).
 - Si un outil renvoie une erreur, explique-la ; ne prétends jamais qu'une modification a \
 réussi sans résultat ok. Distingue impossibilité, calcul inconclusif et panne (routage, LLM).
+- Dans un itinéraire, indique qu'une prévision `unverified` a été relevée au moment du calcul \
+et que sa fraîcheur individuelle est inconnue. Une prévision `stale` doit être vérifiée.
 - Le GPS réel (get_position), frais et précis, prime sur la résidence prévue pour un trajet \
 immédiat, sans modifier l'alternance ; il n'est jamais remplacé par une intention ; \
 get_location dit où l'utilisateur est ou sera à un instant et d'où vient l'information.
@@ -133,6 +139,12 @@ class AgentReply:
     text: str
     operations: list[dict[str, Any]] = field(default_factory=list)
     """Operations run, in order: name, ok, error."""
+    proposal_id: str | None = None
+
+
+class TurnInterruptedError(Exception):
+    def __init__(self, reply: AgentReply) -> None:
+        self.reply = reply
 
 
 class Assistant(Protocol):
@@ -225,10 +237,26 @@ class ToolLoopAssistant:
         except LLMUnavailableError:
             del ctx.changed[before_change:]
             raise
+        except TurnInterruptedError as exc:
+            del ctx.changed[before_change:]
+            return exc.reply
 
     def _reply(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
         before = pending_question(ctx.session)
-        answer = self._answer(ctx, text, history)
+        initial_changes = len(ctx.changed)
+        candidates: list[ToolCall] = []
+        working = ctx.session.begin_nested()
+        answer, draft = self._answer(ctx, text, history, candidates)
+        if draft is not None or _requires_approval(candidates):
+            working.rollback()
+            del ctx.changed[initial_changes:]
+            arguments = (
+                draft
+                if draft is not None
+                else {"changes": [{"name": c.name, "arguments": c.arguments} for c in candidates]}
+            )
+            return self._propose(ctx, answer, arguments)
+        working.commit()
         changed = list(ctx.changed)
         if before is not None and before["conversation"]:
             # The user has now answered the conversation's own clarification (it was given to
@@ -255,7 +283,68 @@ class ToolLoopAssistant:
             answer.text = f"{answer.text}\n{waiting['question']}".strip()
         return answer
 
-    def _answer(self, ctx: OpContext, text: str, history: list[dict[str, str]]) -> AgentReply:
+    def _propose(self, ctx: OpContext, answer: AgentReply, arguments: dict[str, Any]) -> AgentReply:
+        try:
+            draft = PreviewIn.model_validate(arguments)
+            outcome = run_operation(ctx, "preview_plan_changes", draft.model_dump(mode="json"))
+            if not outcome["ok"]:
+                raise OpError(outcome["error"])
+            preview = outcome["result"]
+            proposal = stage_plan_changes(ctx, draft, preview)
+        except (ValidationError, OpError) as exc:
+            return AgentReply(f"Simulation impossible. {exc}", answer.operations)
+        diff = preview.get("diff") or {}
+        effects = []
+        for simulated in preview["simulated_operations"]:
+            result = simulated["preview_result"]
+            entity = result.get("activity") or result.get("task") or result.get("reminder") or {}
+            label = entity.get("title") or result.get("title")
+            operation = simulated["name"]
+            action = {
+                "cancel_event": "Annuler",
+                "create_event": "Ajouter l'activité",
+                "update_event": "Modifier l'activité",
+                "create_task": "Ajouter la tâche",
+                "update_task": "Modifier la tâche",
+                "set_weekly_availability": "Remplacer les disponibilités hebdomadaires",
+                "set_category_windows": "Remplacer les créneaux de la catégorie",
+            }.get(operation, operation.replace("_", " "))
+            if label:
+                action += f" « {label} »"
+            if (
+                minutes := entity.get("duration_minutes", entity.get("estimated_minutes"))
+            ) is not None:
+                action += f" ({minutes} min)"
+            if (start := entity.get("planned_start") or entity.get("window_start")) is not None:
+                at = datetime.fromisoformat(start).astimezone(ctx.tz)
+                action += f" le {at:%d/%m à %H:%M}"
+            if target := entity.get("target_date"):
+                action += f", échéance le {target}"
+            if "windows" in result:
+                action += f" ({result['windows']} créneau(x))"
+            effects.append(action)
+        if not effects:
+            effects.append("Recalcul du planning")
+        status = (
+            f"{diff.get('added_blocks', 0)} séance(s) ajoutée(s), "
+            f"{diff.get('removed_blocks', 0)} retirée(s), "
+            f"{diff.get('moved_blocks', 0)} déplacée(s). "
+            f"{len(diff.get('moved_activities', []) or [])} activité(s) déplacée(s), "
+            f"{len(diff.get('resized_activities', []) or [])} durée(s) modifiée(s). "
+            f"{sum((preview.get('unplanned_minutes') or {}).values())} minutes non planifiées, "
+            f"{len(preview.get('deadline_misses') or [])} échéance(s) manquée(s)."
+        )
+        code = str(proposal)[:8]
+        return AgentReply(
+            f"Aperçu à confirmer. {'. '.join(effects)}. {status} "
+            f"Dites « confirme {code} » ou « refuse {code} ».",
+            answer.operations,
+            str(proposal),
+        )
+
+    def _answer(
+        self, ctx: OpContext, text: str, history: list[dict[str, str]], candidates: list[ToolCall]
+    ) -> tuple[AgentReply, dict[str, Any] | None]:
         local = ctx.now.astimezone(ctx.tz)
         waiting = pending_question(ctx.session)
         note = (
@@ -275,32 +364,73 @@ class ToolLoopAssistant:
         for _ in range(MAX_AGENT_STEPS):
             remaining = deadline - self._clock()
             if remaining < MIN_CALL_SECONDS:
-                return AgentReply(_partial("Je manque de temps pour finir", operations), operations)
+                _interrupt("Je manque de temps pour finir", operations)
             turn = self._model.step(conversation, remaining)
             if turn.refused:
                 raise LLMUnavailableError("demande refusée par le modèle")
+            if turn.truncated:
+                _interrupt("Réponse du modèle tronquée", operations)
             if not turn.calls:
-                answer = turn.text + (" (réponse interrompue)" if turn.truncated else "")
-                return AgentReply(answer.strip() or "C'est fait.", operations)
+                if candidates and clarification(turn.text):
+                    _interrupt(turn.text, operations)
+                return AgentReply(turn.text.strip() or "C'est fait.", operations), None
             results = []
             for call in turn.calls:
-                outcome = run_operation(ctx, call.name, call.arguments)
+                if call.name == "preview_plan_changes":
+                    if candidates or len(turn.calls) != 1 or any(not op["ok"] for op in operations):
+                        _interrupt("L'aperçu doit contenir toutes les étapes du lot", operations)
+                    return AgentReply("", operations), call.arguments
+                op = CATALOG.get(call.name)
+                if op is not None and op.mutates and call.name not in PREVIEWABLE_OPERATIONS:
+                    outcome = {
+                        "ok": False,
+                        "error": "une décision explicite de l'utilisateur est nécessaire",
+                    }
+                else:
+                    outcome = run_operation(ctx, call.name, call.arguments)
+                if outcome["ok"] and op is not None and op.mutates:
+                    options = call.arguments
+                    if (
+                        call.name != "plan_now"
+                        or options.get("allow_today")
+                        or options.get("mode") == "global"
+                    ):
+                        candidates.append(call)
                 operations.append(
                     {"name": call.name, "ok": outcome["ok"], "error": outcome.get("error")}
                 )
                 results.append((call, local_times(outcome, ctx.tz)))
+                if ctx.changed and any(not operation["ok"] for operation in operations):
+                    _interrupt(f"Lot interrompu lors de {call.name}", operations)
             self._model.add_results(conversation, results)
-        return AgentReply(
-            _partial("Demande trop longue à traiter en une fois", operations), operations
+        _interrupt("Demande trop longue à traiter en une fois", operations)
+
+
+def _requires_approval(candidates: list[ToolCall]) -> bool:
+    return len(candidates) > 1 or any(
+        call.name
+        not in {
+            "create_event",
+            "create_task",
+            "create_reminder",
+            "log_work",
+            "report_activity",
+            "acknowledge_notification",
+        }
+        or (
+            call.name == "create_event"
+            and bool(call.arguments.get("locked") or call.arguments.get("rrule"))
         )
+        for call in candidates
+    )
 
 
-def _partial(reason: str, operations: list[dict[str, Any]]) -> str:
-    """Honest end of an unfinished request: what was really done, nothing more."""
-    done = [o["name"] for o in operations if o["ok"]]
-    return (
-        f"{reason} ; opérations effectuées : {', '.join(done) or 'aucune'}. "
-        "Demandez-moi la suite ou l'état du planning."
+def _interrupt(reason: str, operations: list[dict[str, Any]]) -> NoReturn:
+    raise TurnInterruptedError(
+        AgentReply(
+            f"{reason.rstrip('.')}. Aucune modification appliquée.",
+            [{**operation, "rolled_back": operation["ok"]} for operation in operations],
+        )
     )
 
 
@@ -384,9 +514,13 @@ class GeminiChat:
         if feedback is not None and feedback.block_reason:
             return ModelTurn([], refused=True)
         candidate = (response.candidates or [None])[0]
-        if candidate is None or candidate.content is None:
+        if candidate is None:
             return ModelTurn([], refused=True)
         reason = str(getattr(candidate.finish_reason, "name", candidate.finish_reason or ""))
+        if reason == "MAX_TOKENS":
+            return ModelTurn([], truncated=True)
+        if candidate.content is None:
+            return ModelTurn([], refused=True)
         if reason in GEMINI_BLOCKED:
             return ModelTurn([], refused=True)
         conversation.contents.append(candidate.content)  # unchanged: keeps thought signatures
@@ -401,7 +535,7 @@ class GeminiChat:
             if p.function_call is not None and p.function_call.name
         ]
         text = "\n".join(p.text for p in parts if p.text and not p.thought).strip()
-        return ModelTurn(calls, text, truncated=reason == "MAX_TOKENS")
+        return ModelTurn(calls, text)
 
     def add_results(
         self, conversation: GeminiConversation, results: list[tuple[ToolCall, dict[str, Any]]]

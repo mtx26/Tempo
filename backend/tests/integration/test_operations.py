@@ -153,6 +153,48 @@ def test_compound_preview_uses_real_plan_and_rolls_back_all_steps(session: Sessi
     assert active is not None and active.id == first.id
 
 
+def test_flexible_activity_diff_distinguishes_resize_and_cancellation(session: Session) -> None:
+    seed(session)
+    activity = ok(
+        session,
+        "create_event",
+        title="Bibliothèque",
+        scheduling="flexible",
+        window_start="2026-12-09T17:00",
+        window_end="2026-12-09T22:00",
+        duration_minutes=45,
+        remote=True,
+    )["activity"]
+    identifier = activity["id"]
+    first = ok(session, "plan_now")
+    assert identifier in first["diff"]["added_activities"]
+    ok(session, "update_event", activity_id=identifier, duration_minutes=60)
+    revised = ok(session, "plan_now")
+    assert revised["diff"]["resized_activities"] == [identifier]
+    assert revised["diff"]["added_activities"] == revised["diff"]["removed_activities"] == []
+    ok(session, "cancel_event", activity_id=identifier)
+    cancelled = ok(session, "plan_now")
+    assert cancelled["diff"]["removed_activities"] == [identifier]
+
+
+def test_block_diff_leaves_repeated_equal_durations_unmatched() -> None:
+    from tempo.planning.service import _journey_signature, _schedule_diff
+
+    def block(start: int) -> tuple[str, str, str]:
+        return (
+            "t",
+            NOW.replace(hour=start).isoformat(),
+            NOW.replace(hour=start + 1).isoformat(),
+        )
+
+    diff = _schedule_diff({block(8), block(12)}, {block(9), block(13)})
+    assert (diff["added_blocks"], diff["removed_blocks"], diff["moved_blocks"]) == (2, 2, 0)
+    leg = {"mode": "BUS", "line": "71"}
+    known = {"status": "routed", "legs": [leg]}
+    enriched = {**known, "schema_version": 2, "legs": [{**leg, "extra": "new"}]}
+    assert _journey_signature([known]) == _journey_signature([enriched])
+
+
 def test_address_search_reuses_locations_and_reports_ambiguity(session: Session) -> None:
     seed(session)
     saved = ok(session, "find_address", text="Auditoire A.1")

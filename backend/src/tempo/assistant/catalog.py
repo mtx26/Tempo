@@ -14,13 +14,13 @@ import re
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime, time, timedelta
-from typing import Annotated, Any, Literal
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Annotated, Any, Literal, get_args
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import String, cast, delete, select
 from sqlalchemy.orm import Session
 
 from tempo.const import (
@@ -30,6 +30,7 @@ from tempo.const import (
     EXAM_SETTING,
     MAX_ALTERNATIVE_TASKS,
     MAX_SCHEDULE_SPAN,
+    PLAN_PROPOSAL_VALIDITY,
     POSTPONE_STEPS_DAYS,
     SWITCHES_SETTING,
     TEMPORARY_SETTING,
@@ -61,7 +62,9 @@ from tempo.db.store import (
     get_setting,
     job_statuses,
     open_questions,
+    pending_proposals,
     place_directory,
+    propose,
     reference_residence,
     request_replan,
     residence_alternation,
@@ -84,7 +87,13 @@ from tempo.domain.ops import (
     update_series,
 )
 from tempo.planning.proposals import decide, proposal_out
-from tempo.planning.service import PlanningNotConfiguredError, lock_block, release_block, replan
+from tempo.planning.service import (
+    PlanningNotConfiguredError,
+    lock_block,
+    lock_replan,
+    release_block,
+    replan,
+)
 from tempo.planning.views import schedule_items, summary
 from tempo.scheduler.model import STUDY_PREFERENCE_KEYS, Preferences, TrainingPreferences
 from tempo.transport.access import Access
@@ -92,6 +101,7 @@ from tempo.transport.itinerary import (
     Objective,
     TripQuery,
     connection_margins,
+    describe_travel,
     find_trips,
     journey_notes,
     leg_payload,
@@ -115,6 +125,7 @@ class OpContext:
     actor: str
     routing: RoutingProvider | None = None
     changed: list[str] = field(default_factory=list)
+    user_id: str | None = None
     """Mutating operations run in this context (for the re-plan request and the audit)."""
 
 
@@ -228,7 +239,11 @@ def _range(ctx: OpContext, body: RangeIn) -> tuple[datetime, datetime]:
     mutates=False,
 )
 def get_schedule(ctx: OpContext, body: RangeIn) -> dict[str, Any]:
-    return {"items": schedule_items(ctx.session, *_range(ctx, body), as_of=ctx.now)}
+    items = schedule_items(ctx.session, *_range(ctx, body), as_of=ctx.now)
+    for item in items:
+        if item["type"] == "travel":
+            item["travel_details"] = describe_travel(item, ctx.tz)
+    return {"items": items}
 
 
 @operation(
@@ -535,11 +550,18 @@ class ProposalsIn(Strict):
     mutates=False,
 )
 def list_proposals(ctx: OpContext, body: ProposalsIn) -> dict[str, Any]:
-    rows = ctx.session.scalars(
-        select(ProposalRow)
-        .where(ProposalRow.status == body.status)
-        .order_by(ProposalRow.created_at)
+    scope = (
+        pending_proposals(ctx.now)
+        if body.status == "pending"
+        else ProposalRow.status == body.status
     )
+    query = select(ProposalRow).where(scope).order_by(ProposalRow.created_at)
+    if ctx.user_id is not None:
+        query = query.where(
+            (ProposalRow.kind != "plan_changes")
+            | (ProposalRow.details["user_id"].astext == ctx.user_id)
+        )
+    rows = ctx.session.scalars(query)
     return {"proposals": [proposal_out(r) for r in rows]}
 
 
@@ -649,7 +671,7 @@ def explain_plan(ctx: OpContext, _: NoInput) -> dict[str, Any]:
 def get_sources_status(ctx: OpContext, _: NoInput) -> dict[str, Any]:
     sync = ctx.session.scalars(select(SyncRun).order_by(SyncRun.started_at.desc())).first()
     return {
-        "jobs": job_statuses(ctx.session, include_error=True),
+        "jobs": job_statuses(ctx.session),
         "last_ical_sync": None
         if sync is None
         else {
@@ -1079,7 +1101,7 @@ def cancel_event(ctx: OpContext, body: CancelEventIn) -> dict[str, Any]:
         if row.series_id is not None:
             edit_occurrence(ctx.session, row, cancel=True)
         row.status = "cancelled"
-        return {"cancelled": 1}
+        return {"cancelled": 1, "title": row.title}
     series = ctx.session.get(RecurrenceSeriesRow, row.series_id)
     if series is None:
         raise OpError("série introuvable")
@@ -2312,17 +2334,36 @@ class DecideIn(Strict):
     "decide without an explicit answer. A proposal whose inputs changed becomes obsolete.",
     DecideIn,
     mutates=True,
-    replan=True,
 )
 def decide_proposal(ctx: OpContext, body: DecideIn) -> dict[str, Any]:
+    code = body.proposal_id
+    if re.fullmatch(r"[0-9a-f]{8}", code):
+        matches = list(
+            ctx.session.scalars(
+                select(ProposalRow.id).where(cast(ProposalRow.id, String).startswith(code)).limit(2)
+            )
+        )
+        if len(matches) != 1:
+            raise OpError("code de proposition introuvable ou ambigu")
+        code = str(matches[0])
+    applied: list[str] = []
+
+    def apply(details: dict[str, Any]) -> None:
+        batch = PreviewIn.model_validate({"changes": details["plan_changes"]})
+        _run_plan_changes(ctx, batch, simulate=False)
+        applied.extend(change.name for change in batch.changes)
+
     return {
         "proposal": decide(
             ctx.session,
-            _uuid(body.proposal_id, "proposal"),
+            _uuid(code, "proposal"),
             body.approve,
             actor=ctx.actor,
             now=ctx.now,
-        )
+            user_id=ctx.user_id,
+            apply_plan_changes=apply if ctx.user_id is not None else None,
+        ),
+        "applied_operations": applied,
     }
 
 
@@ -2430,6 +2471,7 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
             "unplanned_minutes": plan.get("unplanned_minutes"),
             "deadline_misses": plan.get("deadline_misses"),
             "deadline_capacity": plan.get("deadline_capacity"),
+            "study_effort": plan.get("study_effort"),
             "hard_deadline_misses": plan.get("hard_deadline_misses"),
             "unplaced_activities": plan.get("unplaced_activities"),
             "pending_approval": plan.get("pending_approval"),
@@ -2459,15 +2501,37 @@ def plan_now(ctx: OpContext, body: PlanIn) -> dict[str, Any]:
 
 
 class PreviewChange(Strict):
+    # Audit additions to this allowlist: only transactional SQL and read-only routing.
     name: Literal[
         "create_event",
         "update_event",
         "cancel_event",
+        "set_lock",
+        "report_activity",
+        "confirm_activity",
         "create_task",
         "update_task",
+        "log_work",
+        "upsert_place",
+        "delete_place",
+        "update_settings",
         "set_class_attendance",
         "set_weekly_availability",
         "set_category_windows",
+        "add_availability_exception",
+        "delete_availability_exception",
+        "set_planned_location",
+        "clear_planned_location",
+        "set_temporary_access",
+        "clear_temporary_access",
+        "set_residence_alternation",
+        "set_residence_switch",
+        "clear_residence_alternation",
+        "create_reminder",
+        "cancel_reminder",
+        "set_exam",
+        "acknowledge_notification",
+        "plan_now",
     ]
     arguments: dict[str, Any]
 
@@ -2476,31 +2540,77 @@ class PreviewIn(Strict):
     changes: list[PreviewChange] = Field(min_length=1, max_length=5)
 
 
+PREVIEWABLE_OPERATIONS = frozenset(get_args(PreviewChange.model_fields["name"].annotation))
+
+
 @operation(
     "preview_plan_changes",
     "Simulate a compound planning change before applying it. Use the exact arguments of "
-    "each operation. Returns the plan comparison and pending approvals, with no changes saved.",
+    "each operation. Returns the plan comparison and pending approvals, with no changes applied.",
     PreviewIn,
     mutates=False,
 )
 def preview_plan_changes(ctx: OpContext, body: PreviewIn) -> dict[str, Any]:
-    preview = replace(ctx, changed=[])
+    lock_replan(ctx.session)
     savepoint = ctx.session.begin_nested()
     try:
-        simulated = []
-        for index, change in enumerate(body.changes, start=1):
-            outcome = run_operation(preview, change.name, change.arguments)
-            if not outcome["ok"]:
-                raise OpError(f"simulation interrompue à l'étape {index} : {outcome['error']}")
-            simulated.append({"name": change.name, "preview_result": outcome["result"]})
-        return {**plan_now(preview, PlanIn(dry_run=True)), "simulated_operations": simulated}
+        return _run_plan_changes(replace(ctx, changed=[]), body, simulate=True)
     finally:
         savepoint.rollback()
+
+
+def _run_plan_changes(ctx: OpContext, body: PreviewIn, *, simulate: bool) -> dict[str, Any]:
+    execution = replace(ctx, changed=[])
+    results = []
+    options = PlanIn(dry_run=simulate)
+    for index, change in enumerate(body.changes, start=1):
+        if change.name == "plan_now":
+            if index != len(body.changes):
+                raise OpError("le recalcul doit être la dernière étape")
+            options = PlanIn.model_validate(change.arguments)
+            if options.dry_run:
+                raise OpError(
+                    "un recalcul simulé ne peut pas faire partie des changements à appliquer"
+                )
+            options = options.model_copy(update={"dry_run": simulate})
+            break
+        outcome = run_operation(execution, change.name, change.arguments)
+        if not outcome["ok"]:
+            raise OpError(f"lot interrompu à l'étape {index} : {outcome['error']}")
+        results.append({"name": change.name, "preview_result": outcome["result"]})
+    result = plan_now(execution, options)
+    if not simulate and result.get("state") != "active":
+        raise OpError("le recalcul n'a pas abouti, le lot est annulé")
+    if not simulate:
+        ctx.changed.extend(execution.changed)
+    return {**result, "simulated_operations": results}
+
+
+def stage_plan_changes(ctx: OpContext, body: PreviewIn, preview: dict[str, Any]) -> uuid.UUID:
+    if preview.get("state") != "active":
+        raise OpError("le calcul n'a pas produit de planning valide à confirmer")
+    key = uuid.uuid4()
+    proposal_id = propose(
+        ctx.session,
+        "plan_changes",
+        "Changements de planning à confirmer",
+        {
+            "plan_changes": body.model_dump(mode="json")["changes"],
+            "user_id": ctx.user_id,
+            "expires_at": (ctx.now + PLAN_PROPOSAL_VALIDITY).astimezone(UTC).isoformat(),
+            "diff": preview.get("diff"),
+        },
+        f"plan_changes:{key}",
+    )
+    if proposal_id is None:
+        raise OpError("la proposition n'a pas pu être enregistrée")
+    return proposal_id
 
 
 def _simulate(ctx: OpContext, change: Callable[[StudyTaskRow], None], task_id: str) -> Any:
     """Apply ``change`` to the task, re-plan, and roll everything back (nothing published)."""
     assert ctx.routing is not None  # noqa: S101 - checked by the caller
+    lock_replan(ctx.session)
     savepoint = ctx.session.begin_nested()
     try:
         row = ctx.session.get(StudyTaskRow, uuid.UUID(task_id))
@@ -2651,7 +2761,8 @@ def _journey_out(journey: Journey) -> dict[str, Any]:
         "arrival": _iso(journey.arrival),
         "duration_minutes": int(journey.duration.total_seconds() // 60),
         "transfers": journey.transfers,
-        "realtime": journey.uses_realtime,
+        "realtime": False,
+        "realtime_reported": journey.uses_realtime,
         "legs": [leg_payload(leg, operator_key="operator") for leg in journey.legs],
         "connections": connection_margins(journey),
         "warnings": journey_notes(journey).specific,
@@ -2848,6 +2959,7 @@ def tool_definitions() -> list[dict[str, Any]]:
             "input_schema": op.model.model_json_schema(),
         }
         for op in sorted(CATALOG.values(), key=lambda o: o.name)
+        if op.name != "decide_proposal"
     ]
 
 
@@ -2888,27 +3000,31 @@ def run_operation(ctx: OpContext, name: str, arguments: dict[str, Any]) -> dict[
     except ValidationError as exc:
         details = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:5])
         return {"ok": False, "error": f"arguments invalides : {details}"}
-    savepoint = ctx.session.begin_nested()
+    if op.mutates:
+        lock_replan(ctx.session)
+    writes = op.mutates and not (isinstance(body, PlanIn) and body.dry_run)
     try:
-        result = op.handler(ctx, body)
-        ctx.session.flush()
-    except OpError as exc:
-        savepoint.rollback()
-        return {"ok": False, "error": str(exc)}
-    except DomainError as exc:
-        savepoint.rollback()
+        with ctx.session.begin_nested():
+            result = op.handler(ctx, body)
+            if writes:
+                entity, entity_id = _audit_target(result)
+                audit(
+                    ctx.session,
+                    ctx.actor,
+                    f"op:{name}",
+                    entity,
+                    entity_id,
+                    fields=sorted(arguments),
+                )
+                if op.replan:
+                    request_replan(ctx.session, ctx.now)
+            ctx.session.flush()
+    except (OpError, DomainError, ValidationError) as exc:
         return {"ok": False, "error": str(exc)}
     except HTTPException as exc:
-        savepoint.rollback()
         return {"ok": False, "error": str(exc.detail)}
-    if savepoint.is_active:
-        savepoint.commit()
-    if op.mutates and not arguments.get("dry_run"):
+    if writes:
         ctx.changed.append(name)
-        entity, entity_id = _audit_target(result)
-        audit(ctx.session, ctx.actor, f"op:{name}", entity, entity_id, fields=sorted(arguments))
-        if op.replan:
-            request_replan(ctx.session, ctx.now)
     return {"ok": True, "result": result}
 
 

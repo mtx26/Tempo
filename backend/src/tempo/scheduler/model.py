@@ -40,6 +40,7 @@ class StudyDemand:
     when there is not enough time for everything)."""
     not_before: datetime | None = None
     """No block before this instant (the user declined a same-day rearrangement)."""
+    completed_minutes: int | None = None
 
     def __post_init__(self) -> None:
         if self.remaining_minutes < 0:
@@ -254,6 +255,39 @@ class PlanStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class StudyEffort:
+    reserved_minutes: int
+    before_deadline_minutes: int | None
+    after_deadline_minutes: int
+    remaining_minutes: int
+    unplanned_minutes: int
+    completed_minutes: int | None
+
+
+def study_effort(demands: list[StudyDemand], blocks: list[PlannedBlock]) -> dict[str, StudyEffort]:
+    slots: dict[str, list[PlannedBlock]] = {}
+    for block in blocks:
+        slots.setdefault(block.task_id, []).append(block)
+    result = {}
+    for demand in demands:
+        reserved = before = 0
+        for block in slots.get(demand.task_id, []):
+            reserved += int(block.duration.total_seconds() // 60)
+            if demand.target is not None:
+                end = min(utc(block.end), utc(demand.target))
+                before += max(0, int((end - utc(block.start)).total_seconds() // 60))
+        result[demand.task_id] = StudyEffort(
+            reserved,
+            before if demand.target is not None else None,
+            reserved - before if demand.target is not None else 0,
+            demand.remaining_minutes,
+            max(0, demand.remaining_minutes - reserved),
+            demand.completed_minutes,
+        )
+    return result
+
+
+@dataclass(frozen=True, slots=True)
 class PlanResult:
     status: PlanStatus
     blocks: list[PlannedBlock]
@@ -269,3 +303,4 @@ class PlanResult:
     never placed after the deadline without the user's approval."""
     solver_status: str = ""
     objective: float | None = None
+    study_effort: dict[str, StudyEffort] = field(default_factory=dict)

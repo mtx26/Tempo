@@ -47,9 +47,13 @@ class FeedSummary:
 
 @dataclass(frozen=True, slots=True)
 class RepairResult:
-    payload: bytes
     summary: FeedSummary
     start_times_removed: int
+    message: gtfs_realtime_pb2.FeedMessage
+
+    @property
+    def payload(self) -> bytes:
+        return self.message.SerializeToString()
 
 
 def decode(raw: bytes) -> gtfs_realtime_pb2.FeedMessage:
@@ -103,6 +107,21 @@ def check_fresh(summary: FeedSummary, now: datetime, max_age: timedelta = MAX_FE
         raise InvalidFeedError("feed timestamp is in the future")
 
 
+def entity_freshness(
+    entity: gtfs_realtime_pb2.FeedEntity, now: datetime, max_age: timedelta
+) -> str:
+    for field in ("trip_update", "vehicle"):
+        if entity.HasField(field):
+            value = getattr(entity, field).timestamp
+            if value:
+                age = now.timestamp() - value
+                if age < 0:
+                    return "future"
+                return "stale" if age > max_age.total_seconds() else "fresh"
+    # The alert's active_period is its period of effect, not its publication timestamp.
+    return "missing_timestamp"
+
+
 REPAIRABLE = frozenset(
     {
         gtfs_realtime_pb2.TripDescriptor.SCHEDULED,
@@ -148,7 +167,5 @@ def prepare(
     message = decode(raw)
     summary = summarize(message)
     check_fresh(summary, now, max_age)
-    if not repair:
-        return RepairResult(raw, summary, 0)
-    removed = drop_start_times(message)
-    return RepairResult(message.SerializeToString(), summary, removed)
+    removed = drop_start_times(message) if repair else 0
+    return RepairResult(summary, removed, message)

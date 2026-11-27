@@ -138,9 +138,11 @@ def test_copy_that_expires_during_request_is_never_served() -> None:
 
 def test_tec_is_served_repaired_with_the_key_header() -> None:
     portal, clock = Portal(), Clock()
+    portal.body_by_operator["tec"] = _restamp(TEC_TU, clock.now)
     relay = make_relay(portal, clock)
     payload = relay.get(Operator.TEC, FeedKind.TRIP_UPDATES)
-    assert all(not e.trip_update.trip.HasField("start_time") for e in decode(payload).entity)
+    entities = decode(payload).entity
+    assert entities and all(not e.trip_update.trip.HasField("start_time") for e in entities)
     request = portal.requests[0]
     assert request.headers[KEY_HEADER] == KEY.get_secret_value()
     assert str(request.url) == feed(Operator.TEC, FeedKind.TRIP_UPDATES).url
@@ -201,6 +203,30 @@ def test_old_trip_updates_are_expired_while_alerts_are_still_usable() -> None:
     health = client.get("/health").json()["feeds"]
     assert health["tec/gtfs-rt-trip-updates"]["state"] == "stale"
     assert health["tec/gtfs-rt-trip-updates"]["age_seconds"] == 91
+
+
+def test_recent_header_does_not_refresh_old_or_undated_predictions() -> None:
+    portal, clock = Portal(), Clock()
+    payload = decode(_restamp(DELIJN_TU, clock.now))
+    payload.entity[0].trip_update.timestamp -= 91
+    payload.entity[1].trip_update.ClearField("timestamp")
+    payload.entity[2].trip_update.timestamp -= 80
+    portal.body_by_operator["delijn"] = payload.SerializeToString()
+    relay = make_relay(portal, clock)
+    ids = {
+        entity.id for entity in decode(relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)).entity
+    }
+    assert ids == {entity.id for entity in payload.entity[2:]}
+    clock.now += timedelta(seconds=11)
+    ids = {
+        entity.id for entity in decode(relay.get(Operator.DE_LIJN, FeedKind.TRIP_UPDATES)).entity
+    }
+    assert ids == {entity.id for entity in payload.entity[3:]}
+    assert len(portal.requests) == 1
+    health = TestClient(create_relay_app(relay)).get("/health").json()
+    feed = health["feeds"]["delijn/gtfs-rt-trip-updates"]
+    assert feed["state"] == "degraded"
+    assert feed["entity_freshness"] == {"fresh": 2, "stale": 2, "missing_timestamp": 1, "future": 0}
 
 
 def test_stale_copy_is_never_served() -> None:
@@ -331,6 +357,9 @@ def test_empty_or_blank_key_is_rejected() -> None:
 def _restamp(data: bytes, when: datetime) -> bytes:
     message = decode(data)
     message.header.timestamp = int(when.timestamp())
+    for entity in message.entity:
+        if entity.HasField("trip_update"):
+            entity.trip_update.timestamp = message.header.timestamp
     return message.SerializeToString()
 
 

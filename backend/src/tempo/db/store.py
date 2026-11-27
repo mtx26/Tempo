@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import ColumnElement, and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -48,7 +48,7 @@ from tempo.transport.places import Coordinates, Place, PlaceDirectory
 from tempo.transport.routing import RoutingProvider
 
 
-def job_statuses(session: Session, *, include_error: bool = False) -> list[dict[str, Any]]:
+def job_statuses(session: Session) -> list[dict[str, Any]]:
     return [
         {
             "name": job.name,
@@ -58,8 +58,25 @@ def job_statuses(session: Session, *, include_error: bool = False) -> list[dict[
             "last_finished": None
             if job.last_finished_at is None
             else job.last_finished_at.isoformat(),
+            "last_success": None
+            if job.last_success_at is None
+            else job.last_success_at.isoformat(),
             "status": job.last_status,
-            **({"error": job.last_error} if include_error else {}),
+            "last_error": None
+            if job.last_error is None
+            else (
+                job.last_error.partition(":")[0]
+                if job.last_error.partition(":")[0]
+                in {
+                    "JobError",
+                    "RoutingUnavailableError",
+                    "OperationalError",
+                    "ProgrammingError",
+                    "PlanningNotConfiguredError",
+                    "PlanRejected",
+                }
+                else "error"
+            ),
         }
         for job in session.scalars(select(JobRunRow).order_by(JobRunRow.name))
     ]
@@ -93,6 +110,17 @@ def request_replan(session: Session, now: datetime) -> None:
 def replan_request(session: Session) -> dict[str, Any] | None:
     request = session.scalar(select(SettingRow.value).where(SettingRow.key == "replan_requested"))
     return request if request and request.get("value") is not None else None
+
+
+def replan_attempt(session: Session) -> dict[str, Any] | None:
+    return session.scalar(select(SettingRow.value).where(SettingRow.key == "last_replan_attempt"))
+
+
+def record_replan_attempt(session: Session, now: datetime, request: dict[str, Any] | None) -> None:
+    revision = None if request is None else request.get("revision")
+    _upsert_setting(
+        session, "last_replan_attempt", {"value": now.isoformat(), "revision": revision}
+    )
 
 
 def acknowledge_replan(session: Session, request: dict[str, Any]) -> None:
@@ -200,6 +228,12 @@ def open_questions(session: Session) -> list[NotificationRow]:
 def proposal_revision(session: Session, details: dict[str, Any]) -> str | None:
     """Digest of the state a proposal was computed on (its target block / activity). Approval
     recomputes it: a different value means the inputs changed and the proposal is obsolete."""
+    if "plan_changes" in details:
+        version = active_version(session)
+        request = replan_request(session) or {}
+        return digest(
+            f"{version.id if version else ''}|{request.get('revision', request.get('value'))}"
+        )
     parts: list[str] = []
     if "block_id" in details:
         block = session.get(StudyBlockRow, uuid.UUID(details["block_id"]))
@@ -219,9 +253,19 @@ def proposal_revision(session: Session, details: dict[str, Any]) -> str | None:
     return digest("#".join(parts)) if parts else None
 
 
+def pending_proposals(now: datetime) -> ColumnElement[bool]:
+    return and_(
+        ProposalRow.status == "pending",
+        or_(
+            ProposalRow.kind != "plan_changes",
+            ProposalRow.details["expires_at"].astext > now.astimezone(UTC).isoformat(),
+        ),
+    )
+
+
 def propose(
     session: Session, kind: str, title: str, details: dict[str, Any], dedupe_key: str
-) -> None:
+) -> uuid.UUID | None:
     stmt = insert(ProposalRow).values(
         id=uuid.uuid4(),
         kind=kind,
@@ -231,7 +275,9 @@ def propose(
         created_at=datetime.now(UTC),
         input_revision=proposal_revision(session, details),
     )
-    session.execute(stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]))
+    return session.scalar(
+        stmt.on_conflict_do_nothing(index_elements=["dedupe_key"]).returning(ProposalRow.id)
+    )
 
 
 def active_version(session: Session) -> ScheduleVersion | None:

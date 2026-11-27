@@ -44,6 +44,7 @@ from tempo.scheduler.model import (
     StudyDemand,
     TemporaryPreference,
     TrainingPreferences,
+    study_effort,
 )
 from tempo.scheduler.solver import solve
 from tempo.scheduler.validate import (
@@ -980,6 +981,9 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
     result = replace(
         result,
         blocks=blocks,
+        study_effort=study_effort(problem.demands, blocks)
+        if blocks != result.blocks
+        else result.study_effort,
         activities=activities,
         unplaced=unplaced,
         # Work held for a pending proposal is not in the published plan: not complete.
@@ -1030,6 +1034,7 @@ def run_planning(data: PlanningInput, routing: RoutingProvider) -> PlanningOutco
         outcome.status = OutcomeStatus.INVALID
     elif (
         outcome.unplanned_minutes
+        or outcome.deadline_misses
         or outcome.unplaced_activities
         or outcome.unconfirmed_journeys
         or outcome.questions
@@ -1241,9 +1246,9 @@ def _deadline_capacity(
         since = max(problem.horizon.start, demand.not_before or problem.horizon.start, key=utc)
         until = min(problem.horizon.end, demand.target, key=utc)
         fixed_minutes = sum(
-            int(b.duration.total_seconds() // 60)
+            max(0, int((min(utc(b.end), utc(demand.target)) - utc(b.start)).total_seconds() // 60))
             for b in problem.fixed_blocks
-            if b.task_id == task_id and utc(b.end) <= utc(demand.target)
+            if b.task_id == task_id
         )
         free = free_minutes(problem.availability, taken, until, since)
         upper_bound = free_minutes(problem.availability, fixed, until, since) + fixed_minutes
@@ -1258,4 +1263,12 @@ def _deadline_capacity(
             "free_minutes_before_deadline": free,
             "fixed_minutes_before_deadline": fixed_minutes,
             "minimum_missing_minutes": max(0, demand.remaining_minutes - upper_bound),
+            "capacity_upper_bound_minutes": upper_bound,
+            "uncovered_at_deadline_minutes": max(
+                0,
+                demand.remaining_minutes
+                - (outcome.result.study_effort[task_id].before_deadline_minutes or 0),
+            )
+            if outcome.result is not None and task_id in outcome.result.study_effort
+            else demand.remaining_minutes,
         }

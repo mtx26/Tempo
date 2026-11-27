@@ -4,8 +4,7 @@
 # version in /input/READY, or when the MOTIS configuration changed (MOTIS reads the configuration
 # copied at import time, e.g. enabling geocoding needs a new import). No Docker socket needed.
 #
-#   build   : motis import -> /data/build-<version>-<config hash>; success requires exit 0 and
-#             tt.bin
+#   build   : import the immutable snapshot, start an isolated server and check routing
 #   switch  : atomic symlink rename current -> build-<version>, then server restart (~1-2 min)
 #   failure : the current graph keeps serving; the version is recorded in /data/FAILED and not
 #             retried until a newer version appears; import log kept in /data/import-<v>.log
@@ -17,6 +16,7 @@ CONFIG="${CONFIG:-/config/config.yml}"
 MOTIS="${MOTIS:-/opt/motis/motis}"
 CHECK_SECONDS="${CHECK_SECONDS:-300}"
 PID=""
+PROBE_PID=""
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor: $*"; }
 
@@ -54,23 +54,89 @@ build() {
   cfg="$(config_hash)"
   name="build-$version-$cfg"
   dir="$DATA/$name"
+  snapshot="$INPUT/snapshots/$version"
   [ "$name" = "$(readlink "$DATA/current" 2>/dev/null || echo "")" ] && return 1  # never the live graph
   rm -rf -- "$dir"
-  log "importing version $version (configuration $cfg)"
-  if "$MOTIS" import -c "$CONFIG" -d "$dir" > "$DATA/import-$version.log" 2>&1 && [ -f "$dir/tt.bin" ]; then
+  report="$DATA/import-$version.log"
+  tags="$(sed -n 's|^      path: /input/\([a-z]*\)\.gtfs\.zip$|\1|p' "$CONFIG")"
+  if [ ! -s "$snapshot/osm.pbf" ] || [ -z "$tags" ]; then
+    log "missing OSM input or GTFS datasets for $version"
+    return 1
+  fi
+  for tag in $tags; do
+    if [ ! -s "$snapshot/$tag.gtfs.zip" ]; then
+      log "missing $tag GTFS in snapshot $version"
+      return 1
+    fi
+  done
+  candidate_config="$DATA/candidate.yml"
+  sed "s|/input/|$snapshot/|g" "$CONFIG" > "$candidate_config"
+  log "importing snapshot $version (configuration $cfg)"
+  if "$MOTIS" import -c "$candidate_config" -d "$dir" > "$report" 2>&1 &&
+    [ -s "$dir/tt.bin" ] && check_candidate "$dir" "$tags" >> "$report" 2>&1; then
     echo "$version" > "$dir/.version"
     echo "$cfg" > "$dir/.config"
-    ln -sfn "$name" "$DATA/current.new"
-    mv -T "$DATA/current.new" "$DATA/current"
-    rm -f "$DATA/FAILED"
-    log "switched to version $version (configuration $cfg)"
-    prune
     return 0
   fi
-  log "import of version $version FAILED; keeping the current graph"
+  log "snapshot $version import or candidate check failed; see $report"
   echo "$version-$cfg" > "$DATA/FAILED"
   rm -rf -- "$dir"
   return 1
+}
+
+wait_for_health() {
+  for attempt in $(seq 1 60); do
+    kill -0 "$2" 2>/dev/null || return 1
+    if health="$(curl -fsS --max-time 2 "$1/api/v1/health" 2>/dev/null)" &&
+      [ -n "$health" ] && printf '%s\n' "$health" |
+      jq -e '(.rt | type == "boolean") and (.gbfs | type == "boolean")' >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+check_candidate() {
+  candidate="$1"
+  # The MOTIS server reads its imported config. Probe on loopback alongside the active server.
+  cp "$candidate/config.yml" "$candidate/config.production.yml" || return 1
+  sed -e '/^  host:/d' -e 's/^  port: .*$/  host: 127.0.0.1\n  port: 18081/' \
+    "$candidate/config.production.yml" > "$candidate/config.yml"
+  "$MOTIS" server -d "$candidate" &
+  PROBE_PID=$!
+  probe=http://127.0.0.1:18081
+  tomorrow="$(date -u -d tomorrow +%Y-%m-%d)T10:00:00Z"
+  ok=false
+  if wait_for_health "$probe" "$PROBE_PID" &&
+    map="$(curl -fsS --max-time 15 "$probe/api/v1/map/initial")" &&
+    [ -n "$map" ] && printf '%s\n' "$map" |
+      jq -e '.serverConfig.hasStreetRouting == true' >/dev/null &&
+    route="$(curl -fsS --max-time 15 \
+      "$probe/api/v6/plan?fromPlace=50.8363,4.3366&toPlace=50.8454,4.3571&time=$tomorrow&transitModes=RAIL&realtimeMode=OFF")" &&
+    [ -n "$route" ] && printf '%s\n' "$route" |
+      jq -e 'any(.itineraries[].legs[]; (.tripId // "") | contains("_sncb_"))' >/dev/null; then
+    ok=true
+    if stops="$(curl -fsS --max-time 15 "$probe/api/v6/map/stops?min=50.81,4.29&max=50.92,4.48")" &&
+      [ -n "$stops" ]; then
+      for tag in $2; do
+        if ! printf '%s' "$stops" |
+          jq -e --arg tag "${tag}_" 'any(.[]; .stopId | startswith($tag))' >/dev/null; then
+          log "candidate has no reference stops for $tag"
+          ok=false
+        fi
+      done
+    else
+      ok=false
+    fi
+  else
+    log "candidate MOTIS failed health, street routing or the reference train journey"
+  fi
+  kill -TERM "$PROBE_PID" 2>/dev/null || :
+  wait "$PROBE_PID" 2>/dev/null || :
+  PROBE_PID=""
+  mv -f "$candidate/config.production.yml" "$candidate/config.yml" || return 1
+  [ "$ok" = true ]
 }
 
 start_server() {
@@ -87,18 +153,45 @@ stop_server() {
   PID=""
 }
 
-trap 'log "stopping"; stop_server; exit 0' TERM INT
+activate() {
+  old="$(readlink "$DATA/current" 2>/dev/null || echo "")"
+  stop_server
+  if ! (ln -sfn "$name" "$DATA/current.new" && mv -T "$DATA/current.new" "$DATA/current"); then
+    [ -z "$old" ] || start_server
+    return 1
+  fi
+  start_server
+  if wait_for_health http://127.0.0.1:8080 "$PID"; then
+    rm -f "$DATA/FAILED"
+    log "switched to $name"
+    prune
+    return 0
+  fi
+  log "live start failed for $name; restoring $old"
+  stop_server
+  echo "$version-$cfg" > "$DATA/FAILED"
+  if [ -n "$old" ]; then
+    ln -sfn "$old" "$DATA/current.new" && mv -T "$DATA/current.new" "$DATA/current"
+    start_server
+  else
+    rm -f "$DATA/current"
+  fi
+  return 1
+}
+
+trap 'log "stopping"; [ -z "$PROBE_PID" ] || kill -TERM "$PROBE_PID" 2>/dev/null; stop_server; exit 0' TERM INT
 
 while [ ! -e "$DATA/current" ]; do
   ready="$(read_file "$INPUT/READY")"
-  if [ -n "$ready" ] && [ "$ready-$(config_hash)" != "$(read_file "$DATA/FAILED")" ] && build "$ready"; then
+  if [ -n "$ready" ] && [ "$ready-$(config_hash)" != "$(read_file "$DATA/FAILED")" ] &&
+    build "$ready" && activate; then
     break
   fi
   log "waiting for valid routing inputs ($INPUT/READY)"
   sleep "$CHECK_SECONDS" & wait $!
 done
 
-start_server
+[ -n "$PID" ] || start_server
 while true; do
   sleep "$CHECK_SECONDS" & wait $!
   if ! kill -0 "$PID" 2>/dev/null; then
@@ -111,9 +204,6 @@ while true; do
   wanted="$ready-$(config_hash)"
   failed="$(read_file "$DATA/FAILED")"
   if [ -n "$ready" ] && [ "$wanted" != "$current" ] && [ "$wanted" != "$failed" ]; then
-    if build "$ready"; then
-      stop_server
-      start_server
-    fi
+    if build "$ready"; then activate || :; fi
   fi
 done

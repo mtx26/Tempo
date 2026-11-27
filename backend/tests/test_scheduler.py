@@ -109,6 +109,32 @@ def test_blocks_are_90_minutes_with_one_shorter_remainder() -> None:
     assert lengths == [30, 90, 90]
 
 
+def test_late_locked_effort_is_reserved_but_does_not_meet_a_strict_deadline() -> None:
+    locked = PlannedBlock("a", "maths", at(7, 11), at(7, 12), locked=True)
+    result = run(
+        problem(
+            fixed_blocks=[locked],
+            demands=[
+                StudyDemand("a", "maths", 60, at(7, 10), TargetKind.HARD, completed_minutes=15)
+            ],
+        )
+    )
+    assert result.blocks == [locked]
+    assert result.status is PlanStatus.PARTIAL
+    assert result.hard_deadline_misses == ["a"]
+    effort = result.study_effort["a"]
+    assert (
+        effort.reserved_minutes,
+        effort.before_deadline_minutes,
+        effort.after_deadline_minutes,
+    ) == (60, 0, 60)
+    assert (effort.remaining_minutes, effort.unplanned_minutes, effort.completed_minutes) == (
+        60,
+        0,
+        15,
+    )
+
+
 def test_blocks_stay_in_availability_and_outside_busy_time() -> None:
     busy = [Interval(at(7, 9), at(7, 18))]
     p = problem(
