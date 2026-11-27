@@ -104,8 +104,9 @@ def test_diagnostics_distinguishes_upstream_state_and_redacts_backend_details(
         lambda **kw: client(**kw, transport=httpx2.MockTransport(health)),
     )
     role = f"tempo_diag_{uuid.uuid4().hex[:10]}"
+    password = uuid.uuid4().hex
     with engine.begin() as conn:
-        conn.execute(text(f"CREATE ROLE {role} LOGIN"))
+        conn.execute(text(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'"))
         conn.execute(text(f"GRANT SELECT ON job_run, app_setting TO {role}"))
         with Session(bind=conn) as session:
             session.add(
@@ -119,7 +120,7 @@ def test_diagnostics_distinguishes_upstream_state_and_redacts_backend_details(
                 )
             )
             session.flush()
-    restricted = make_url(database_url).set(username=role, password=None)
+    restricted = make_url(database_url).set(username=role, password=password)
     app = create_app(
         Settings(
             api_token=TOKEN,
